@@ -1,11 +1,607 @@
 \chapter{AMMs and Liquidity Systems}
 
-\section{Constant Product, Stable-Swap, and Concentrated Liquidity Models}
+\section{Purpose}
 
-\section{Slippage, Price Impact, Fees, and Liquidity Depth}
+\begin{principlebox}
+An automated market maker is not just a swap function. It is a financial state machine whose reserves, liquidity positions, pricing rule, fee accounting, oracle observations, and ordering assumptions define who can trade, at what price, who bears loss, and which downstream protocols can be misled.
+\end{principlebox}
 
-\section{Pool Accounting, LP Shares, Fee Accrual, and Position Accounting}
+Part~IV taught how public contracts and programs fail at the level of entry points, authority, assets, external control flow, arithmetic, upgrades, liveness, and delegated accounts. Part~V moves up one layer. The question is no longer only whether a function is implemented correctly. The question is whether a protocol mechanism remains safe under adversarial liquidity, ordering, pricing, leverage, governance, and user behavior.
 
-\section{TWAPs, Manipulation Windows, Low-Liquidity Risk, and Toxic Flow}
+AMMs are the right place to begin because they compress many of DeFi's core security problems into one mechanism. A pool holds assets. A pricing rule maps pool state to execution price. Traders change state. Liquidity providers hold residual claims. Arbitrageurs connect pool price to external markets. Searchers exploit ordering. Other protocols may read the pool as a price source. Governance or factory configuration may change fees, assets, hooks, or parameters.
 
-\section{AMM Invariants and Failure Cases}
+A weak review says, ``This pool uses \(x y = k\).'' A useful review asks:
+
+\begin{codeblock}
+amm_review:
+    what state defines the pool?
+    which function determines execution price?
+    which invariant must hold after a swap, mint, burn, or fee update?
+    whose assets are held, and what claim represents them?
+    how are balances, reserves, liquidity, and accounting variables synchronized?
+    who can initialize the pool price?
+    how can a transaction be ordered, sandwiched, delayed, or routed differently?
+    can the pool be used as an oracle, and over what window?
+    what happens under low liquidity, concentrated liquidity, stale observations,
+    nonstandard assets, fee changes, and extreme imbalance?
+\end{codeblock}
+
+This chapter is not a tour of every AMM design. It gives the security method. Uniswap v2 anchors the constant-product model because its core design is simple and explicit. Uniswap v3 introduces concentrated liquidity and oracle observations. Balancer generalizes pool weights. Curve and stable-swap designs show why correlated assets need different curves. The goal is to teach what a reviewer must extract from any liquidity mechanism: state, invariant, execution rule, claims, observation, and failure modes.
+
+\section{AMMs as Protocol State Machines}
+
+An AMM replaces an order book with a deterministic rule over pool state. There may still be off-chain routing, searchers, aggregators, builders, and private order flow, but the pool itself exposes state transitions. A trader proposes an input. The pool checks whether the resulting state satisfies its rule after fees and accounting. If it does, the transition is accepted. If it does not, the transition reverts or is rejected.
+
+\subsection{Reserves, Liquidity, Price, and Claims}
+
+The minimum AMM state includes assets under custody and a rule that prices trades against them. In a simple two-asset constant-product pool, the important state is:
+
+\begin{codeblock}
+constant_product_pool_state:
+    token_x
+    token_y
+    reserve_x
+    reserve_y
+    total_lp_supply
+    lp_balance[provider]
+    fee_parameters
+    cumulative_price_observations
+\end{codeblock}
+
+That simple list hides several distinctions that matter in real reviews.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.34\textwidth}X@{}}
+\toprule
+Concept & What it means & Security question \\
+\midrule
+Balance & Actual token balance held by the pool address or account & Can direct transfers, fee-on-transfer behavior, rebases, or failed transfers make balance differ from accounting state? \\
+Reserve & Cached amount used by the pricing and oracle logic & When is it updated, and can stale or manipulated reserve state affect swaps or observations? \\
+Liquidity & Capacity supplied to the price curve & Is liquidity global, weighted, stable-swap amplified, or active only inside a price range? \\
+LP claim & Provider's claim on pool assets and fees & Is the claim fungible LP supply, a position NFT, shares, or accounting state? \\
+Price & Marginal or execution price implied by state and trade size & Is the consuming contract using spot price, quoted price, execution price, TWAP, or external fair value? \\
+\bottomrule
+\end{tabularx}
+\caption{AMM review begins by separating balances, reserves, liquidity, claims, and prices.}
+\end{table}
+
+Uniswap v2's whitepaper explicitly separates core pool custody from periphery pricing. The pair contract enforces that the invariant is satisfied after the trade, while routers and callers compute prices and slippage constraints outside the core.\footnote{\href{https://app.uniswap.org/whitepaper.pdf}{Adams, Zinsmeister, and Robinson, ``Uniswap v2 Core,'' 2020.} See also \href{https://developers.uniswap.org/docs/protocols/v2/concepts/pricing}{Uniswap v2 pricing documentation}.} That separation is security-relevant. The core protects pool solvency according to its invariant. It does not protect the trader from accepting a terrible price. Trader protection lives in parameters such as minimum output, maximum input, deadline, route choice, and external fair-price checks.
+
+The state machine view prevents a common mistake. A pool can be internally valid while an integrating protocol is unsafe. A lending market that accepts a pool's spot price as collateral value may be exploitable even if the AMM pool itself behaves exactly as designed. A router that omits slippage checks may execute a valid swap at an economically disastrous price. A vault that holds LP tokens may account for them incorrectly even if the pool's LP token supply is correct.
+
+\subsection{The Invariant Is a Safety Boundary, Not a Slogan}
+
+For a constant-product pool with reserves \(x\) and \(y\), the familiar invariant is:
+
+\[
+    x \cdot y = k
+\]
+
+For a swap that sends \(\Delta x\) into the pool and receives \(\Delta y\) out, ignoring fees for the moment:
+
+\[
+    (x + \Delta x)(y - \Delta y) = x y
+\]
+
+Solving for output:
+
+\[
+    \Delta y = \frac{y \Delta x}{x + \Delta x}
+\]
+
+With an input fee \(f\), only \(\Delta x(1-f)\) participates in the swap calculation:
+
+\[
+    \Delta y =
+    \frac{y \Delta x(1-f)}
+         {x + \Delta x(1-f)}
+\]
+
+The formula is not included for decoration. It teaches three security facts.
+
+First, price impact is nonlinear. Large trades move price more than small trades. The pool may be safe while the trader receives poor execution.
+
+Second, fees increase \(k\) over time when collected by the pool. LP claims and protocol fees depend on how that growth is accounted for.
+
+Third, the invariant is checked against a particular view of pool state. If a pool uses cached reserves, actual token balances, scaled balances, virtual balances, active liquidity, or rate-provider-adjusted balances, the reviewer must know which value enters the invariant.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=9mm and 8mm]
+\node[security node, text width=26mm] (state) {Pool state};
+\node[security node, right=of state, text width=25mm] (input) {Trader input};
+\node[security node, right=of input, text width=28mm] (fee) {Fee and scaling};
+\node[security node, below=of fee, text width=28mm] (candidate) {Candidate next state};
+\node[security decision, left=of candidate, text width=24mm] (check) {Invariant holds?};
+\node[security node, left=of check, text width=26mm] (commit) {Commit swap};
+\node[security node, below=of check, text width=26mm] (reject) {Reject};
+
+\draw[security arrow] (state) -- (input);
+\draw[security arrow] (input) -- (fee);
+\draw[security arrow] (fee) -- (candidate);
+\draw[security arrow] (candidate) -- (check);
+\draw[security arrow] (check) -- node[above, font=\small] {yes} (commit);
+\draw[security arrow] (check) -- node[right, font=\small] {no} (reject);
+\end{tikzpicture}
+\caption{An AMM accepts a transition when the post-state satisfies the mechanism's accounting and invariant rules.}
+\end{figure}
+
+Do not confuse an invariant formula with a complete security model. The formula does not answer who can initialize a pool, whether a token transfer was real, whether an LP claim was minted fairly, whether an oracle observation is safe to consume, or whether the transaction was sandwiched. The formula is the beginning of the review, not the conclusion.
+
+\section{Invariant Families and Their Security Meaning}
+
+Different AMMs encode different economic assumptions. A pool for volatile assets should not have the same curve as a pool for assets expected to trade near parity. A pool with passive full-range liquidity does not expose LPs the same way as a pool with concentrated ranges. A pool with arbitrary token weights has different price and loss behavior from a 50/50 pool.
+
+\subsection{Constant Product Pools}
+
+Constant-product pools are simple and robust. They work for arbitrary asset pairs because they always offer a price as long as both reserves are nonzero. The pool cannot be drained of one asset by any finite trade under the ideal formula. That property is one reason constant-function AMMs are useful primitives; Angeris and Chitra analyze constant-function market makers as mechanisms that include Uniswap, Balancer, and Curve-like designs.\footnote{\href{https://arxiv.org/abs/2003.10001}{Guillermo Angeris and Tarun Chitra, ``Improved Price Oracles: Constant Function Market Makers,'' 2020.}}
+
+The security cost is price impact and LP exposure. If external price moves, arbitrageurs trade against the pool until the pool price approaches the external price. LPs end up holding more of the underperforming asset and less of the outperforming asset. This is often called impermanent loss, but the safer term in review is loss-versus-rebalancing or adverse selection. The loss is not a bug by itself. It becomes a protocol risk when a design hides it, misaccounts it, subsidizes it incorrectly, or uses LP tokens as if they were stable collateral.
+
+\begin{workedexamplebox}[Constant Product Price Impact]
+Suppose a pool holds \(1000\) ETH and \(2{,}000{,}000\) USDC. The marginal price is roughly \(2000\) USDC per ETH. A trader sells \(100{,}000\) USDC into the pool with a \(0.30\%\) input fee.
+
+\[
+    \Delta x_{\mathrm{eff}} = 100{,}000 \cdot 0.997 = 99{,}700
+\]
+
+\[
+    \Delta y =
+    \frac{1000 \cdot 99{,}700}{2{,}000{,}000 + 99{,}700}
+    \approx 47.48 \text{ ETH}
+\]
+
+The average execution price is about \(2106\) USDC per ETH, not \(2000\). The pool was not exploited. The trader consumed liquidity and moved price. If a protocol treated the pre-trade reserve ratio as guaranteed execution price, that protocol made the mistake.
+\end{workedexamplebox}
+
+A constant-product review should inspect:
+
+\begin{itemize}
+\item whether the pool uses actual balances or cached reserves for invariant enforcement;
+\item whether minimum output or maximum input parameters are enforced by the router or caller;
+\item whether first liquidity can set an arbitrary initial price;
+\item whether fee-on-transfer, rebasing, or donation behavior can desynchronize balances and reserves;
+\item whether LP shares are minted and burned against actual proportional value;
+\item whether a consuming protocol uses spot price without a manipulation window analysis.
+\end{itemize}
+
+\subsection{Weighted and Stable-Swap Pools}
+
+Balancer-style weighted pools generalize constant product by assigning weights to tokens. Balancer's documentation describes weighted math as a generalization of constant product for pools with more than two tokens and non-50/50 weights.\footnote{\href{https://docs.balancer.fi/concepts/explore-available-balancer-pools/weighted-pool/weighted-math.html}{Balancer documentation, ``Weighted Math.''}} A simplified weighted invariant is:
+
+\[
+    V = \prod_i b_i^{w_i}
+\]
+
+where \(b_i\) is the balance of token \(i\) and \(w_i\) is its normalized weight.
+
+Weights matter. An 80/20 pool has different exposure and price sensitivity from a 50/50 pool. It may be useful for liquidity bootstrapping, governance-token liquidity, or index-like exposure. It also changes manipulation cost, LP risk, and collateral valuation. A reviewer should not treat all LP tokens as identical simply because they represent a pool claim.
+
+Stable-swap pools target assets expected to trade near the same value, such as stablecoins or wrapped forms of the same asset. Curve's StableSwap documentation describes a mechanism that combines constant-sum-like behavior near balance with constant-product-like behavior under larger imbalance.\footnote{\href{https://docs.curve.finance/developer/amm/legacy/stableswap-overview}{Curve documentation, ``Curve StableSwap Exchange: Overview.''}} Balancer stable math similarly depends on pool balances and an amplification parameter for pegged assets.\footnote{\href{https://docs.balancer.fi/concepts/explore-available-balancer-pools/stable-pool/stable-math.html}{Balancer documentation, ``Stable Math.''}}
+
+The security point is not just ``lower slippage.'' Stable-swap pools encode a belief: these assets should remain near parity. When that belief is false, the curve can concentrate risk. A pool may offer deep liquidity near the peg and then become dangerous as one asset depegs. Downstream protocols that price stable LP tokens as if all components are equally redeemable may inherit depeg risk.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.28\textwidth}>{\RaggedRight\arraybackslash}X@{}}
+\toprule
+Pool family & Design assumption & Security review focus \\
+\midrule
+Constant product & Arbitrary pair can always trade along a convex curve & Price impact, LP adverse selection, initial price, spot manipulation, reserve accounting \\
+Weighted pool & Assets have chosen portfolio weights & Weight configuration, multi-asset pricing, LP token valuation, parameter and fee controls \\
+Stable-swap pool & Assets should trade near parity & Depeg behavior, amplification parameter, imbalance, rate providers, LP token collateral risk \\
+Concentrated liquidity & Liquidity providers choose active price ranges & Active liquidity, tick crossing, out-of-range positions, fee growth, oracle observations \\
+\bottomrule
+\end{tabularx}
+\caption{The curve family tells the reviewer which economic assumption the mechanism is making.}
+\end{table}
+
+\subsection{Concentrated Liquidity and Range State}
+
+Uniswap v3's defining idea is concentrated liquidity: an LP can provide liquidity only inside a selected price range.\footnote{\href{https://app.uniswap.org/whitepaper-v3.pdf}{Adams et al., ``Uniswap v3 Core,'' 2021.}} This improves capital efficiency when liquidity is placed near the trading price. It also changes the security model.
+
+In a full-range constant-product pool, all LP liquidity participates across the entire price range. In a concentrated-liquidity pool, active liquidity depends on the current tick. When price moves outside an LP's range, that LP's position becomes entirely one asset and no longer earns fees until price returns to the range. The pool can have large total value locked but thin active liquidity near the current price if liquidity is out of range or clustered elsewhere.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=0.85cm,y=0.55cm]
+\draw[->, thick] (0,0) -- (12,0) node[right] {price};
+\draw[->, thick] (0,0) -- (0,5.2) node[above] {active liquidity};
+\draw[fill=securitygray, draw=securityblue] (1,0) rectangle (4,2.1);
+\draw[fill=securitygray, draw=securityblue] (3,0) rectangle (7,3.5);
+\draw[fill=securitygray, draw=securityblue] (6,0) rectangle (10,1.7);
+\draw[securityred, thick] (5.2,0) -- (5.2,4.7);
+\node[below] at (1,0) {\small lower ticks};
+\node[below] at (10,0) {\small upper ticks};
+\node[above, securityred] at (5.2,4.7) {\small current price};
+\node at (2.5,2.45) {\small LP A};
+\node at (5,3.85) {\small LP B};
+\node at (8,2.05) {\small LP C};
+\end{tikzpicture}
+\caption{In concentrated liquidity, only ranges covering the current price supply active liquidity.}
+\end{figure}
+
+That creates new review questions:
+
+\begin{itemize}
+\item Is the quoted liquidity active at the relevant price, or merely deposited somewhere in the pool?
+\item Can an attacker move price through a thin tick range cheaply?
+\item Are fee-growth variables updated correctly when ticks are crossed?
+\item Does the protocol value a position NFT as if it were fungible full-range liquidity?
+\item Does the oracle use tick observations and liquidity observations correctly?
+\item Can narrow liquidity be added temporarily to influence a measurement, reward, or governance metric?
+\end{itemize}
+
+Concentrated liquidity is not just ``Uniswap v2 with better capital efficiency.'' It is a different state model. A reviewer needs ticks, ranges, liquidity deltas, fee growth, position ownership, and observation history, not only reserves.
+
+\section{Execution Price, Slippage, and Ordering Exposure}
+
+An AMM swap has at least three prices in play: external fair value, quoted or expected price, and actual execution price. Security mistakes often collapse them into one number.
+
+\subsection{Price Impact Is Not Slippage}
+
+Price impact is the deterministic effect of trading size against available liquidity. Slippage is the difference between expected execution and actual execution under changing state, routing, fees, and ordering. A trader can suffer price impact without being attacked. A trader can suffer slippage because another transaction changed the pool before inclusion. A protocol can be exploited when it lets the attacker choose the state between quote and execution.
+
+\begin{definitionbox}[Execution Terms]
+\begin{itemize}
+\item \textbf{Marginal price}: the instantaneous price implied by the pool at the current state.
+\item \textbf{Average execution price}: total input divided by total output for a finite trade.
+\item \textbf{Price impact}: movement caused by the trade itself against pool liquidity.
+\item \textbf{Slippage}: realized deviation from the expected execution, including intervening state changes and ordering.
+\item \textbf{External fair price}: price from broader markets, oracle systems, or reference venues.
+\end{itemize}
+\end{definitionbox}
+
+Uniswap's v2 pricing documentation warns that it is not safe for a contract to look up current reserves and rely on them without access to an external price; a malicious actor can move price before the naive swap and reverse it afterward.\footnote{\href{https://developers.uniswap.org/docs/protocols/v2/concepts/pricing}{Uniswap v2 documentation, ``Pricing.''}} That warning is a general AMM principle. A contract that computes output from current pool reserves inside the same transaction and accepts any amount it receives is usually donating value to searchers.
+
+The minimum trader protection is not a nice-to-have:
+
+\begin{codeblock}
+swap_protection:
+    expected route
+    amount in or amount out
+    minimum output or maximum input
+    deadline
+    recipient
+    external reference price or user-approved quote
+    chain and pool identity
+\end{codeblock}
+
+These fields bind intent to execution. Without them, the pool can remain correct while the user receives a state transition they did not economically intend.
+
+\subsection{Minimum Outputs, Deadlines, Routes, and Sandwich Surface}
+
+A sandwich attack exploits ordering around an AMM trade. The attacker buys before the victim, pushes price against the victim, lets the victim execute at a worse price, then sells after the victim. Chapter~10 introduced block production and MEV. Here the same idea is tied to AMM mechanics.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=8mm and 8mm]
+\node[security node, text width=25mm] (mempool) {Victim swap visible};
+\node[security node, right=of mempool, text width=25mm] (front) {Attacker front-run};
+\node[security node, right=of front, text width=25mm] (victim) {Victim executes};
+\node[security node, right=of victim, text width=25mm] (back) {Attacker back-run};
+\node[security node, below=of victim, text width=35mm] (loss) {Victim receives worse execution within allowed slippage};
+
+\draw[security arrow] (mempool) -- (front);
+\draw[security arrow] (front) -- (victim);
+\draw[security arrow] (victim) -- (back);
+\draw[security arrow] (victim) -- (loss);
+\end{tikzpicture}
+\caption{A sandwich uses AMM price impact and ordering control to extract value from permissive execution bounds.}
+\end{figure}
+
+Slippage tolerance is a loss bound, not a magic shield. If the user sets a wide tolerance, the attacker has room to move price. If the user sets a narrow tolerance, the trade may revert under normal volatility or be griefed. Private order flow may hide intent from the public mempool, but it introduces trust in relays, builders, solvers, or private routing systems. Splitting trades may reduce price impact but can increase exposure to repeated ordering attacks. Aggregators can improve routing but add dependency on route computation and calldata integrity.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.30\textwidth}X@{}}
+\toprule
+Control & Protects against & Failure mode \\
+\midrule
+\texttt{amountOutMin} or \texttt{amountInMax} & Worse-than-approved execution & Too loose allows extraction; too tight causes reverts and griefing \\
+Deadline & Stale execution after user intent changes & Long deadlines expose users to delayed inclusion; short deadlines can fail under congestion \\
+Route binding & Unexpected pools or assets & Aggregator or router may choose pools with hidden fees, low liquidity, or malicious tokens \\
+Private submission & Public mempool sandwiches & Relay, builder, or solver trust; failed privacy; censorship or fallback leakage \\
+External price check & Pool-local manipulation & Oracle staleness, wrong market, latency, or circular dependency \\
+\bottomrule
+\end{tabularx}
+\caption{AMM execution controls are tradeoffs, not one-line mitigations.}
+\end{table}
+
+A protocol review should distinguish user-interface protection from contract-level protection. A frontend that warns about slippage is not enough if the contract accepts arbitrary minimum output. A route preview is not enough if the submitted transaction allows a different route. A quote is not enough if the quote is not bound to calldata, deadline, chain, pool, recipient, and token amounts.
+
+\section{Liquidity Accounting and LP Claims}
+
+AMMs do not only serve traders. They also issue claims to liquidity providers. Those claims may be ERC-20 LP tokens, NFT positions, accounting entries, vault shares, gauge balances, or external receipts. Many serious protocol bugs come from treating an LP claim as simpler than it is.
+
+\subsection{LP Tokens, Positions, Fee Growth, and Protocol Fees}
+
+In a simple pool, liquidity providers deposit proportional amounts of both assets and receive LP tokens. Burning LP tokens returns a proportional share of reserves. That statement is true only after many details are correct: first liquidity, minimum liquidity, share minting, fee growth, protocol fee minting, donations, and token behavior.
+
+\begin{codeblock}
+lp_claim_review:
+    how is the first price initialized?
+    how are shares minted for later deposits?
+    can donations change share price?
+    are fees added to reserves, tracked separately, or minted as protocol shares?
+    what happens if one token transfer is fee-on-transfer or rebasing?
+    can LP tokens or positions be safely used as collateral?
+    who can change protocol fee, fee recipient, amplification, hook, or pool parameter?
+\end{codeblock}
+
+Uniswap v2 includes a protocol-fee mechanism that can mint liquidity tokens to a fee recipient based on growth in \(\sqrt{k}\), rather than charging the protocol fee on every trade.\footnote{\href{https://app.uniswap.org/whitepaper.pdf}{Uniswap v2 whitepaper, Section 2.4, ``Protocol fee.''}} That design choice is efficient, but it also shows why LP accounting is subtle. Fee collection may be deferred. Share supply may change during mint or burn. The pool's apparent value may include accumulated fees that have not yet been split the way a naive integration expects.
+
+Concentrated liquidity replaces fungible LP tokens with position-specific claims. A position is defined by owner, tick range, liquidity, and fee-growth checkpoints. Two positions in the same pool can have radically different exposure. A position below range, in range, and above range are different assets. A collateral protocol that values them without range and liquidity analysis is taking hidden market risk.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.34\textwidth}X@{}}
+\toprule
+LP claim type & What the claim represents & Review risk \\
+\midrule
+Fungible LP token & Pro-rata share of a pool's reserves and accrued fees & Donation effects, fee minting, first depositor risk, reserve desync, unsafe collateral valuation \\
+Concentrated position & Liquidity inside a tick range plus fee-growth claim & Out-of-range exposure, tick accounting bugs, position valuation, active liquidity overstatement \\
+Gauge or staking receipt & Claim on LP token plus reward accounting & Double counting, reward index bugs, withdrawal delay, slashing or boost assumptions \\
+Vault share over LP assets & Strategy-managed exposure to one or more pools & Share accounting, compounding, withdrawal liquidity, stale valuation, strategy authority \\
+\bottomrule
+\end{tabularx}
+\caption{LP claims are assets with their own accounting, risk, and evidence requirements.}
+\end{table}
+
+The reviewer should separate pool solvency from LP claim valuation. A pool may correctly hold assets and enforce swaps, while an external protocol overvalues its LP token. A position may be validly owned but economically worthless under current price. A reward gauge may report high yield while the underlying LP position carries depeg or adverse-selection risk.
+
+\subsection{Balances, Reserves, Direct Transfers, and Nonstandard Assets}
+
+Chapter~22 covered token semantics. Here the same lesson becomes AMM-specific. A pool's accounting can depend on assumptions about token transfers:
+
+\begin{itemize}
+\item transfer returns true or reverts on failure;
+\item received amount equals requested amount;
+\item balance changes only through pool functions;
+\item decimals and scaling are known;
+\item balance does not rebase unexpectedly;
+\item token cannot call back in a dangerous way;
+\item asset identity cannot be spoofed through wrappers or rate providers.
+\end{itemize}
+
+Uniswap v2 caches reserves after interactions and uses cached reserves for oracle updates. Its whitepaper explains that this avoids a manipulation where someone sends assets directly to the pair before an oracle update and causes the wrong price to be accumulated over past time.\footnote{\href{https://app.uniswap.org/whitepaper.pdf}{Uniswap v2 whitepaper, Section 2.2, ``Price oracle.''}} That design detail is a security lesson: actual balance and accounting reserve are not always the same value, and choosing the wrong one can create an oracle or accounting bug.
+
+Direct transfers are not necessarily attacks. They may become donations, arbitrage opportunities, or reserve updates through functions such as \texttt{sync}. But an integrating protocol must know whether it reads actual balance, cached reserve, scaled balance, virtual balance, or rate-adjusted balance.
+
+\begin{failuremodebox}[Reserve Desynchronization]
+A pool records \(reserve_x = 1000\) and \(reserve_y = 1000\). An external actor transfers \(100\) units of \(x\) directly to the pool. The actual balance is now \(1100\), but the cached reserve may remain \(1000\) until the pool is synchronized. If an oracle, share calculation, or integration reads the wrong value for its purpose, it may accept a manipulated state.
+\end{failuremodebox}
+
+Nonstandard assets are especially dangerous in stable and weighted pools because scaling and rate assumptions are part of the invariant. A pool that supports rate-provider tokens, ERC-4626 wrappers, rebasing assets, or wrapped native assets must define exactly when rates are read, who can update providers, how stale rates are handled, and what happens when a wrapper's exchange rate changes independently of pool trades.
+
+\section{AMM Oracles and Manipulation Windows}
+
+AMMs create prices as a byproduct of trading. That does not make every AMM price safe as an oracle. A pool price is local to pool liquidity, asset composition, fees, and recent order flow. A downstream protocol must ask: what would it cost to move this price for the window the protocol observes, and how much value can be extracted if the price is wrong?
+
+\subsection{Spot Prices, TWAPs, Tick Accumulators, and Liquidity Accumulators}
+
+A spot AMM price is easy to manipulate if the attacker can trade against the pool and use the manipulated price before arbitrage restores it. The classic attack is atomic: move pool price, call the victim protocol that reads the spot price, then trade back. The AMM may lose little or nothing if arbitrage and fees are handled by the attacker. The victim protocol pays.
+
+Uniswap v2 improved oracle support by accumulating prices measured at the beginning of each block, allowing external contracts to compute time-weighted average prices over an interval.\footnote{\href{https://developers.uniswap.org/docs/protocols/v2/concepts/oracles}{Uniswap v2 documentation, ``Oracles.''}} The v2 whitepaper explains the cumulative-price method: read the accumulator at two times, subtract, and divide by elapsed time.\footnote{\href{https://app.uniswap.org/whitepaper.pdf}{Uniswap v2 whitepaper, Section 2.2, ``Price oracle.''}}
+
+\[
+    \mathrm{TWAP}_{t_1,t_2}
+    =
+    \frac{A_{t_2} - A_{t_1}}{t_2 - t_1}
+\]
+
+where \(A_t\) is a cumulative price accumulator.
+
+Uniswap v3 changes the details. It tracks tick accumulators and also exposes a time-weighted average liquidity oracle based on seconds per liquidity.\footnote{\href{https://app.uniswap.org/whitepaper-v3.pdf}{Uniswap v3 whitepaper, Section 5, ``Oracle Upgrades.''}} This matters because concentrated liquidity can make price manipulation cheaper in ranges with thin active liquidity. A price observation without liquidity context can be misleading.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.21\textwidth}>{\RaggedRight\arraybackslash}p{0.30\textwidth}X@{}}
+\toprule
+Observation & What it measures & Review question \\
+\midrule
+Spot reserve ratio & Current pool-local marginal price & Can it be manipulated inside the same transaction or block? \\
+V2 cumulative price & Time-weighted price over chosen interval & Who stores observations, how long is the window, and what value settles against it? \\
+V3 tick accumulator & Time-weighted tick, usually converted to price & Are tick math, window, cardinality, and geometric averaging understood? \\
+V3 liquidity accumulator & Time-weighted reciprocal liquidity signal & Does the consumer account for thin active liquidity or temporary liquidity games? \\
+External reference & Price from another oracle or market & Is it independent, fresh, and safe under the same stress scenario? \\
+\bottomrule
+\end{tabularx}
+\caption{AMM oracle security depends on what is observed, over what window, and against which liquidity.}
+\end{table}
+
+Chapter~29 will teach oracle systems in full. Chapter~28 only needs the AMM-specific rule: spot price is a pool state, not truth. TWAP is a manipulation-cost mechanism, not a guarantee. Liquidity depth and observation window must be sized against value at risk.
+
+\subsection{Manipulation Cost, Liquidity Depth, and Observation Windows}
+
+The cost of manipulating an AMM oracle generally increases with liquidity, fee cost, arbitrage loss, and time window. Uniswap's oracle documentation notes that manipulation cost increases with liquidity and with the period over which the price is averaged.\footnote{\href{https://developers.uniswap.org/docs/protocols/v2/concepts/oracles}{Uniswap v2 documentation, ``Oracles.''}} That statement is directionally useful, but it is not enough for a review. The reviewer must compare manipulation cost with extractable value.
+
+\begin{codeblock}
+oracle_manipulation_review:
+    price source:
+        pool, route, reserve, tick, cumulative price, external oracle
+
+    window:
+        spot, one block, N minutes, N hours, epoch, settlement period
+
+    liquidity:
+        reserves, active liquidity, depth at target price, alternative venues
+
+    attacker resources:
+        capital, flash liquidity, block/order control, private routing,
+        ability to withhold arbitrage, ability to repeat across blocks
+
+    value at risk:
+        borrow limit, liquidation gain, mint amount, redemption value,
+        governance effect, vault share price, insurance payout
+
+    conclusion:
+        manipulation cost > value at risk with margin, or unsafe
+\end{codeblock}
+
+Low liquidity is not just a trading inconvenience. It is an oracle vulnerability. A pool with little active liquidity can be moved cheaply. A newly created pool can have a meaningless initial price. A concentrated-liquidity pool may appear deep in total deposits but shallow near the relevant tick. A stable-swap pool under depeg stress may not represent fair redemption value. A pool paired against a thin or manipulated quote asset can import that manipulation into every dependent protocol.
+
+The worst designs are circular. A protocol uses its own token's AMM price to value collateral, mint stablecoins, determine borrow limits, calculate vault shares, or trigger liquidations. The attacker manipulates the pool, extracts value from the protocol, and lets arbitrage restore the pool after the victim state transition has already settled.
+
+\section{Review Method: AMM Mechanism Review}
+
+An AMM review should produce a mechanism map, not just a bug list. The reviewer should be able to explain what state the pool keeps, how each transition changes that state, what the invariant means, how traders are protected, how LPs are represented, and what downstream systems rely on the pool.
+
+\begin{artifactbox}[AMM Mechanism Review Package]
+\begin{artifactchecklist}
+\item Pool state map: assets, balances, reserves, liquidity, positions, fee variables, observations, admin parameters.
+\item Transition table: initialize, swap, add liquidity, remove liquidity, collect fees, sync, skim, parameter update.
+\item Invariant statement: formula or mechanism rule, including fees, scaling, weights, amplification, ticks, and rounding.
+\item Execution-risk analysis: slippage controls, deadlines, routes, private order flow, sandwich exposure, quote binding.
+\item LP claim analysis: share minting, burning, fee growth, position valuation, protocol fees, collateral use.
+\item Oracle analysis: spot, TWAP, observation window, liquidity depth, manipulation cost, value at risk.
+\item Asset semantics: decimals, transfer behavior, rebases, wrappers, rate providers, native token handling.
+\item Dependency graph: routers, aggregators, keepers, gauges, vaults, lending markets, oracles, governance.
+\item Findings and tests: exploit traces, boundary cases, stress scenarios, and invariant or fork tests.
+\end{artifactchecklist}
+\end{artifactbox}
+
+The transition table is especially useful:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.18\textwidth}>{\RaggedRight\arraybackslash}p{0.28\textwidth}>{\RaggedRight\arraybackslash}X@{}}
+\toprule
+Transition & State changed & Security questions \\
+\midrule
+Initialize pool & Initial reserves, price, LP supply, parameters & Can first liquidity set a malicious price? Are assets and fee tier correct? \\
+Swap & Balances, reserves, observations, fees & Is invariant enforced after fees? Are min output and deadline checked? \\
+Add liquidity & Reserves, LP supply, positions, fee checkpoints & Are shares minted proportionally? Is active range correct? Can donation distort share price? \\
+Remove liquidity & Reserves, LP supply, positions, fee claims & Are owed assets computed safely? Can callback or token behavior break accounting? \\
+Collect fees & Fee-growth state, owed tokens, protocol fee & Are fees double counted, lost, or claimable by the wrong party? \\
+Sync or update & Cached reserves, rates, observations & Can stale or manipulated balances enter the accounting or oracle? \\
+Parameter change & Fee, amplification, hook, protocol fee, admin role & Who can change economics, and are users protected by delay or notice? \\
+\bottomrule
+\end{tabularx}
+\caption{A transition table forces AMM review to cover state changes instead of only swap happy paths.}
+\end{table}
+
+Tests should match the mechanism. For constant product, test invariant preservation after swaps, fees, mint, burn, donations, and extreme amounts. For stable-swap, test imbalance, depeg, amplification, scaling, and rate-provider changes. For concentrated liquidity, test tick crossing, active liquidity, fee growth, out-of-range positions, and observation windows. For integrations, use fork tests or simulations with adversarial ordering, low liquidity, stale observations, and manipulated routes.
+
+\section{Worked Example: A Low-Liquidity Pool Used as a Swap and Price Surface}
+
+Consider a lending protocol that accepts TOKEN as collateral. The protocol does not have a mature oracle integration yet, so it reads the TOKEN/USDC AMM pool. The pool has:
+
+\begin{codeblock}
+pool_state:
+    token_x = TOKEN
+    token_y = USDC
+    reserve_token = 100,000 TOKEN
+    reserve_usdc = 100,000 USDC
+    fee = 0.30%
+
+lending_rule:
+    collateral_value = user_token_balance * spot_price_from_pool
+    max_borrow = collateral_value * 60%
+\end{codeblock}
+
+The apparent spot price is 1 USDC per TOKEN. A user deposits 50,000 TOKEN and can borrow up to 30,000 USDC. The design seems conservative because the loan-to-value ratio is only 60\%.
+
+Now give the attacker capital. The attacker first buys TOKEN from the pool with USDC, pushing the pool price upward. Using the constant-product approximation, a large USDC input can make TOKEN look much more expensive. The attacker then deposits TOKEN as collateral while the lending protocol reads the manipulated spot price. The attacker borrows USDC against inflated collateral and then reverses or abandons the pool trade depending on profitability.
+
+The AMM pool may be functioning correctly. The vulnerability is in the integration:
+
+\begin{codeblock}
+broken_assumptions:
+    spot pool price equals fair collateral value
+    100,000 / 100,000 reserves are deep enough for lending
+    one pool can value the protocol's own collateral
+    arbitrage will restore price before victim state changes
+    60% LTV protects against oracle manipulation
+\end{codeblock}
+
+A useful review computes the shape of the attack rather than merely saying ``oracle manipulation.'' It asks:
+
+\begin{itemize}
+\item How much capital moves the pool price by 20\%, 50\%, or 100\%?
+\item How long must the price remain manipulated?
+\item Does the lending protocol read spot price, TWAP, or an external oracle?
+\item Can the attacker use flash liquidity or same-transaction composition?
+\item How much can be borrowed at the manipulated price?
+\item What arbitrage loss and fees does the attacker pay?
+\item Is profit positive after restoring or abandoning the pool state?
+\end{itemize}
+
+The corrected design should not simply ``use TWAP'' as a slogan. It should define an oracle policy:
+
+\begin{codeblock}
+safer_oracle_policy:
+    use independent external oracle for primary collateral valuation
+    reject pool price if liquidity below threshold
+    use TWAP only over a window sized to value at risk
+    compare AMM price against external reference
+    cap collateral factor for thin or reflexive assets
+    pause or reduce borrowing under stale, divergent, or low-liquidity conditions
+    test manipulation cost against borrowable value
+\end{codeblock}
+
+The finding could be written as:
+
+\begin{codeblock}
+finding:
+    lending market values TOKEN collateral from manipulable AMM spot price.
+
+broken property:
+    collateral valuation should not be cheaply controllable by a borrower
+    during the same settlement window in which borrowing occurs.
+
+impact:
+    attacker can move a low-liquidity pool, deposit overvalued TOKEN,
+    borrow USDC against inflated collateral, and leave bad debt when
+    the price normalizes.
+
+evidence:
+    collateral_value reads current reserve ratio from TOKEN/USDC pool;
+    no TWAP, external reference, liquidity threshold, or divergence check;
+    pool depth is small relative to max borrowable USDC.
+
+recommendation:
+    use an independent oracle policy with liquidity thresholds, TWAP or
+    medianization sized to value at risk, divergence checks, conservative
+    collateral factors, and tests that simulate capital-bounded manipulation.
+\end{codeblock}
+
+This example also teaches why Chapter~28 comes before Chapter~29. Before a reader can review oracles generally, they must understand what an AMM price is: a local state-derived signal produced by a liquidity mechanism under adversarial trading and ordering.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why is an AMM better modeled as a financial state machine than as a swap function?
+\item What is the difference between a pool's actual token balance and its cached reserve, and why can that distinction matter?
+\item Why does invariant preservation protect the pool but not necessarily the trader or an integrating protocol?
+\item How do price impact and slippage differ?
+\item Why does concentrated liquidity change the security model compared with full-range liquidity?
+\item What makes a stable-swap pool dangerous when its assets stop behaving like close substitutes?
+\item Why is a spot AMM price usually unsafe as a collateral oracle?
+\item What should a reviewer compare when deciding whether a TWAP window is strong enough?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Choose a two-asset constant-product pool. Compute output for three trade sizes: small, medium, and large relative to reserves. For each trade, report marginal price before the trade, average execution price, price impact, and the minimum-output value a cautious caller might use.
+
+\item Build an AMM state map for a real or toy pool. Include assets, balances, reserves, liquidity representation, LP claim type, fee variables, oracle observations, router dependencies, and admin-controlled parameters. Identify which values are used for pricing, accounting, and observations.
+
+\item Review a protocol that consumes an AMM price. Estimate the value at risk and write a manipulation analysis covering pool liquidity, observation window, attacker capital, ordering control, arbitrage cost, and maximum extractable value. Conclude whether the price source is acceptable.
+
+\item Analyze an LP token or concentrated-liquidity position as collateral. Identify what the claim represents, how it is valued, what happens under imbalance or out-of-range price movement, how fees are accrued, and which assumptions would fail during a depeg or liquidity shock.
+\end{enumerate}

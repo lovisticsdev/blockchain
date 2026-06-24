@@ -633,25 +633,62 @@ Part II applies the Part I method below the application layer: how histories bec
 * 27.9 Review Method: Delegated Authority Review
 * 27.10 Worked Example: A Sponsored Session Key That Escapes Its Scope
 
+### Part IV Integrated Lab: Contract and Program Vulnerability Review
+
+* Analyze an upgradeable ERC-4626-like vault with ERC-20 deposits, queued withdrawals, admin controls, reward randomness, trusted-forwarder meta-transactions, ERC-4337 sponsorship, session keys, and a proposed V2 upgrade
+* Inspect practical evidence: vulnerable code excerpts, accounting traces, token transfer behavior, withdrawal batch traces, storage layout diff, governance payload, UserOperation payload, session permission envelope, and paymaster validation logic
+* Produce a contract and program vulnerability review package with entry-point map, privilege matrix, asset behavior profiles, external-control-flow map, unit map and rounding table, lifecycle and upgrade review, randomness-time-liveness review, delegated-authority review, exploit traces, findings memo, and negative test plan
+
 ---
 
 ## PART V - PROTOCOL APPLICATION SECURITY
 
 ### 28. AMMs and Liquidity Systems
 
-* 28.1 Constant Product, Stable-Swap, and Concentrated Liquidity Models
-* 28.2 Slippage, Price Impact, Fees, and Liquidity Depth
-* 28.3 Pool Accounting, LP Shares, Fee Accrual, and Position Accounting
-* 28.4 TWAPs, Manipulation Windows, Low-Liquidity Risk, and Toxic Flow
-* 28.5 AMM Invariants and Failure Cases
+* 28.1 Purpose
+* 28.2 AMMs as Protocol State Machines
+  * 28.2.1 Reserves, Liquidity, Price, and Claims
+  * 28.2.2 The Invariant Is a Safety Boundary, Not a Slogan
+* 28.3 Invariant Families and Their Security Meaning
+  * 28.3.1 Constant Product Pools
+  * 28.3.2 Weighted and Stable-Swap Pools
+  * 28.3.3 Concentrated Liquidity and Range State
+* 28.4 Execution Price, Slippage, and Ordering Exposure
+  * 28.4.1 Price Impact Is Not Slippage
+  * 28.4.2 Minimum Outputs, Deadlines, Routes, and Sandwich Surface
+* 28.5 Liquidity Accounting and LP Claims
+  * 28.5.1 LP Tokens, Positions, Fee Growth, and Protocol Fees
+  * 28.5.2 Balances, Reserves, Direct Transfers, and Nonstandard Assets
+* 28.6 AMM Oracles and Manipulation Windows
+  * 28.6.1 Spot Prices, TWAPs, Tick Accumulators, and Liquidity Accumulators
+  * 28.6.2 Manipulation Cost, Liquidity Depth, and Observation Windows
+* 28.7 Review Method: AMM Mechanism Review
+* 28.8 Worked Example: A Low-Liquidity Pool Used as a Swap and Price Surface
 
 ### 29. Oracles and External Data
 
-* 29.1 Oracle Types: Push, Pull, TWAP, Median, Signed, and Cross-Chain
-* 29.2 Freshness, Latency, Staleness, Heartbeats, and Deviation Thresholds
-* 29.3 Low-Liquidity Markets and Manipulated Reference Prices
-* 29.4 Sequencer Downtime, Cross-Domain Prices, and Fallback Logic
-* 29.5 Oracle Dependency Graphs, Circuit Breakers, and Recovery Modes
+* 29.1 Purpose
+* 29.2 The Oracle Boundary
+  * 29.2.1 From External Fact to Protocol State
+  * 29.2.2 The Data Supply Chain
+* 29.3 Oracle Delivery Models and Trust Assumptions
+  * 29.3.1 Push Feeds, On-Chain Aggregators, and Signed Reports
+  * 29.3.2 Pull Feeds, User-Supplied Updates, and Adversarial Selection
+  * 29.3.3 Median, Optimistic, Exchange-Rate, Reserve, and Cross-Chain Feeds
+* 29.4 Freshness, Latency, and Update Semantics
+  * 29.4.1 Rounds, Timestamps, Heartbeats, and Deviation Thresholds
+  * 29.4.2 Staleness Checks, Confidence Intervals, Decimals, and Market Hours
+* 29.5 Market Integrity and Data Methodology
+  * 29.5.1 Liquidity, Venue Concentration, Cross-Rates, and Manipulated Markets
+  * 29.5.2 Market Price, Exchange Rate, NAV, Proof of Reserve, and Wrapped Assets
+* 29.6 Chain, L2, and Cross-Domain Oracle Risk
+  * 29.6.1 Sequencer Downtime, Grace Periods, Reorgs, and Congestion
+  * 29.6.2 Bridged Assets, Source-Chain State, and Destination-Chain Assumptions
+* 29.7 Defensive Oracle Consumption
+  * 29.7.1 Bounds, Circuit Breakers, Fallbacks, Pauses, and Haircuts
+  * 29.7.2 Recovery Modes and Governance-Controlled Emergency Actions
+* 29.8 Review Method: Oracle Dependency Review
+* 29.9 Worked Example: A Lending Market with a Stale L2 Feed and Bad Fallback
 
 ### 30. Lending, Leverage, and Liquidations
 
@@ -662,7 +699,7 @@ Part II applies the Part I method below the application layer: how histories bec
 * 30.5 Socialized Losses, Protocol Recovery, and Risk Parameter Governance
 * 30.6 Lending Market Invariants and Stress Scenarios
 
-### 31. Vaults and Share Accounting
+### 31. Vaults, Strategies, and Share Accounting
 
 * 31.1 Deposits, Withdrawals, Shares, and Exchange Rates
 * 31.2 ERC-4626 and Share-Based Accounting
@@ -670,7 +707,7 @@ Part II applies the Part I method below the application layer: how histories bec
 * 31.4 Strategy Accounting, Locked Profit, Withdrawal Queues, and Liquidity Mismatch
 * 31.5 Solvency, Share-Price, and Redemption Invariants
 
-### 32. Staking, Rewards, and Restaking
+### 32. Staking, Rewards, Slashing, and Restaking
 
 * 32.1 Validator, Delegated, Liquid, and Protocol Staking Models
 * 32.2 Reward Accrual, Distribution, Claim Logic, and Emission Schedules
@@ -694,6 +731,12 @@ Part II applies the Part I method below the application layer: how histories bec
 * 34.4 Emergency Powers, Vetoes, Guardians, and Admin Backdoors
 * 34.5 Emissions, Vesting, Unlocks, Liquidity Mining, and Reflexive Yield
 * 34.6 Governance Tokens as Control Surfaces and Incentive Failure as Security Failure
+
+### Part V Integrated Lab: Protocol Risk Review
+
+* Analyze a DeFi protocol composed of AMM liquidity, oracle pricing, lending, vault shares, staking rewards, stablecoin exposure, and governance controls
+* Inspect practical evidence: pool reserves, swap traces, oracle update records, liquidation scenarios, vault accounting traces, staking reward indexes, peg stress data, governance payloads, and tokenomics schedules
+* Produce a protocol risk review package with mechanism map, dependency graph, invariant catalogue, economic stress scenarios, oracle and liquidity analysis, governance-risk memo, exploitability calculations, and remediation plan
 
 ---
 
@@ -733,27 +776,35 @@ Part II applies the Part I method below the application layer: how histories bec
 * 38.5 Solver Trust, Order-Flow Privacy, Failed Settlement, and Refund Risk
 * 38.6 MEV Mitigation Across Fragmented Execution Domains
 
+### Part VI Integrated Lab: Cross-Domain System Review
+
+* Analyze a modular cross-domain application that uses a bridge, rollup settlement, sequencer assumptions, data availability, ZK verifier, intents, solvers, and cross-domain liquidity
+* Inspect practical evidence: bridge message proofs, rollup withdrawal timelines, sequencer downtime logs, DA commitments, verifier inputs, solver quotes, and failed settlement traces
+* Produce a cross-domain system review package with trust-assumption map, finality and message-flow analysis, DA and sequencer risk memo, ZK integration review, cross-domain MEV analysis, incident playbook, and residual-risk statement
+
 ---
 
-## PART VII - OPERATIONS, ASSURANCE, AND RESEARCH METHOD
+## PART VII - ASSURANCE, OPERATIONS, AND INCIDENT RESPONSE
 
-### 39. Wallet and User-Side Security
+### 39. Wallets, Signing, and Custody Operations
 
 * 39.1 Seed Phrases, Private Keys, Derivation Paths, and Backup Risk
 * 39.2 Blind Signing, Malicious dApps, and Transaction Simulation Gaps
-* 39.3 Approval Phishing, Permit Phishing, and Drainer Workflows
-* 39.4 Privacy, Metadata Leakage, Address Clustering, and User Deanonymization
-* 39.5 User Experience as a Security Boundary
+* 39.3 Approvals, Permits, Session Keys, and Drainer Workflows
+* 39.4 Multisig, MPC, Hardware, and Treasury Signing Policies
+* 39.5 Withdrawal Limits, Key Rotation, Backup, and Disaster Recovery
+* 39.6 Privacy, Metadata Leakage, Address Clustering, and User Deanonymization
+* 39.7 User Experience as a Security Boundary
 
-### 40. Off-Chain Infrastructure Security
+### 40. Off-Chain Infrastructure and Data-Pipeline Security
 
 * 40.1 RPC Trust, Rate Limits, Censorship, and Incorrect Responses
-* 40.2 Indexer Desync, Event Misinterpretation, and Backend State Bugs
+* 40.2 Indexer Desync, Event Misinterpretation, and Data-Pipeline Bugs
 * 40.3 Frontend Compromise, DNS Hijack, and Malicious Transaction Construction
 * 40.4 Backend Signers, Admin APIs, Bots, Keepers, and Automation Risk
 * 40.5 Where Centralized Infrastructure Can Break Decentralized Systems
 
-### 41. Supply Chain and Deployment Integrity
+### 41. Supply Chain, Deployment, and Release Integrity
 
 * 41.1 Package Dependencies, SDKs, Build Integrity, and Dependency Confusion
 * 41.2 CI/CD Secrets, Deployment Keys, Release Pipelines, and Environment Drift
@@ -761,46 +812,44 @@ Part II applies the Part I method below the application layer: how histories bec
 * 41.4 Frontend Builds, Wallet Connectors, CDN Risk, and Release Provenance
 * 41.5 Security Controls for Teams Shipping Blockchain Software
 
-### 42. Custody and Treasury Operations
+### 42. Security Review Workflow and Finding Discipline
 
-* 42.1 Hot, Warm, Cold, and Treasury Wallet Models
-* 42.2 Multisig Operations, MPC, HSMs, and Signing Policies
-* 42.3 Withdrawal Limits, Approval Workflows, and Human Process Controls
-* 42.4 Key Rotation, Backup, Disaster Recovery, and Insider Risk
-* 42.5 Custody Failure Modes and Operational Resilience
+* 42.1 Reading Whitepapers, Docs, Code, Deployments, and Governance History
+* 42.2 Extracting Trust Assumptions and Security Claims
+* 42.3 Mapping Actors, Assets, Entry Points, Privileged Roles, and Dependency Graphs
+* 42.4 Applying Part I's Threat-Model and Invariant Method During Review
+* 42.5 Turning Attack Hypotheses into Depth Budgets, Tests, and Findings
+* 42.6 Writing Clear Findings Without Overclaiming
+* 42.7 Remediation Review, Retesting, and Disclosure Discipline
 
-### 43. Security Review Workflow
+### 43. Testing, Fuzzing, and Simulation
 
-* 43.1 Reading Whitepapers, Docs, Code, Deployments, and Governance History
-* 43.2 Extracting Trust Assumptions and Security Claims
-* 43.3 Mapping Actors, Assets, Entry Points, Privileged Roles, and Dependency Graphs
-* 43.4 Applying Part I's Threat-Model and Invariant Method During Review
-* 43.5 Turning Attack Hypotheses into Depth Budgets, Tests, and Findings
-* 43.6 Writing Clear Findings Without Overclaiming
-* 43.7 Remediation Review, Retesting, and Disclosure Discipline
+* 43.1 Unit Tests, Integration Tests, Property Tests, and Scenario Tests
+* 43.2 Fuzzing, Invariant Testing, Mainnet Forking, and Stateful Simulation
+* 43.3 Differential Testing Against Models, Reference Implementations, and Competing Clients
+* 43.4 Static Analysis, Symbolic Execution, and Tool-Assisted Review
+* 43.5 Multi-VM Testing Workflows for EVM, Solana, Move, and CosmWasm
+* 43.6 Tool Output Triage and False-Confidence Avoidance
 
-### 44. Testing, Fuzzing, and Simulation
+### 44. Specification and Formal Verification
 
-* 44.1 Unit Tests, Integration Tests, Property Tests, and Scenario Tests
-* 44.2 Fuzzing, Invariant Testing, Mainnet Forking, and Stateful Simulation
-* 44.3 Differential Testing Against Models, Reference Implementations, and Competing Clients
-* 44.4 Static Analysis, Symbolic Execution, and Tool-Assisted Review
-* 44.5 Multi-VM Testing Workflows for EVM, Solana, Move, and CosmWasm
-* 44.6 Tool Output Triage and False-Confidence Avoidance
+* 44.1 Specifications, Properties, and Proof Obligations
+* 44.2 What Formal Verification Can Prove
+* 44.3 What Formal Verification Cannot Prove
+* 44.4 Bad Specifications, Missing Assumptions, and Model Gaps
+* 44.5 Combining Formal Methods with Testing, Review, and Economic Reasoning
 
-### 45. Specification and Formal Verification
+### 45. Monitoring, Incidents, and Reporting
 
-* 45.1 Specifications, Properties, and Proof Obligations
-* 45.2 What Formal Verification Can Prove
-* 45.3 What Formal Verification Cannot Prove
-* 45.4 Bad Specifications, Missing Assumptions, and Model Gaps
-* 45.5 Combining Formal Methods with Testing, Review, and Economic Reasoning
+* 45.1 Observability for Blocks, Peers, Validators, Finality, Mempools, and Protocol State
+* 45.2 Detecting Reorgs, Missed Slots, Halts, Forks, Censorship, and Oracle Failure
+* 45.3 Reconstructing Exploit Timelines and Protocol Incidents from Public Data
+* 45.4 Root Cause, Exploit Mechanism, Preconditions, and Missed Invariants
+* 45.5 Severity, Exploitability, Funds at Risk, and Blast Radius
+* 45.6 Postmortems, Remediation, Retesting, and Long-Term Learning
 
-### 46. Monitoring, Incidents, and Reporting
+### Part VII Integrated Lab: End-to-End Security Review
 
-* 46.1 Observability for Blocks, Peers, Validators, Finality, Mempools, and Protocol State
-* 46.2 Detecting Reorgs, Missed Slots, Halts, Forks, Censorship, and Oracle Failure
-* 46.3 Reconstructing Exploit Timelines and Protocol Incidents from Public Data
-* 46.4 Root Cause, Exploit Mechanism, Preconditions, and Missed Invariants
-* 46.5 Severity, Exploitability, Funds at Risk, and Blast Radius
-* 46.6 Postmortems, Remediation, Retesting, and Long-Term Learning
+* Analyze a mature protocol from documentation, code, deployments, dependency manifests, signing operations, infrastructure, monitors, tests, and incident records
+* Inspect practical evidence: signer policies, deployment manifests, frontend artifacts, RPC/indexer records, test outputs, formal specifications, monitoring alerts, incident timeline, remediation patches, and disclosure notes
+* Produce an end-to-end security review package with scope memo, threat model, finding set, test plan, operational risk review, supply-chain review, monitoring and incident plan, and remediation-retesting report

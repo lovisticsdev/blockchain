@@ -1,11 +1,724 @@
 \chapter{Oracles and External Data}
 
-\section{Oracle Types: Push, Pull, TWAP, Median, Signed, and Cross-Chain}
+\section{Purpose}
 
-\section{Freshness, Latency, Staleness, Heartbeats, and Deviation Thresholds}
+\begin{principlebox}
+An oracle is not a magic bridge from truth to a contract. It is a dependency pipeline that turns external observations, signed reports, market prices, redemption rates, proofs, assertions, or cross-domain state into protocol decisions. The security question is not only whether the oracle is reputable. The question is whether the consuming protocol understands what the oracle value means, when it was produced, how it can fail, and what state transitions depend on it.
+\end{principlebox}
 
-\section{Low-Liquidity Markets and Manipulated Reference Prices}
+Chapter~28 showed that an AMM price is a local state-derived signal, not universal truth. This chapter generalizes that lesson. Many protocol decisions depend on external data: collateral prices, liquidation thresholds, redemption rates, reserve attestations, equity prices, sequencer status, bridge state, insurance outcomes, sports results, governance snapshots, volatility estimates, and interest-rate curves.
 
-\section{Sequencer Downtime, Cross-Domain Prices, and Fallback Logic}
+The weak review says, ``The protocol uses an oracle.'' The useful review asks:
 
-\section{Oracle Dependency Graphs, Circuit Breakers, and Recovery Modes}
+\begin{codeblock}
+oracle_review:
+    what fact does the protocol need?
+    what value does the oracle actually report?
+    who observes the source data?
+    how is the value aggregated, signed, delayed, disputed, or relayed?
+    which chain and contract stores or verifies the value?
+    which timestamp, round, confidence, source chain, and market does it represent?
+    how fresh must it be for this protocol decision?
+    how much value moves if the value is wrong?
+    what happens if the value is stale, missing, delayed, divergent, or manipulated?
+    what fallback is used, and can the fallback be worse than reverting?
+\end{codeblock}
+
+The chapter is deliberately not organized as a list of oracle products. Chainlink, Pyth, Maker, UMA, AMM TWAPs, RedStone-style pull feeds, reserve feeds, and cross-chain messages are examples of broader patterns. The portable skill is to extract the data supply chain and the consuming protocol's safety obligations.
+
+\section{The Oracle Boundary}
+
+An oracle boundary exists wherever a blockchain system acts on information that did not originate from the chain's own deterministic state transition. The boundary may be obvious, such as a price feed. It may be hidden, such as an off-chain keeper deciding which liquidation to submit, a governance process selecting risk parameters, a bridge relaying source-chain state, or a rate provider reporting an exchange rate for a yield-bearing asset.
+
+\subsection{From External Fact to Protocol State}
+
+A protocol rarely needs ``data'' in the abstract. It needs a decision input. A lending market needs collateral value. A perpetual exchange needs a settlement index. A vault needs an asset price or exchange rate. A stablecoin needs reserve or redemption information. A bridge needs evidence of a source-chain event. An insurance protocol needs an outcome.
+
+The first review step is to separate the world, the oracle value, and the protocol decision:
+
+\begin{codeblock}
+oracle_boundary:
+    external reality:
+        ETH traded near 3500 USD across several venues at time t
+
+    oracle value:
+        ETH/USD answer = 3500e8
+        updatedAt = t_report
+        decimals = 8
+        source methodology = market price feed
+
+    protocol decision:
+        account health > liquidation threshold
+        borrower may borrow more USDC
+        liquidator may seize collateral
+\end{codeblock}
+
+Those are not the same thing. The market may move before the feed updates. The reported price may be an aggregate from selected venues, not every venue. The feed may update only after a deviation threshold or heartbeat. A pull oracle update may be chosen by the transaction caller within permitted bounds. A cross-chain rate may represent source-chain state at a prior time. A proof-of-reserve feed may report assets held somewhere, not whether users can redeem them quickly.
+
+\begin{definitionbox}[Oracle Value]
+An oracle value is a protocol input with provenance, methodology, timing, precision, and failure behavior. It is not raw truth. A secure integration must define what the value means and what decisions are allowed to depend on it.
+\end{definitionbox}
+
+This distinction matters because many oracle exploits are not failures of the feed provider. They are failures of consumption. A contract reads the wrong feed address. A protocol ignores staleness. A lending market treats a market price as a guaranteed redemption value. A derivative settles against a value that is too delayed for its trading model. A liquidation engine keeps running after an L2 sequencer outage. A fallback switches from a robust feed to a manipulable AMM spot price.
+
+\subsection{The Data Supply Chain}
+
+Every oracle has a supply chain. Even a simple on-chain price read is downstream of market venues, data providers, reporters, aggregation, transmission, storage, and consumer code.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=8mm and 9mm]
+\node[security node, text width=25mm] (market) {Market or external source};
+\node[security node, right=of market, text width=24mm] (provider) {Data provider};
+\node[security node, right=of provider, text width=24mm] (reporter) {Reporter or node};
+\node[security node, below=of reporter, text width=26mm] (aggregate) {Aggregation or signed report};
+\node[security node, left=of aggregate, text width=25mm] (feed) {On-chain feed or verifier};
+\node[security node, left=of feed, text width=25mm] (consumer) {Consumer protocol};
+
+\draw[security arrow] (market) -- (provider);
+\draw[security arrow] (provider) -- (reporter);
+\draw[security arrow] (reporter) -- (aggregate);
+\draw[security arrow] (aggregate) -- (feed);
+\draw[security arrow] (feed) -- (consumer);
+\end{tikzpicture}
+\caption{Oracle review follows the data path from source observation to protocol decision.}
+\end{figure}
+
+The reviewer should identify each role:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.18\textwidth}>{\RaggedRight\arraybackslash}p{0.27\textwidth}X@{}}
+\toprule
+Layer & Security role & Review focus \\
+\midrule
+Source market or fact & The thing being measured & Liquidity, observability, ambiguity, and relevance to the protocol decision. \\
+Data provider & Collects or computes source observations & Venue concentration, API dependency, market hours, and single source risk. \\
+Reporter or oracle node & Submits or signs observations & Reporter incentives, corruption, censorship, delay, and slashing. \\
+Aggregator or verifier & Combines reports or checks signatures/proofs & Threshold, median, quorum, dispute, and verification rules. \\
+Feed contract & Stores or exposes the result on-chain & Answer, timestamp, round, confidence, source chain, and validity fields. \\
+Consumer protocol & Turns the value into a state transition & Freshness, bounds, fallback, pause, haircut, and recovery rules. \\
+\bottomrule
+\end{tabularx}
+\caption{A feed is only one layer of the oracle dependency chain.}
+\end{table}
+
+The consumer protocol is part of the oracle system. If the consuming contract ignores the timestamp, uses the wrong decimals, accepts a negative price, fails open to a bad fallback, or lets an attacker choose an old pull update, the oracle integration is broken even if the oracle network performed as designed.
+
+\section{Oracle Delivery Models and Trust Assumptions}
+
+Oracle delivery models differ in who updates the chain, when the value appears, what proof is checked, who pays, and who can choose the update used by a transaction. The labels ``push,'' ``pull,'' ``median,'' and ``optimistic'' are useful only if they lead to specific security questions.
+
+\subsection{Push Feeds, On-Chain Aggregators, and Signed Reports}
+
+A push feed stores updated data on-chain before a consumer reads it. In a typical price-feed integration, a consumer contract calls a feed contract and receives fields such as answer, timestamp, and round identifier. Chainlink's documentation describes Data Feeds as on-chain feeds connected to aggregated data from independent node operators, with standard interfaces for reading values.\footnote{\href{https://docs.chain.link/data-feeds/getting-started}{Chainlink documentation, ``Consuming Data Feeds.''}}
+
+Modern Chainlink feeds commonly use Offchain Reporting. OCR nodes communicate off-chain, exchange observations, sign a report, and transmit an aggregate report on-chain. Chainlink's OCR documentation explains that the on-chain contract verifies a quorum of signatures and exposes the median value with a block timestamp and round ID.\footnote{\href{https://docs.chain.link/architecture-overview/off-chain-reporting}{Chainlink documentation, ``Offchain Reporting.''}}
+
+\begin{codeblock}
+push_feed_flow:
+    data sources are observed off-chain
+    oracle nodes produce observations
+    observations are aggregated or medianized
+    signed report is transmitted on-chain
+    feed stores answer, round, and timestamp
+    consumer reads feed during its own transaction
+\end{codeblock}
+
+Push feeds are convenient because the consumer does not need to supply update data. The latest accepted value is already on-chain. The main review questions are:
+
+\begin{itemize}
+\item What triggers an update: heartbeat, deviation threshold, manual process, or custom logic?
+\item What is the maximum acceptable age for this protocol decision?
+\item Does the feed represent a market price, exchange rate, proof of reserve, volatility value, or another methodology?
+\item Can the feed be deprecated, paused, migrated, or replaced?
+\item Does the consumer verify answer sign, decimals, timestamp, and feed identity?
+\item Does the consuming protocol behave safely if the feed stops updating?
+\end{itemize}
+
+Push does not mean always fresh. A feed may update when price moves beyond a deviation threshold or when a heartbeat period is reached. Chainlink describes aggregators as receiving updates when the deviation threshold or heartbeat threshold triggers a new aggregation round.\footnote{\href{https://docs.chain.link/architecture-overview/architecture-decentralized-model}{Chainlink documentation, ``Decentralized Data Model.''}} Quiet markets may wait for the heartbeat. Fast markets may move between updates. Congested chains may delay reporting. Source markets may be closed. The consumer must decide whether the last value is still usable.
+
+\subsection{Pull Feeds, User-Supplied Updates, and Adversarial Selection}
+
+A pull oracle does not require every value to be pushed on-chain before it is needed. Instead, a user, keeper, relayer, or application fetches signed update data and submits it with the transaction that needs the price. Pyth's documentation describes fetching price updates from Hermes and submitting them to the on-chain Pyth Price Feeds contract.\footnote{\href{https://docs.pyth.network/price-feeds/core/fetch-price-updates}{Pyth documentation, ``Fetch Price Updates.''}}
+
+\begin{codeblock}
+pull_feed_flow:
+    oracle network publishes signed price update off-chain
+    caller fetches update bytes
+    caller includes update bytes in transaction
+    oracle contract verifies update and stores or exposes price
+    consumer reads verified price in the same transaction
+\end{codeblock}
+
+Pull feeds reduce unnecessary on-chain writes and can provide low-latency updates when used correctly. They also introduce a different threat: the transaction caller may influence which valid update is supplied. Pyth's best-practices documentation calls this adversarial selection: users may choose a price update that satisfies constraints but is favorable to their transaction, functionally similar to latency.\footnote{\href{https://docs.pyth.network/price-feeds/core/best-practices}{Pyth documentation, ``Best Practices.''}}
+
+The mitigation is not merely ``check signature.'' Signature verification tells the contract that the update came from the oracle network. It does not tell the contract that the update is recent enough, precise enough, appropriate for the market, or safe for the protocol action.
+
+\begin{codeblock}
+pull_oracle_checks:
+    verify signed update data
+    require publish_time is recent enough
+    require price exponent and decimals are handled correctly
+    require confidence interval is within protocol tolerance
+    require update cannot move backward in time
+    require caller cannot choose stale-but-profitable data
+    define behavior when update fee is missing or update verification fails
+\end{codeblock}
+
+Pyth prices include a price, exponent, confidence interval, and publish time. The confidence interval is not decoration. It is a measure of uncertainty that a consumer may need to bound:
+
+\[
+    \mathrm{confidenceBps}
+    =
+    \frac{\mathrm{conf} \cdot 10000}{|\mathrm{price}|}
+\]
+
+A conservative consumer can reject prices whose relative confidence is too wide:
+
+\begin{codeblock}
+validate_pyth_like_price:
+    price = get_price_no_older_than(feed_id, max_age)
+    require price.price > 0
+    confidence_bps = price.conf * 10000 / abs(price.price)
+    require confidence_bps <= max_confidence_bps
+    scaled_price = scale(price.price, price.expo, target_decimals)
+\end{codeblock}
+
+The exact function names vary by chain and SDK. The security method does not: verify provenance, bound age, handle precision, bound uncertainty, and prevent caller-selected stale data from deciding high-value actions.
+
+\subsection{Median, Optimistic, Exchange-Rate, Reserve, and Cross-Chain Feeds}
+
+Not every oracle is a real-time market-price feed. Treating every feed as ``asset/USD price'' is a serious category error.
+
+Maker's Oracle Module historically used a Median contract and an Oracle Security Module. The OSM delays new price values before the system consumes them, creating a reaction window for governance or emergency processes.\footnote{\href{https://docs.makerdao.com/smart-contract-modules/oracle-module/oracle-security-module-osm-detailed-documentation}{MakerDAO technical documentation, ``Oracle Security Module.''}} This design deliberately trades freshness for defense. A delay can be dangerous for fast liquidations, but useful for systems that need time to respond to oracle faults.
+
+UMA's Optimistic Oracle uses a request, assertion, bond, liveness window, dispute, and Data Verification Mechanism. Proposed data is accepted if undisputed; disputed data escalates for tokenholder resolution.\footnote{\href{https://docs.uma.xyz/protocol-overview/how-does-umas-oracle-work}{UMA documentation, ``How does UMA's Oracle work?''}} UMA's documentation on bonds and liveness emphasizes that larger value at stake may require larger bonds and longer challenge windows.\footnote{\href{https://docs.uma.xyz/developers/setting-custom-bond-and-liveness-parameters}{UMA documentation, ``Setting Custom Bond and Liveness Parameters.''}}
+
+Exchange-rate feeds report internal redemption rates or protocol-specific conversion rates, not necessarily market-clearing prices. Chainlink's feed-selection documentation distinguishes exchange-rate feeds from market-price feeds and notes their usefulness for yield-bearing assets.\footnote{\href{https://docs.chain.link/data-feeds/selecting-data-feeds}{Chainlink documentation, ``Selecting Quality Data Feeds.''}} Proof-of-reserve and reserve feeds may say something about assets held by a custodian, but they do not automatically prove legal enforceability, redemption speed, asset quality, liabilities, or absence of encumbrances.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.31\textwidth}X@{}}
+\toprule
+Oracle model & What it provides & Main review risk \\
+\midrule
+Push market-price feed & On-chain answer updated by oracle network & Staleness, wrong feed, market methodology, update triggers, chain congestion \\
+Pull signed feed & Verified update supplied with transaction & Caller-selected update, staleness, confidence interval, update fee, latency games \\
+AMM TWAP & Time-weighted pool-local price & Low liquidity, manipulation window, circular dependency, active liquidity mismatch \\
+Median feed & Aggregated or medianized reporter values & Reporter set, source quality, quorum, governance or access control \\
+Optimistic oracle & Assertion accepted unless disputed & Bond size, liveness period, disputer incentives, ambiguous assertions \\
+Exchange-rate feed & Protocol redemption or conversion rate & Redemption risk, source-chain dependency, mismatch with market price \\
+Proof-of-reserve feed & Reported reserve quantity or status & Liability mismatch, stale attestations, custodian or legal risk \\
+Cross-chain feed & Value or state relayed from another domain & Source finality, bridge trust, sequencer risk, message delay, replay \\
+\bottomrule
+\end{tabularx}
+\caption{Oracle type names should lead to concrete trust and failure assumptions.}
+\end{table}
+
+The reviewer should make one sentence explicit for every feed:
+
+\begin{quote}
+This protocol uses feed \(F\) as evidence for claim \(C\), within freshness window \(W\), to authorize state transition \(T\), with value at risk \(V\), under assumptions \(A\).
+\end{quote}
+
+If that sentence cannot be written, the integration is not understood.
+
+\section{Freshness, Latency, and Update Semantics}
+
+Oracle data has time semantics. A price is not just a number. It is a number observed or reported at a time, stored at another time, read at another time, and acted on at another time. Many oracle bugs are timing bugs disguised as data bugs.
+
+\subsection{Rounds, Timestamps, Heartbeats, and Deviation Thresholds}
+
+When a consumer reads a feed, it should know at least:
+
+\begin{itemize}
+\item the feed address or identifier;
+\item the answer;
+\item the answer's decimal or exponent representation;
+\item when the answer was last updated or published;
+\item whether the answer is valid under the feed interface;
+\item what update policy determines when a new answer appears;
+\item whether the feed is active, deprecated, paused, or self-managed.
+\end{itemize}
+
+A minimum push-feed check looks like this:
+
+\begin{codeblock}
+validate_push_price:
+    (round_id, answer, started_at, updated_at, answered_in_round) =
+        feed.latestRoundData()
+
+    require answer > 0
+    require updated_at != 0
+    require block.timestamp - updated_at <= max_stale
+    scaled_answer = scale_to_protocol_decimals(answer, feed.decimals())
+\end{codeblock}
+
+The pseudocode is intentionally incomplete. A real integration must also check feed identity, chain, expected quote asset, decimals, operating status, sequencer status if on an L2, and application-specific bounds.
+
+Heartbeat and deviation rules are often misunderstood. The heartbeat is not a guarantee that the answer is fair in all market conditions. A deviation threshold is not a guarantee that the answer updates before an attacker can act. They are feed update rules. The consuming protocol still needs its own maximum staleness, risk limits, and contingency behavior.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.31\textwidth}X@{}}
+\toprule
+Field or policy & Meaning & Common failure \\
+\midrule
+Answer & Reported value & Negative, zero, wrong units, wrong quote asset, or wrong feed address \\
+Decimals or exponent & Numeric scale & Mis-scaling by powers of ten, especially in collateral and debt math \\
+\texttt{updatedAt} or publish time & When the value was updated or published & No freshness check, or freshness window too wide for value at risk \\
+Round ID & Feed update identifier & Treated as a freshness guarantee when timestamp is the relevant field \\
+Heartbeat & Time-based update trigger & Assumed to mean price cannot be stale during source or chain failure \\
+Deviation threshold & Price-move update trigger & Assumed to protect against all manipulation or fast market moves \\
+Confidence interval & Uncertainty around reported price & Ignored in high-leverage or thin-market protocols \\
+\bottomrule
+\end{tabularx}
+\caption{Oracle fields are evidence that must be interpreted in the context of the feed and protocol decision.}
+\end{table}
+
+\subsection{Staleness Checks, Confidence Intervals, Decimals, and Market Hours}
+
+Staleness is application-specific. A vault share-price update may tolerate more delay than a perpetual exchange liquidation. A liquidation engine may require stricter freshness than a slow governance parameter update. A prediction market outcome may intentionally wait through a dispute window. The stale-price threshold should be sized to the protocol action, not copied from an example contract.
+
+\begin{codeblock}
+freshness_policy:
+    slow_governance_parameter:
+        max_stale = days
+
+    vault_accounting_checkpoint:
+        max_stale = hours or less, depending on redemption rules
+
+    lending_liquidation:
+        max_stale = minutes or seconds, depending on asset volatility
+
+    high_leverage_derivative:
+        max_stale = very short, plus delayed settlement or other latency controls
+\end{codeblock}
+
+Market hours matter for non-24/7 assets. Chainlink's feed-selection documentation warns that equity, ETF, and forex feeds may have market-hour constraints and delayed answers.\footnote{\href{https://docs.chain.link/data-feeds/selecting-data-feeds}{Chainlink documentation, ``Selecting Quality Data Feeds.''}} A protocol that accepts tokenized equities as collateral cannot use a Friday close as if it were a Sunday real-time liquidation price without explicitly accepting weekend gap risk.
+
+Precision bugs are also oracle bugs. If a feed uses 8 decimals and a protocol assumes 18, collateral may be overvalued by \(10^{10}\). If a Pyth-style exponent is negative and the integration treats it as an unsigned decimal count, price scaling may break. If a feed returns a rate rather than a price, multiplying or dividing in the wrong direction can invert value.
+
+\begin{codeblock}
+oracle_numeric_review:
+    identify feed decimals or exponent
+    identify base and quote asset
+    identify whether answer is price, rate, reserve amount, or status
+    normalize to protocol accounting decimals
+    test smallest, largest, zero, negative, stale, and high-confidence-width values
+    test all collateral and debt calculations with normalized values
+\end{codeblock}
+
+Do not bury these checks in helper functions without tests. Oracle bugs often survive because the code ``looks standard,'' while the selected feed, decimals, or asset pair is not.
+
+\section{Market Integrity and Data Methodology}
+
+A technically live feed can still be the wrong feed for a protocol. Data quality depends on the thing being measured. A high-liquidity ETH/USD market price is not the same problem as a thin governance token, a bridged derivative, a liquid staking token, a yield-bearing vault share, a tokenized treasury product, or a stablecoin under redemption stress.
+
+\subsection{Liquidity, Venue Concentration, Cross-Rates, and Manipulated Markets}
+
+Chainlink's developer-responsibility documentation is explicit that developers remain responsible for market integrity and application-code risks, including manipulation, low liquidity, and data-quality behavior.\footnote{\href{https://docs.chain.link/data-feeds/developer-responsibilities}{Chainlink documentation, ``Developer Responsibilities.''}} That is the right framing for this book. An oracle network can aggregate data from sources, but it cannot make an illiquid or broken market safe for high-leverage collateral.
+
+The reviewer should inspect:
+
+\begin{itemize}
+\item trading venues used or implied by the feed methodology;
+\item liquidity distribution across venues;
+\item whether one venue dominates volume;
+\item whether the asset is newly listed, migrating, hacked, paused, or deprecating;
+\item whether price is constructed through cross-rates;
+\item whether the base or quote asset can itself depeg;
+\item whether there are market-hour, halt, or circuit-breaker conditions off-chain;
+\item whether on-chain liquidity and off-chain liquidity can diverge.
+\end{itemize}
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.24\textwidth}>{\RaggedRight\arraybackslash}p{0.31\textwidth}X@{}}
+\toprule
+Market condition & Oracle symptom & Protocol risk \\
+\midrule
+Low liquidity & Wide spreads, volatile prints, poor source quality & Borrowing, liquidation, or minting can be based on manipulable value \\
+Venue concentration & Price depends heavily on one exchange or pool & Exchange outage, manipulation, or delisting becomes protocol-wide risk \\
+Cross-rate construction & Price is derived through another pair or quote asset & Quote-asset depeg or cross-market latency can distort value \\
+Asset migration & Old and new tokens trade simultaneously & Wrong feed or stale market may price the wrong asset representation \\
+Depeg or redemption stress & Market price diverges from expected peg or exchange rate & Stable collateral, LP tokens, and wrapped assets may be overvalued \\
+Market closed & Latest price is old but not obviously invalid & Liquidations or settlement outside trading hours may be unfair or unsafe \\
+\bottomrule
+\end{tabularx}
+\caption{Oracle risk often begins in the market being measured, not in the feed contract.}
+\end{table}
+
+Chapter~28 covered AMM manipulation. The broader point is that ``market price'' is a methodology choice. If the protocol needs immediate liquidation value, it may need a market price. If it needs long-term redemption value, it may need an exchange rate plus reserve and liquidity controls. If it needs insurance settlement, it may need an assertion and dispute system. If it needs bridge safety, it may need source-chain proof and finality, not a dollar price.
+
+\subsection{Market Price, Exchange Rate, NAV, Proof of Reserve, and Wrapped Assets}
+
+Different oracle values answer different questions:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.17\textwidth}>{\RaggedRight\arraybackslash}p{0.28\textwidth}X@{}}
+\toprule
+Value type & Question answered & Question not answered \\
+\midrule
+Market price & Where does the asset trade against a quote asset? & Can holders redeem at that value under stress? \\
+Exchange rate & What does a protocol say one share or wrapper converts into? & Is the market willing to pay that value now? \\
+Net asset value & What is the reported value of underlying assets minus liabilities? & Are assets liquid, unencumbered, and redeemable on-chain? \\
+Proof of reserve & What reserve quantity or status was reported? & Are liabilities complete, legal claims enforceable, or redemption immediate? \\
+Sequencer status & Is an L2 sequencer reported up or down? & Is every application safe to resume immediately? \\
+Cross-chain state & What did a source domain or relayer attest? & Is the destination action economically safe under current conditions? \\
+\bottomrule
+\end{tabularx}
+\caption{The feed's meaning must match the protocol decision it authorizes.}
+\end{table}
+
+Wrapped and bridged assets are especially treacherous. A market price for a wrapped asset may diverge from its underlying asset. An exchange-rate feed may continue to report protocol redemption value while market liquidity prices in bridge, custodian, withdrawal, or slashing risk. A stablecoin may have a one-dollar reference value, a market value, a redemption value, and a liquidation value, and those can diverge during stress.
+
+The protocol should name which value it uses:
+
+\begin{codeblock}
+asset_pricing_policy:
+    WETH:
+        use ETH/USD market price
+
+    staked_ETH_derivative:
+        use min(market_price, exchange_rate * ETH_price) or apply haircut
+
+    bridged_USDC:
+        use market price of bridged representation, not canonical USDC,
+        unless bridge redemption risk is explicitly accepted
+
+    tokenized_treasury_share:
+        use NAV only for slow redemption; use market price or haircut
+        for liquidation-sensitive collateral
+\end{codeblock}
+
+This is where oracle design meets protocol economics. The right answer is not always ``more fresh.'' Sometimes the correct control is a haircut, supply cap, redemption delay, liquidation discount, market-hours restriction, or refusal to accept the asset as collateral.
+
+\section{Chain, L2, and Cross-Domain Oracle Risk}
+
+Oracle values live on chains, and chains have settlement, ordering, finality, and availability properties. A feed on Ethereum mainnet, Arbitrum, Solana, Sui, or an appchain does not have the same operational risk. A cross-domain feed adds at least one more consensus and message path.
+
+\subsection{Sequencer Downtime, Grace Periods, Reorgs, and Congestion}
+
+On optimistic and many general-purpose rollups, a centralized or semi-centralized sequencer may provide ordinary transaction ordering. If the sequencer is down, users may not have fair access to submit transactions through the normal path. Chainlink's L2 sequencer uptime documentation recommends using sequencer uptime feeds to detect downtime, apply a grace period, and avoid mass liquidations or unfair disruptions.\footnote{\href{https://docs.chain.link/data-feeds/l2-sequencer-feeds}{Chainlink documentation, ``L2 Sequencer Uptime Feeds.''}}
+
+The important risk is not merely stale price. It is asymmetric access. Some actors may be able to transact through L1 escape paths, private infrastructure, or privileged timing while ordinary users cannot react. A lending protocol that liquidates immediately after a sequencer comes back online can punish users who had no fair chance to add collateral or repay debt.
+
+\begin{codeblock}
+l2_oracle_consumption:
+    check sequencer status
+    if sequencer_down:
+        pause liquidations and other time-sensitive actions
+
+    if sequencer_recently_recovered:
+        enforce grace period
+
+    check price freshness after recovery
+    resume only after both access and price assumptions are restored
+\end{codeblock}
+
+The same logic applies beyond L2 sequencers. Reorgs can invalidate recently observed data. Chain congestion can delay oracle updates. Base-layer halts can freeze feeds. Appchain validators or governance can affect source-chain state. A cross-chain oracle may report a value on the destination chain that is older than it looks because source-chain finality, relayer delay, and destination inclusion all add latency.
+
+\subsection{Bridged Assets, Source-Chain State, and Destination-Chain Assumptions}
+
+Cross-domain oracle data has two questions:
+
+\begin{codeblock}
+cross_domain_oracle_questions:
+    source truth:
+        what source-chain or off-chain fact is being represented?
+
+    destination trust:
+        why should this destination-chain protocol accept it now?
+\end{codeblock}
+
+For bridged assets, the source truth may be a lock, burn, mint, reserve, withdrawal queue, validator set, or proof. The destination trust may depend on a bridge committee, light client, optimistic challenge window, multisig, data availability layer, or relayer. Chapter~35 will cover bridges deeply. Chapter~29 only needs the oracle review rule: a cross-domain price or state value inherits the source domain's finality and the message system's trust assumptions.
+
+Consider a liquid staking token bridged to an L2. A destination-chain protocol may combine:
+
+\begin{itemize}
+\item ETH/USD market price on the destination chain;
+\item LST/ETH exchange rate from the source-chain staking protocol;
+\item bridge message attesting source state;
+\item sequencer uptime status;
+\item local AMM liquidity for exit value.
+\end{itemize}
+
+This is not one oracle. It is a dependency graph. A failure in any edge can break the final collateral value. The reviewer should draw the graph before judging safety.
+
+\section{Defensive Oracle Consumption}
+
+The consuming protocol should define how it behaves when oracle data is normal, stale, divergent, unavailable, too uncertain, or outside bounds. Reverting is often safer than acting on bad data. But reverting can also freeze exits, block repayments, or trap users. The correct response depends on the transition.
+
+\subsection{Bounds, Circuit Breakers, Fallbacks, Pauses, and Haircuts}
+
+Defensive oracle consumption starts with validation:
+
+\begin{codeblock}
+validate_oracle_value:
+    require feed address is expected
+    require answer is positive and within sane absolute bounds
+    require decimals or exponent are handled correctly
+    require updated_at is recent enough
+    require confidence interval or uncertainty is acceptable
+    require sequencer and chain status are acceptable
+    require value does not diverge too far from independent reference
+\end{codeblock}
+
+Then the protocol needs action-specific behavior:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.23\textwidth}>{\RaggedRight\arraybackslash}p{0.33\textwidth}X@{}}
+\toprule
+Control & Useful for & Failure mode \\
+\midrule
+Freshness limit & Preventing stale values from authorizing current actions & Too strict can freeze protocol during benign delays; too loose can authorize bad liquidations \\
+Deviation bound & Detecting sudden jumps or divergent feeds & Can freeze during real market crashes if not paired with recovery rules \\
+Circuit breaker & Pausing dangerous actions under abnormal oracle state & Over-broad pause can trap exits or repayments \\
+Collateral haircut & Reducing value of risky or uncertain assets & Static haircut may be insufficient during depeg or bridge failure \\
+Fallback feed & Maintaining operation when primary feed fails & Fallback may be lower quality, manipulable, stale, or circular \\
+Delayed settlement & Handling latency-sensitive trades or assertions & Adds UX cost and liveness dependency \\
+Grace period & Restoring fairness after sequencer or oracle outage & Too short may still punish users; too long may block necessary liquidations \\
+Manual governance action & Handling novel failures & Governance may be slow, captured, or itself a privileged attack surface \\
+\bottomrule
+\end{tabularx}
+\caption{Oracle defenses should be tied to specific transitions, not bolted on as generic checks.}
+\end{table}
+
+Fallbacks deserve suspicion. A bad fallback can turn a safe failure into an exploit. If a primary high-quality feed is stale and the protocol falls back to a low-liquidity AMM spot price, the attacker will wait for primary failure and manipulate the fallback. If a fallback returns the last good price indefinitely, a stale price may authorize unlimited actions during a market crash. If a fallback chooses the minimum or maximum of two feeds without understanding asset semantics, it may systematically favor attackers in one direction.
+
+\begin{failuremodebox}[Unsafe Fallback]
+A lending market uses a robust push feed for ETH/USD. If the feed is stale, it falls back to a single AMM spot price. An attacker cannot manipulate the primary feed, but can wait for chain congestion, stale reporting, or feed pause, then manipulate the AMM and borrow against inflated collateral. The fallback is the vulnerability.
+\end{failuremodebox}
+
+Defensive design should specify different behavior for different actions. It may be safe to allow repayments when an oracle is stale, but unsafe to allow new borrowing. It may be safe to allow withdrawals of a user's own idle funds, but unsafe to allow liquidations. It may be safe to reduce collateral factors, but unsafe to raise them. A pause should not be one global switch unless the protocol really needs one.
+
+\subsection{Recovery Modes and Governance-Controlled Emergency Actions}
+
+Oracle recovery is a lifecycle problem. It should be designed before the incident.
+
+\begin{codeblock}
+oracle_recovery_policy:
+    normal:
+        feed is fresh, confidence acceptable, chain status normal
+        all actions enabled
+
+    degraded:
+        feed stale, confidence wide, sequencer recently recovered,
+        source market disrupted, or feed divergence detected
+        disable borrowing, liquidations, and risky mints
+        allow repayments, collateral additions, and safe exits
+
+    emergency:
+        feed compromised, source asset depegged, bridge failure,
+        governance or oracle admin suspected compromised
+        pause dangerous transitions
+        apply conservative pricing or manual settlement plan
+        publish incident criteria and restart procedure
+\end{codeblock}
+
+Maker's OSM is a useful contrast because it intentionally delays price adoption. The delay creates time for emergency action, but it also means the system consumes delayed values by design. That tradeoff can be appropriate for one protocol and wrong for another. The review should ask which side of the tradeoff the protocol needs: speed, finality, reaction time, fairness, or manipulation resistance.
+
+The most important recovery question is: who can change the oracle path? If an admin can replace a feed, change a stale threshold, switch fallback logic, disable a circuit breaker, or whitelist a reader, that authority belongs in the protocol's privilege map. Oracle configuration is not a harmless deployment detail. It can decide who is solvent, who is liquidated, who can mint, and who can withdraw.
+
+\section{Review Method: Oracle Dependency Review}
+
+An oracle review should produce a concrete dependency artifact. A reviewer should not leave with ``uses Chainlink'' or ``uses Pyth.'' They should leave with feed identities, methodologies, update rules, validation logic, value at risk, failure modes, and transition-specific controls.
+
+\begin{artifactbox}[Oracle Dependency Review Package]
+\begin{artifactchecklist}
+\item Feed inventory: feed address or identifier, chain, base asset, quote asset, decimals or exponent, methodology, provider, and deployment status.
+\item Data supply-chain map: sources, data providers, reporters, aggregation, signed reports, feed contracts, consumers, keepers, and governance roles.
+\item Consumer transition table: which protocol actions read which oracle values and what value moves if they are wrong.
+\item Freshness policy: maximum age, heartbeat or deviation assumptions, market-hour rules, sequencer checks, grace periods, and stale behavior.
+\item Numeric policy: scaling, decimals, exponent, confidence interval, bounds, negative or zero answer behavior, and precision tests.
+\item Market-integrity memo: liquidity, venue concentration, cross-rates, depeg risk, wrapped or bridged asset risk, and source-market disruption.
+\item Fallback and circuit-breaker design: primary feed, secondary feed, no-feed behavior, action-specific pause, safe actions, and recovery conditions.
+\item Exploitability analysis: attacker capital, timing, ordering, source manipulation, value at risk, and profit path.
+\item Test plan: stale feed, bad decimals, zero or negative answer, sequencer down, feed divergence, fallback manipulation, recovery restart.
+\end{artifactchecklist}
+\end{artifactbox}
+
+A useful transition table looks like this:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.19\textwidth}>{\RaggedRight\arraybackslash}p{0.27\textwidth}>{\RaggedRight\arraybackslash}X@{}}
+\toprule
+Transition & Oracle dependency & Required behavior on oracle fault \\
+\midrule
+Open borrow & Collateral price and debt price & Reject if stale, uncertain, sequencer down, or divergent \\
+Repay debt & Debt accounting, possibly price for close calculation & Usually allow if it reduces risk, unless accounting itself depends on bad data \\
+Liquidate & Collateral and debt prices, sequencer status & Require strict freshness, grace period, and non-divergence \\
+Mint stablecoin & Collateral price, peg or reserve status & Reject or haircut under stale, depeg, or reserve uncertainty \\
+Redeem share & Asset price, exchange rate, liquidity state & Use conservative valuation or delay if source is uncertain \\
+Governance parameter update & Market metrics, risk reports & Allow slower data but require provenance and review window \\
+\bottomrule
+\end{tabularx}
+\caption{Oracle controls should be defined per state transition.}
+\end{table}
+
+Testing should include adversarial timing, not just successful reads:
+
+\begin{codeblock}
+oracle_tests:
+    feed returns zero
+    feed returns negative value
+    feed decimals differ from expected
+    updated_at is older than max_stale
+    price changes sharply but feed has not updated
+    confidence interval exceeds threshold
+    sequencer status is down
+    sequencer recently recovered but grace period not elapsed
+    primary feed stale and fallback active
+    fallback is manipulated
+    source market is closed
+    wrapped asset depegs from underlying
+    governance changes feed address
+\end{codeblock}
+
+The finding should be written against the broken decision, not the feed brand:
+
+\begin{codeblock}
+weak_finding:
+    oracle is stale.
+
+strong_finding:
+    liquidation reads ETH/USD without enforcing max_stale or L2 sequencer
+    grace-period checks. During sequencer downtime or delayed reporting,
+    borrowers can be liquidated using a price they had no fair chance to
+    respond to, or attackers can act on stale collateral values.
+\end{codeblock}
+
+\section{Worked Example: A Lending Market with a Stale L2 Feed and Bad Fallback}
+
+Consider a lending market deployed on an optimistic L2. It accepts ETH collateral and USDC debt. The protocol reads an ETH/USD feed for liquidations.
+
+\begin{codeblock}
+liquidation_rule:
+    collateral_value = eth_collateral * eth_usd_price
+    debt_value = usdc_debt
+
+    if collateral_value * liquidation_threshold < debt_value:
+        liquidator may repay debt and seize collateral
+\end{codeblock}
+
+The implementation reads:
+
+\begin{codeblock}
+read_price:
+    (, answer, , updated_at, ) = eth_usd_feed.latestRoundData()
+    if block.timestamp - updated_at <= 1 hours:
+        return answer
+    else:
+        return amm_spot_price()
+\end{codeblock}
+
+There is no sequencer uptime check. There is no grace period after sequencer recovery. The fallback is a low-liquidity AMM spot price on the same L2.
+
+Now the L2 sequencer goes down during a fast ETH price move. Ordinary users cannot transact normally. Some actors can monitor L1, prepare transactions, or exploit the first blocks after recovery. The Chainlink price feed on the L2 may be stale during the outage. When the sequencer comes back, liquidations resume immediately.
+
+The first bug is fairness and timing. Borrowers had no fair access during downtime. Even if the feed is honest, liquidating immediately after recovery can punish users before they can add collateral or repay. The protocol needs a sequencer status check and a grace period.
+
+The second bug is fallback quality. If the primary feed is stale, the protocol falls back to an AMM spot price. An attacker can manipulate the low-liquidity AMM and force the lending market to value collateral incorrectly. The fallback does not reduce oracle risk. It changes the attack from feed staleness to AMM manipulation.
+
+The third bug is action symmetry. The protocol treats all actions the same. Under degraded oracle conditions, it should not allow new borrowing or liquidations. It may still allow repayments and collateral additions because those reduce protocol risk and help users recover.
+
+A safer policy looks like this:
+
+\begin{codeblock}
+safer_l2_lending_oracle:
+    status = sequencer_feed.latestAnswer()
+    started_at = sequencer_feed.startedAt()
+
+    if status == DOWN:
+        disable borrow and liquidate
+        allow repay and add_collateral
+
+    if block.timestamp - started_at < grace_period:
+        disable borrow and liquidate
+        allow repay and add_collateral
+
+    price = primary_feed.latestRoundData()
+    require price.answer > 0
+    require block.timestamp - price.updated_at <= max_stale
+
+    if secondary_reference_enabled:
+        require deviation(primary, secondary) <= max_deviation
+
+    do not fall back to low-liquidity spot price for liquidations
+\end{codeblock}
+
+The finding:
+
+\begin{codeblock}
+finding:
+    L2 lending market permits liquidations using stale or manipulable
+    oracle data after sequencer downtime.
+
+broken properties:
+    time-sensitive liquidations require fresh collateral prices and fair
+    transaction access. Fallback prices must not be easier to manipulate
+    than the primary feed.
+
+impact:
+    borrowers can be liquidated before they can react after sequencer
+    recovery, or attackers can trigger fallback mode and manipulate a
+    low-liquidity AMM spot price to create profitable liquidations.
+
+evidence:
+    liquidation path reads ETH/USD without sequencer uptime check;
+    no post-recovery grace period is enforced;
+    stale primary feed falls back to AMM spot price;
+    fallback pool liquidity is small relative to liquidation value.
+
+recommendation:
+    integrate sequencer uptime status and grace period; disable liquidations
+    and new borrowing during degraded oracle state; allow risk-reducing
+    actions; remove AMM spot fallback or restrict it behind independent
+    validation, liquidity thresholds, and conservative bounds.
+\end{codeblock}
+
+This is the right shape of oracle finding. It does not blame the feed. It names the protocol decision, timing assumption, data source, fallback failure, attacker path, and safer operating mode.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why is an oracle value different from the external fact it tries to represent?
+\item What belongs in an oracle data supply-chain map?
+\item How do push and pull oracle models create different security obligations for the consuming protocol?
+\item Why are heartbeat and deviation thresholds not substitutes for application-level staleness checks?
+\item What is adversarial selection in a pull oracle, and how can a protocol reduce it?
+\item Why can a market-price feed be the wrong input for a wrapped, bridged, yield-bearing, or redeemable asset?
+\item Why must L2 protocols consider sequencer status before using oracle data for liquidations?
+\item Why can fallback logic be more dangerous than reverting?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Choose a protocol that consumes at least one price feed. Produce an oracle dependency map with feed address or identifier, chain, base and quote asset, decimals or exponent, update policy, freshness check, and every protocol transition that reads the value.
+
+\item Write a test plan for an oracle integration. Include stale timestamp, zero or negative answer, wrong decimals, wide confidence interval, sequencer downtime, feed divergence, fallback activation, and governance feed replacement.
+
+\item Analyze a wrapped, bridged, yield-bearing, or stable asset. Decide whether the protocol should use market price, exchange rate, proof of reserve, NAV, or a combination with haircuts. Explain which failure each input does and does not cover.
+
+\item Review an oracle fallback design. Identify the primary failure it tries to handle, the fallback source, whether the fallback is independent, whether it can be manipulated more cheaply than the primary feed, and which actions should be paused instead of falling back.
+\end{enumerate}

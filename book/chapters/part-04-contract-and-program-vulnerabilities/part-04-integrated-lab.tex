@@ -1,0 +1,682 @@
+\chapter*{Part IV Integrated Lab: Contract and Program Vulnerability Review}
+\phantomsection
+\addcontentsline{toc}{chapter}{Part IV Integrated Lab: Contract and Program Vulnerability Review}
+
+\begin{labbox}[Contract and Program Vulnerability Review]
+This lab closes Part IV by asking the reader to turn code excerpts, traces, configuration records, lifecycle notes, and smart-account artifacts into one professional vulnerability review package. The goal is not to name bug classes. The goal is to prove which public transitions are unsafe, which invariants fail, how an attacker reaches them, and what evidence supports each finding.
+\end{labbox}
+
+\section*{Scenario}
+
+You are reviewing \texttt{Arcadia Vault}, an upgradeable ERC-4626-like savings vault for a stablecoin called \texttt{mUSD}. Users deposit \texttt{mUSD}, receive shares, earn reward points, and later withdraw through an epoch queue. The team wants to support EOAs, smart accounts, trusted forwarder meta-transactions, and sponsored UserOperations through an ERC-4337 paymaster.
+
+The product summary says:
+
+\begin{quote}
+Arcadia is a safe vault with standard access control, ERC-20 deposits, ERC-4626-style shares, queued withdrawals, Chainlink VRF reward draws, upgradeability for emergency fixes, and gasless UX for smart-account users.
+\end{quote}
+
+That summary is not a security model. Your job is to review the concrete artifacts below and produce a contract and program vulnerability review package. Treat every public function, role, token behavior, external call, queue, upgrade, and delegated-authority path as part of one exposed financial backend.
+
+\section*{Protocol Rules}
+
+\subsection*{Actors and Roles}
+
+\begin{itemize}
+\item Users may deposit \texttt{mUSD}, request withdrawal, claim processed withdrawals, and enter weekly reward draws.
+\item A guardian may pause deposits and withdrawals immediately.
+\item An operator may process withdrawal batches, request randomness, and retry failed reward draws.
+\item Governance controls a 48-hour timelock and can upgrade the vault through a proxy admin.
+\item A fee manager can change withdrawal fees up to a configured maximum.
+\item A trusted forwarder relays gasless meta-transactions.
+\item A paymaster sponsors selected smart-account UserOperations.
+\item Session keys may act for smart accounts under signed permission envelopes.
+\end{itemize}
+
+\subsection*{Asset and Share Model}
+
+\texttt{mUSD} is described by the integration team as an ERC-20 stablecoin with 6 decimals. The protocol assumes:
+
+\begin{codeblock}
+deposit assets -> mint vault shares
+redeem shares  -> receive mUSD
+totalAssets    -> mUSD controlled by the vault
+sharePrice     -> totalAssets / totalSupply
+\end{codeblock}
+
+The token team later provides these additional details:
+
+\begin{itemize}
+\item \texttt{mUSD.transfer} and \texttt{mUSD.transferFrom} return \texttt{false} instead of reverting when a transfer is blocked by compliance policy.
+\item During high-load periods, \texttt{mUSD} may charge a 30 basis point transfer fee.
+\item The issuer can freeze specific addresses.
+\item \texttt{name}, \texttt{symbol}, and \texttt{decimals} are metadata and may be unavailable through some wrapped deployments.
+\item \texttt{mUSD} has no receiver hook, but the vault may later support hook-bearing reward tokens.
+\end{itemize}
+
+\section*{Code Evidence Packet}
+
+Use the following excerpts as the review target. They are simplified, but they are intentionally close to code a reviewer might see in an early implementation review.
+
+\subsection*{A. Vault State and Initialization}
+
+\begin{codeblock}
+contract ArcadiaVault is Initializable {
+    IERC20 public asset;
+    address public owner;
+    address public guardian;
+    address public operator;
+    address public feeManager;
+    address public trustedForwarder;
+    address public paymaster;
+
+    uint256 public totalShares;
+    uint256 public totalManagedAssets;
+    uint256 public withdrawalFeeBps;
+    bool public depositsPaused;
+    bool public withdrawalsPaused;
+
+    mapping(address => uint256) public shareBalance;
+    mapping(uint256 => WithdrawalRequest) public withdrawalQueue;
+    uint256 public queueHead;
+    uint256 public queueTail;
+
+    function initialize(
+        address asset_,
+        address guardian_,
+        address operator_,
+        address feeManager_,
+        address trustedForwarder_,
+        address paymaster_
+    ) external {
+        asset = IERC20(asset_);
+        owner = msg.sender;
+        guardian = guardian_;
+        operator = operator_;
+        feeManager = feeManager_;
+        trustedForwarder = trustedForwarder_;
+        paymaster = paymaster_;
+        withdrawalFeeBps = 50;
+    }
+}
+\end{codeblock}
+
+Deployment note:
+
+\begin{codeblock}
+Proxy:
+    address = 0xArcadiaProxy
+    implementation = 0xImplV1
+    proxy admin = 0xGovTimelock
+
+Implementation contract:
+    address = 0xImplV1
+    initializer locked = no
+    initialize() called on proxy at deployment = yes
+\end{codeblock}
+
+\subsection*{B. Sender Resolution and Role Checks}
+
+\begin{codeblock}
+function _msgSender() internal view returns (address) {
+    if (msg.sender == trustedForwarder) {
+        return address(bytes20(msg.data[msg.data.length - 20:]));
+    }
+    return msg.sender;
+}
+
+modifier onlyGuardian() {
+    require(msg.sender == guardian || tx.origin == guardian);
+    _;
+}
+
+modifier onlyOperator() {
+    require(_msgSender() == operator);
+    _;
+}
+
+modifier onlyFeeManager() {
+    require(msg.sender == feeManager);
+    _;
+}
+\end{codeblock}
+
+\subsection*{C. Deposits}
+
+\begin{codeblock}
+function deposit(uint256 assets, address receiver)
+    external
+    returns (uint256 shares)
+{
+    require(!depositsPaused);
+    require(receiver != address(0));
+
+    asset.transferFrom(_msgSender(), address(this), assets);
+
+    uint256 vaultBalance = asset.balanceOf(address(this));
+
+    if (totalShares == 0) {
+        shares = assets;
+    } else {
+        shares = assets * totalShares / vaultBalance;
+    }
+
+    shareBalance[receiver] += shares;
+    totalShares += shares;
+    totalManagedAssets += assets;
+
+    emit Deposit(_msgSender(), receiver, assets, shares);
+}
+\end{codeblock}
+
+The team says this is ERC-4626-like because the vault issues shares for deposited assets. The function does not accept \texttt{minSharesOut}. Direct token transfers to the vault are not blocked. The frontend displays \texttt{previewDeposit} values computed from \texttt{asset.balanceOf(address(this))}.
+
+\subsection*{D. Withdrawal Queue}
+
+\begin{codeblock}
+struct WithdrawalRequest {
+    address owner;
+    address receiver;
+    uint256 shares;
+    uint256 epoch;
+    bool processed;
+}
+
+function requestWithdraw(uint256 shares, address receiver) external {
+    require(!withdrawalsPaused);
+    require(shares > 0);
+    require(shareBalance[_msgSender()] >= shares);
+
+    withdrawalQueue[queueTail] = WithdrawalRequest({
+        owner: _msgSender(),
+        receiver: receiver,
+        shares: shares,
+        epoch: currentEpoch() + 1,
+        processed: false
+    });
+
+    queueTail++;
+}
+
+function processWithdrawals(uint256 maxItems) external onlyOperator {
+    require(maxItems <= 50);
+
+    uint256 processed;
+    while (queueHead < queueTail && processed < maxItems) {
+        WithdrawalRequest storage r = withdrawalQueue[queueHead];
+
+        uint256 assets = r.shares * asset.balanceOf(address(this)) / totalShares;
+        uint256 fee = assets * withdrawalFeeBps / 10_000;
+
+        asset.transfer(r.receiver, assets - fee);
+
+        shareBalance[r.owner] -= r.shares;
+        totalShares -= r.shares;
+        totalManagedAssets -= assets;
+        r.processed = true;
+
+        queueHead++;
+        processed++;
+    }
+}
+\end{codeblock}
+
+Operational note:
+
+\begin{codeblock}
+queueTail - queueHead = 132 requests
+request 37 receiver = 0xRevertingReceiver
+0xRevertingReceiver reverts when it receives native ETH
+0xRevertingReceiver does not revert on mUSD transfer today
+future reward-token support may call receiver hooks
+operator batch policy = process 50 requests per transaction
+\end{codeblock}
+
+\subsection*{E. Admin and Emergency Functions}
+
+\begin{codeblock}
+function pauseDeposits() external onlyGuardian {
+    depositsPaused = true;
+}
+
+function pauseWithdrawals() external onlyGuardian {
+    withdrawalsPaused = true;
+}
+
+function setWithdrawalFee(uint256 newFeeBps) external onlyFeeManager {
+    require(newFeeBps <= 1_000);
+    withdrawalFeeBps = newFeeBps;
+}
+
+function sweep(address token, address to) external onlyGuardian {
+    IERC20(token).transfer(to, IERC20(token).balanceOf(address(this)));
+}
+\end{codeblock}
+
+Policy note:
+
+\begin{codeblock}
+guardian intended power:
+    pause deposits
+    pause withdrawal requests
+    pause withdrawal processing during active exploit
+
+guardian not intended to:
+    transfer user assets
+    change fees
+    upgrade implementation
+    set trusted forwarder
+    bypass governance timelock
+\end{codeblock}
+
+\subsection*{F. Reward Draw}
+
+\begin{codeblock}
+function enterDraw(uint256 tickets) external {
+    require(block.timestamp < drawClose);
+    entries[_msgSender()] += tickets;
+    totalTickets += tickets;
+}
+
+function requestDraw() external onlyOperator {
+    require(block.timestamp >= drawClose);
+    requestId = vrf.requestRandomWords();
+    randomnessRequested = true;
+}
+
+function retryDraw() external onlyOperator {
+    require(randomnessRequested);
+    require(block.timestamp > requestTime + 2 hours);
+    requestId = vrf.requestRandomWords();
+}
+
+function fulfillRandomWords(uint256 id, uint256[] memory words) external {
+    require(id == requestId);
+    winner = pickWinner(words[0], totalTickets);
+    payReward(winner);
+}
+\end{codeblock}
+
+Draw note:
+
+\begin{codeblock}
+entries remain open until drawClose
+requestDraw does not store totalTickets snapshot
+retryDraw can replace requestId
+fulfillRandomWords calls payReward before recording completion
+payReward may transfer a hook-bearing reward token in V2
+\end{codeblock}
+
+\subsection*{G. Smart Account and Paymaster Flow}
+
+Arcadia supports gasless smart-account deposits. A session key signs a permission envelope and submits a UserOperation through a bundler.
+
+\begin{codeblock}
+session permission:
+    account = 0xSmartAccount
+    delegate = 0xSessionKey
+    target = 0xArcadiaProxy
+    selector = deposit(uint256,address)
+    maxAssets = 10,000 mUSD
+    validUntil = T + 1 day
+    nonceKey = 7
+    chainId = 1
+
+UserOperation:
+    sender = 0xSmartAccount
+    nonce = key 7, sequence 0
+    callData =
+        executeBatch([
+            call mUSD.permit(owner, ArcadiaProxy, 50,000, ...),
+            call ArcadiaProxy.deposit(10,000, receiver),
+            call ArcadiaProxy.requestWithdraw(shareBalance(receiver), receiver)
+        ])
+    paymasterAndData = ArcadiaPaymaster sponsorship signature
+\end{codeblock}
+
+Paymaster validation excerpt:
+
+\begin{codeblock}
+function validatePaymasterUserOp(userOp, userOpHash, maxCost)
+    external
+    returns (bytes memory context, uint256 validationData)
+{
+    require(msg.sender == ENTRY_POINT);
+    require(allowlistedAccount[userOp.sender]);
+    require(block.timestamp < sponsorDeadline[userOp.sender]);
+    return ("", 0);
+}
+\end{codeblock}
+
+The paymaster does not parse the full account execution payload. The smart account validates that the session key signed the outer UserOperation hash, but the account does not parse every inner call in \texttt{executeBatch}. The dApp backend displays only the first Arcadia call to the user.
+
+\section*{Practical Evidence Packet}
+
+\subsection*{Accounting Trace}
+
+\begin{codeblock}
+T0
+    totalShares = 0
+    asset.balanceOf(vault) = 0
+    totalManagedAssets = 0
+
+T1
+    Mallory deposits 1 mUSD.
+    deposit() mints 1 share.
+
+T2
+    Mallory transfers 100,000 mUSD directly to the vault.
+    No deposit function is called.
+
+T3
+    Victim deposits 50,000 mUSD.
+    mUSD high-load fee is disabled.
+    deposit() computes shares using post-transfer vault balance.
+    Victim did not provide minSharesOut.
+
+T4
+    Mallory requests withdrawal of 1 share.
+    Operator processes the request.
+\end{codeblock}
+
+\subsection*{Transfer Trace}
+
+\begin{codeblock}
+Deposit transaction D2:
+    sender = 0xSmartAccount
+    apparent user in UI = Alice
+    Arcadia _msgSender() = 0xSmartAccount
+    requested assets = 10,000 mUSD
+    mUSD high-load fee = 30 bps
+    mUSD.transferFrom returns true
+    vault pre-balance = 1,000,000.000000 mUSD
+    vault post-balance = 1,009,970.000000 mUSD
+    Deposit event amount = 10,000.000000 mUSD
+    totalManagedAssets increment = 10,000.000000 mUSD
+\end{codeblock}
+
+\subsection*{Withdrawal Batch Trace}
+
+\begin{codeblock}
+Batch B7:
+    queueHead before = 25
+    maxItems = 50
+    request 25 through 36 process successfully
+    request 37 receiver = 0xTokenHookReceiver
+    V2 reward-token payout hook reenters requestWithdraw()
+    processWithdrawals uses old totalShares for assets calculation
+    transaction reverts after request 37
+    queueHead after = 25
+\end{codeblock}
+
+\subsection*{Storage Layout Diff}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Slot & V1 meaning & V2 meaning \\
+\midrule
+0 & \texttt{asset} & \texttt{asset} \\
+1 & \texttt{owner} & \texttt{owner} \\
+2 & \texttt{guardian} & \texttt{guardian} \\
+3 & \texttt{operator} & \texttt{trustedForwarder} \\
+4 & \texttt{feeManager} & \texttt{operator} \\
+5 & \texttt{trustedForwarder} & \texttt{feeManager} \\
+6 & \texttt{paymaster} & \texttt{paymaster} \\
+7 & \texttt{totalShares} & \texttt{totalShares} \\
+8 & \texttt{totalManagedAssets} & \texttt{rewardToken} \\
+9 & \texttt{withdrawalFeeBps} & \texttt{totalManagedAssets} \\
+10 & \texttt{depositsPaused} & \texttt{withdrawalFeeBps} \\
+11 & \texttt{withdrawalsPaused} & \texttt{depositsPaused} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Governance payload:
+
+\begin{codeblock}
+proposal:
+    target = ProxyAdmin
+    action = upgradeToAndCall(0xImplV2, initializeV2(rewardToken))
+    queuedAt = Monday 10:00 UTC
+    earliestExecution = Wednesday 10:00 UTC
+
+V2 notes:
+    supports hook-bearing reward token
+    adds skipFailedWithdrawal flag
+    moves trustedForwarder field earlier in source
+    initializeV2 has onlyOwner check using tx.origin
+\end{codeblock}
+
+\section*{Required Artifact}
+
+\begin{artifactbox}[Contract and Program Vulnerability Review Package]
+Produce one review package for Arcadia. It should be useful to engineers deciding what to fix, auditors deciding what to test, and protocol leadership deciding whether the system can launch.
+\end{artifactbox}
+
+The package must include:
+
+\begin{artifactchecklist}
+\item Executive scope and assumptions.
+\item Entry-point map.
+\item Privilege matrix.
+\item Asset behavior profiles.
+\item External-control-flow map.
+\item Unit map and rounding table.
+\item Lifecycle and upgrade review.
+\item Randomness-time-liveness review.
+\item Delegated-authority review.
+\item Exploit traces and calculations.
+\item Findings memo.
+\item Negative test plan.
+\end{artifactchecklist}
+
+\section*{Required Analysis}
+
+\subsection*{1. Entry-Point Map}
+
+Build an entry-point map for at least:
+
+\begin{itemize}
+\item \texttt{initialize};
+\item \texttt{deposit};
+\item \texttt{requestWithdraw};
+\item \texttt{processWithdrawals};
+\item \texttt{pauseDeposits};
+\item \texttt{pauseWithdrawals};
+\item \texttt{setWithdrawalFee};
+\item \texttt{sweep};
+\item \texttt{enterDraw};
+\item \texttt{requestDraw};
+\item \texttt{retryDraw};
+\item \texttt{fulfillRandomWords}; and
+\item smart-account sponsored execution through \texttt{executeBatch}.
+\end{itemize}
+
+For each entry point, record caller or signer assumptions, state read, state written, assets moved, external calls, failure behavior, invariant at risk, and evidence needed to prove success or failure.
+
+\subsection*{2. Privilege Matrix}
+
+Replace role names with powers. Your matrix must say what the guardian, operator, fee manager, governance timelock, proxy admin, trusted forwarder, paymaster, smart account, and session key can actually do.
+
+At minimum, answer:
+
+\begin{itemize}
+\item Can the guardian move user assets?
+\item Can the operator influence reward randomness or withdrawal order?
+\item Can the fee manager set a confiscatory fee under the stated cap?
+\item Can the trusted forwarder change effective caller identity?
+\item Can the paymaster sponsor actions outside the displayed user intent?
+\item Can the session key execute more than the signed deposit permission?
+\item Can governance upgrade into code that reinterprets existing state?
+\end{itemize}
+
+\subsection*{3. Asset Behavior Profiles}
+
+Profile \texttt{mUSD}, vault shares, withdrawal requests, reward tokens, and sponsored gas deposits. For each asset or claim, record representation, unit, transfer behavior, mint or burn authority, freeze or pause authority, external calls or hooks, accounting use, and invariant affected.
+
+Your analysis of \texttt{mUSD} must address false returns, transfer fees, issuer freezes, metadata assumptions, and direct transfers to the vault. Do not write that \texttt{mUSD} is "just ERC-20 compatible." State the exact behavior class Arcadia supports or rejects.
+
+\subsection*{4. Accounting and Rounding}
+
+Create a unit map and rounding table for deposit, withdrawal request, withdrawal processing, fee calculation, and reward accounting.
+
+Using the accounting trace, compute:
+
+\begin{itemize}
+\item shares minted to Mallory at T1;
+\item vault balance after Mallory's direct transfer at T2;
+\item shares minted to the victim at T3 under the current formula;
+\item whether the victim receives a meaningful claim;
+\item assets Mallory may claim at T4 before fees; and
+\item which invariant the trace violates.
+\end{itemize}
+
+Using the transfer trace, compute the mismatch between requested deposit amount, actual received amount, emitted event amount, and \texttt{totalManagedAssets} increment.
+
+\subsection*{5. External-Control-Flow Map}
+
+Map every external boundary:
+
+\begin{itemize}
+\item \texttt{asset.transferFrom};
+\item \texttt{asset.transfer};
+\item trusted forwarder call into the vault;
+\item smart-account \texttt{executeBatch};
+\item paymaster validation;
+\item VRF fulfillment;
+\item V2 reward-token hook;
+\item proxy delegatecall; and
+\item governance upgrade call.
+\end{itemize}
+
+For each boundary, say what leaves the local invariant boundary, what can change while control is away, what the vault trusts on return, and what must be revalidated.
+
+\subsection*{6. Lifecycle and Upgrade Review}
+
+Review initialization, implementation locking, proxy upgrade authority, storage layout compatibility, V2 initialization, and user exit assumptions.
+
+Your upgrade review must answer:
+
+\begin{itemize}
+\item whether V1's initializer is protected adequately;
+\item whether the implementation contract can be initialized directly;
+\item whether V2 preserves storage meaning;
+\item which slots change semantic meaning;
+\item whether \texttt{initializeV2} is safe if it uses \texttt{tx.origin};
+\item whether users can exit during the 48-hour timelock if withdrawals are pauseable or queued; and
+\item what evidence should be published before execution.
+\end{itemize}
+
+\subsection*{7. Randomness, Time, DoS, and Griefing Review}
+
+Review the reward draw and withdrawal queue as liveness systems.
+
+At minimum, analyze:
+
+\begin{itemize}
+\item whether entries can change after randomness is requested;
+\item whether \texttt{retryDraw} gives the operator a discard option;
+\item whether fulfillment can revert;
+\item whether request IDs are bound to draw state;
+\item whether one queue item can block unrelated withdrawals;
+\item whether the queue can be processed in bounded, resumable batches; and
+\item whether an attacker can spend little to delay many users.
+\end{itemize}
+
+Write at least two progress properties. One must cover withdrawals. One must cover reward settlement.
+
+\subsection*{8. Delegated Authority Review}
+
+Analyze the trusted forwarder, smart account, session permission, UserOperation, paymaster validation, and dApp display behavior.
+
+Your delegated-authority review must identify:
+
+\begin{itemize}
+\item signer, sender, forwarder, account, delegate, payer, and receiver;
+\item which domain binds the permission;
+\item which nonce lane is used;
+\item whether the signed policy binds every inner call;
+\item whether the paymaster validates the same envelope the user intended;
+\item whether the UI display is evidence or authority; and
+\item how revocation should work.
+\end{itemize}
+
+Then write negative tests for wrong target, wrong selector, arbitrary batch, excessive approval, expired session, reused nonce, wrong chain, wrong EntryPoint, revoked key, and paymaster overcharge.
+
+\section*{Minimum Findings}
+
+Write at least eight findings. Each finding must use this format:
+
+\begin{codeblock}
+Title:
+Severity:
+Affected promise:
+Evidence:
+Exploit or failure path:
+Impact:
+Recommendation:
+Residual risk:
+\end{codeblock}
+
+At least one finding must cover each category:
+
+\begin{itemize}
+\item public backend or exposed transition failure;
+\item authorization or privilege-boundary failure;
+\item token semantics failure;
+\item external-control-flow failure;
+\item accounting, precision, or rounding failure;
+\item lifecycle, initialization, or upgrade failure;
+\item randomness, time, DoS, or griefing failure;
+\item smart-account, trusted-forwarder, session-key, or paymaster failure.
+\end{itemize}
+
+\section*{Negative Test Plan}
+
+Convert your findings into tests. The plan must include:
+
+\begin{itemize}
+\item unauthorized caller tests for every privileged function;
+\item false-return, fee-on-transfer, direct-donation, and freeze tests for \texttt{mUSD};
+\item zero-share and inflation-attack tests for deposits;
+\item reentrancy or hook tests around withdrawal processing and reward payout;
+\item queue blockage and resumability tests;
+\item storage-layout and migration tests for V2;
+\item initializer and reinitializer tests;
+\item randomness request, retry, fulfillment, and revert tests;
+\item trusted-forwarder sender-confusion tests;
+\item smart-account batch-escape tests; and
+\item paymaster sponsorship-abuse tests.
+\end{itemize}
+
+\section*{Submission Standard}
+
+A strong submission reconstructs exploit traces and broken invariants from the evidence. It should be precise enough that an engineer can turn it into code changes and tests.
+
+Unacceptable submissions include:
+
+\begin{itemize}
+\item saying "use SafeERC20" without explaining the asset-accounting invariant;
+\item saying "add ReentrancyGuard" without naming the exposed state;
+\item saying "use access control" without writing the authorization predicate;
+\item treating emitted events as proof of committed economic state;
+\item treating a 48-hour timelock as protective without checking queue exits;
+\item treating ERC-4337 sponsorship as UX only rather than payer authority;
+\item treating the session key as safe without parsing the full batch; and
+\item giving severity labels without an exploit sequence, capital or timing assumption, and residual risk.
+\end{itemize}
+
+\section*{Optional Extension}
+
+For a harder version, add one of the following changes and update the entire review package:
+
+\begin{itemize}
+\item \texttt{mUSD} is replaced with a Token-2022-style asset that has a transfer hook and permanent delegate.
+\item The reward token is an ERC-777-like token that calls recipient hooks.
+\item The smart account uses EIP-7702 delegation for one sponsored transaction.
+\item Governance adds a cross-chain bridge adapter that can fulfill withdrawals on another chain.
+\item The operator role is moved from an EOA to a smart account with guardian recovery.
+\end{itemize}
+
+Each extension should change the model. If the review changes only by adding a warning sentence, the boundary was not modeled.
