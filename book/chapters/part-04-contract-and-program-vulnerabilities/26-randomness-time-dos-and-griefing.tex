@@ -1,11 +1,531 @@
 \chapter{Randomness, Time, DoS, and Griefing}
 
-\section{Unsafe Randomness from Block Data, Local State, and Predictable Inputs}
+\section{Purpose}
 
-\section{Time Assumptions, Slot Assumptions, and Timestamp Dependence}
+\begin{principlebox}
+Randomness, time, resource limits, and griefing are not minor edge cases. They are ways an adversary turns optionality into biased outcomes or stalled progress. A secure program must define not only what may happen, but what must eventually happen under hostile timing, public information, bounded resources, and strategic non-cooperation.
+\end{principlebox}
 
-\section{Gas, Compute, Storage, and Account-Based DoS}
+Chapter~23 studied what happens when execution crosses an external control-flow boundary. Chapter~24 studied value conservation under integer arithmetic. Chapter~25 studied lifecycle transitions where code, state, configuration, and authority change over time. This chapter studies a different class of failures: the program is locally correct, but an adversary chooses when to act, whether to continue, which transactions to submit, which calls to make expensive, which accounts or objects to touch, which branch to force, and which outcome to discard.
 
-\section{Griefing Attacks with Low or Indirect Profit}
+The weak review says, "The random number is hard to predict," "the timestamp is close enough," "the loop is usually small," or "the attacker does not profit directly." The useful review asks:
 
-\section{Liveness Failures: Stuck Funds, Frozen Queues, and Broken Exits}
+\begin{codeblock}
+liveness_review:
+    what information is public before commitment?
+    who can bias, delay, withhold, retry, cancel, or reorder?
+    what time source is trusted, and how precise does it need to be?
+    what work can grow with users, accounts, objects, storage, or queue length?
+    can one participant make everyone else's operation revert?
+    can the attacker impose cost without extracting direct profit?
+    what timeout, batch limit, escape hatch, or pull path restores progress?
+    what invariant states that progress remains possible?
+\end{codeblock}
+
+The common security property is progress under adversarial conditions. A raffle must eventually select a winner without letting the organizer or a participant discard unfavorable randomness. An auction must close according to a time rule that cannot be cheaply manipulated. A withdrawal queue must keep draining even if one recipient reverts. A liquidation system must remain callable when many positions are unhealthy. A game, mint, bridge, or vault must not let an attacker spend little to freeze much.
+
+This chapter deliberately keeps the examples at the contract and program layer. Chain-level censorship, finality, economic attacks, and network partitions were covered in Part~II. Here the question is narrower and more actionable: did the program's own design give the adversary optionality over entropy, clocks, resources, or completion?
+
+\section{Adversarial Optionality}
+
+An ordinary software engineer often thinks of randomness, time, and resource limits as environmental services. A secure blockchain engineer treats them as adversarial inputs. The program executes in a public transaction system. State is visible. Pending actions may be observed. Block producers or validators have ordering and inclusion power. Users can choose whether to continue a multi-step flow. Contracts can revert when called. Accounts, objects, arrays, queues, and maps can grow. Fees and execution limits make some work impossible even if the code is logically correct.
+
+\subsection{Randomness, Time, and Resources as Inputs}
+
+The same pattern appears across many bug classes:
+
+\begin{codeblock}
+adversarial_optionality:
+    observe public state
+    choose whether to enter
+    choose when to enter
+    choose transaction parameters
+    choose whether to reveal, fulfill, claim, or cancel
+    choose calls or accounts that make execution expensive
+    keep favorable outcomes and discard unfavorable outcomes
+\end{codeblock}
+
+That last line is the heart of the chapter. A security review should ask where the protocol gives a participant a free or cheap option. A commit-reveal game gives the committer an option if failing to reveal only costs a small deposit while revealing an unfavorable outcome loses much more. A raffle gives the operator an option if it can cancel and retry after seeing a bad result. A protocol using block data for randomness gives a block producer or searcher an option if they can include, exclude, reorder, or retry transactions after learning enough about the outcome. A queue gives a malicious recipient an option if reverting causes the whole batch to stop.
+
+Optionality is not always a bug. Markets are built from options. Users should often be allowed to withdraw, cancel orders, refuse bad trades, or stop participating. The bug appears when optionality breaks a security promise made to other participants: fairness, unbiased selection, timely exit, bounded cost, or predictable settlement.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=9mm and 10mm]
+\node[security node, text width=29mm] (observe) {Observe public state};
+\node[security node, right=of observe, text width=27mm] (choose) {Choose action or timing};
+\node[security node, right=of choose, text width=28mm] (execute) {Force branch or resource use};
+\node[security decision, below=of execute, text width=25mm] (favorable) {Outcome favorable?};
+\node[security node, left=of favorable, text width=27mm] (discard) {Withhold, revert, retry, delay};
+\node[security node, right=of favorable, text width=24mm] (keep) {Finalize or claim};
+
+\draw[security arrow] (observe) -- (choose);
+\draw[security arrow] (choose) -- (execute);
+\draw[security arrow] (execute) -- (favorable);
+\draw[security arrow] (favorable) -- node[above, font=\small] {no} (discard);
+\draw[security arrow] (discard) to[bend right=18] (choose);
+\draw[security arrow] (favorable) -- node[above, font=\small] {yes} (keep);
+\end{tikzpicture}
+\caption{Many liveness and fairness bugs are cheap options to discard bad outcomes and keep good ones.}
+\end{figure}
+
+\subsection{Progress Is a Security Property}
+
+Security is not only "bad things cannot happen." It is also "necessary things can still happen." In a financial backend, lack of progress is often loss. A withdrawal that can never execute is not meaningfully different from a confiscation for the affected user. A liquidation that cannot run during market stress turns solvency math into fiction. A claim function that fails after the recipient list grows past the execution limit makes earned rewards unreachable. A bridge message that cannot be finalized because one callback reverts has converted external control flow into trapped value.
+
+Part~I introduced invariants as statements over reachable states. Liveness properties require a slightly different shape:
+
+\begin{codeblock}
+safety_invariant:
+    no reachable state allows total claims > total assets
+
+progress_property:
+    for every valid withdrawal request,
+    there exists an executable sequence that pays or exits the request
+    without requiring cooperation from unrelated users
+\end{codeblock}
+
+That is not a fully formal temporal proof. It is a reviewer's discipline. When reading a program, ask which states are not theft but are still unacceptable because they trap users, freeze queues, strand funds, prevent settlement, or make recovery depend on a party that may be absent or malicious.
+
+\section{Randomness and Entropy Sources}
+
+On-chain randomness is hard because the execution environment is transparent and adversarial. Solidity's security documentation states the blunt rule: data used in a contract is publicly visible, even if marked \texttt{private}, and random numbers are tricky when block builders can cheat.\footnote{\href{https://docs.soliditylang.org/en/latest/security-considerations.html}{Solidity documentation, "Security Considerations".}} The same lesson applies outside Solidity. If an input can be observed before a participant commits, it is not secret. If an output can be discarded after it is learned, it is not unbiased. If a producer can influence inclusion, ordering, or block fields, the randomness must be modeled with that influence included.
+
+\subsection{Public State Is Not Secret}
+
+The classic mistake is using a hash of public inputs:
+
+\begin{codeblock}
+winner = hash(block.timestamp, sender, totalTickets) % totalTickets
+\end{codeblock}
+
+This is not random in the security sense. The inputs are public or influenceable. The sender chooses whether to submit. A block producer may have limited influence over timestamp or inclusion. A searcher can simulate the result before sending. If the payout is high enough, a rational adversary can try many senders, many timing choices, or many transaction routes.
+
+The EVM exposes block and transaction properties such as \texttt{block.timestamp}, \texttt{block.number}, \texttt{blockhash}, \texttt{block.prevrandao}, \texttt{block.coinbase}, \texttt{msg.sender}, and \texttt{gasleft()}.\footnote{\href{https://docs.soliditylang.org/en/latest/units-and-global-variables.html}{Solidity documentation, "Units and Globally Available Variables".}} These are useful for many purposes. They are not automatically safe entropy. Solidity's documentation warns not to rely on \texttt{block.timestamp} or \texttt{blockhash} for randomness unless the design has accounted for influence. It also notes that only recent block hashes are available through \texttt{blockhash}; older values return zero.\footnote{\href{https://docs.soliditylang.org/en/latest/units-and-global-variables.html}{Solidity documentation, "Units and Globally Available Variables".}}
+
+Ethereum's post-merge \texttt{block.prevrandao} improves the available beacon-derived signal, but it does not remove adversarial optionality. EIP-4399 explains that a proposer has one bit of influence per slot by refusing to propose, and that a proposer may also censor a transaction so it uses a later randomness value known to the proposer.\footnote{\href{https://eips.ethereum.org/EIPS/eip-4399}{EIP-4399, "Supplant DIFFICULTY opcode with PREVRANDAO".}} Historical randomness is fully known. Future randomness has better properties, but the design still has to choose a future value far enough ahead that the relevant participants cannot cheaply bias it.
+
+The review question is not "is the source called random?" It is:
+
+\begin{codeblock}
+randomness_source_review:
+    is the value unknown when users commit?
+    can the block producer, sequencer, validator, oracle, or admin bias it?
+    can a participant simulate the result before paying?
+    can anyone cancel, retry, re-request, or withhold after seeing the result?
+    is the value bound to the correct request, round, chain, and domain?
+    does fulfillment remain possible even if follow-on logic is expensive?
+\end{codeblock}
+
+\subsection{Commit-Reveal, VRFs, and Beacon Randomness}
+
+Most secure randomness designs separate commitment from revelation or outsource randomness to a verifiable service. Each approach has a different failure mode.
+
+In a commit-reveal scheme, participants first commit to hidden values, usually by publishing a hash. Later they reveal the values, and the protocol combines them. The problem is last-revealer optionality. If the last participant can decide whether to reveal after seeing the other reveals, they may abort unfavorable outcomes. A penalty can help only if it is large enough relative to the value at risk. If the system cannot progress without every participant revealing, the non-revealer has a denial-of-service lever.
+
+\begin{codeblock}
+commit_reveal_review:
+    commit_phase closes before any reveal
+    reveal_phase has a deadline
+    commitment binds participant, round, chain, and secret
+    unrevealed commitment has a defined penalty or fallback
+    fallback cannot be biased more cheaply than the protected value
+\end{codeblock}
+
+Verifiable random functions reduce some problems but not all of them. Chainlink VRF, for example, returns randomness with a proof that can be verified on-chain. Its own security guidance still emphasizes request matching, confirmation depth, no re-requesting or cancellation, no new bids or inputs after a randomness request, and non-reverting fulfillment.\footnote{\href{https://docs.chain.link/vrf/v2-5/security}{Chainlink VRF documentation, "Security Considerations".}} Those are exactly optionality controls. A VRF can prove where a random value came from; it cannot save a protocol that lets the user discard bad randomness, change inputs after requesting randomness, or revert fulfillment when the result is inconvenient.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.14}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.29\textwidth}X@{}}
+\toprule
+Randomness approach & Useful property & Review focus \\
+\midrule
+Block fields & Cheap and locally available & Producer influence, predictability, short lookahead, replay and domain binding. \\
+Commit-reveal & Participants commit before reveal & Last-revealer withholding, deadlines, penalties, fallback bias. \\
+Beacon randomness & Protocol-level entropy source & Lookahead, proposer influence, transaction censorship, historical predictability. \\
+VRF oracle & Verifiable output and proof & Request binding, confirmations, no cancellation, non-reverting fulfillment, oracle dependency. \\
+Threshold randomness & Distributed generation & Committee assumptions, aborts, slashing, membership, delayed output. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Sui makes another useful point: even when a chain provides an on-chain randomness primitive, random-dependent flows can still be exploitable through limited resources. Its randomness documentation warns that gas, new objects, dynamic fields, events, UIDs, and other per-transaction limits can be controlled so execution runs out of resources at attacker-chosen points.\footnote{\href{https://docs.sui.io/sui-stack/on-chain-primitives/randomness-onchain}{Sui documentation, "Onchain Randomness".}} That is the chapter's thesis in miniature. Good entropy does not guarantee safe progress.
+
+\section{Time, Slots, Blocks, and Deadlines}
+
+Time-dependent logic is necessary. Auctions close. loans accrue interest. reward epochs roll over. withdrawals unlock. bids expire. claims become valid after delay. governance proposals pass through voting, timelocks, and execution windows. The mistake is treating an on-chain time value as a precise wall clock controlled by no one.
+
+\subsection{Timestamps, Heights, Slots, and Epochs}
+
+Different execution environments expose different time-like values. EVM contracts commonly use \texttt{block.timestamp} or \texttt{block.number}. Solana programs can read the Clock sysvar, which contains the current slot, epoch, and estimated Unix timestamp; the timestamp is derived from validator vote timestamp estimates and bounded relative to expected elapsed time.\footnote{\href{https://docs.anza.xyz/runtime/sysvars}{Anza documentation, "Solana Sysvar Cluster Data".}} CosmWasm contracts receive \texttt{Env.block}, which includes block height, time, and chain ID; its book notes that height is guaranteed to increase while two blocks may have the same time, and transaction index may be needed for uniqueness inside a block.\footnote{\href{https://book.cosmwasm.com/cross-contract/working-with-time.html}{CosmWasm Book, "Working with time".}} Sui exposes a shared \texttt{Clock} object at address \texttt{0x6}; its documentation recommends \texttt{timestamp\_ms} for near real-time needs and \texttt{epoch\_timestamp\_ms} when epoch start time is enough.\footnote{\href{https://docs.sui.io/sui-stack/on-chain-primitives/access-time}{Sui documentation, "Access Onchain Time".}}
+
+These values are not interchangeable.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.14}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.27\textwidth}X@{}}
+\toprule
+Time-like value & What it usually means & Security question \\
+\midrule
+Timestamp & Approximate wall-clock time for the block, slot, checkpoint, or execution context & How much drift, equality, or influence can the system tolerate? \\
+Block height & Ordered block sequence number & Is the protocol assuming a constant real-time duration per block? \\
+Slot & Scheduled production opportunity or execution time unit & Are skipped, delayed, or irregular slots handled? \\
+Epoch & Coarser protocol period & Is per-epoch timing too coarse for user deadlines? \\
+Transaction index & Position within a block & Is uniqueness needed inside one block? \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+A review should convert every time rule into its real requirement. "After 24 hours" may mean users need a real-world delay. "After 100 blocks" may mean the protocol wants ordering distance or confirmation depth. "At epoch end" may mean governance wants a coarse batching point. "Before deadline" may mean a signer wants replay protection. If the code uses the wrong time-like value, it may be correct syntactically and wrong semantically.
+
+\subsection{Windows, Expiry, and Keeper Timing}
+
+Time bugs often arise at boundaries. Is a deadline inclusive or exclusive? Can a transaction submitted near the boundary be reordered across it? Can a user create a position one block before a reward snapshot? Does a keeper have enough time to act? Can a malicious party wait until the last possible moment to force an expensive path?
+
+\begin{codeblock}
+deadline_review:
+    identify time source
+    define start and end condition
+    decide inclusive or exclusive comparison
+    account for drift, equality, missed slots, and delayed inclusion
+    test boundary values: before, at, after
+    test stale transaction submitted before but included after deadline
+    define who may execute after timeout
+    define what happens if nobody executes
+\end{codeblock}
+
+Keepers make time assumptions concrete. A liquidation function may be permissionless, but if it requires external actors to monitor prices and submit transactions, the design depends on their incentives, gas budget, latency, and ability to get included. A delayed withdrawal may be safe when markets are calm and unsafe when everyone exits during congestion. A governance timelock gives users an exit window only if users can observe the queued action and exit before it executes. A bridge timeout is useful only if the timeout path is executable under the same hostile conditions that caused the message to stall.
+
+The reviewer should reject fake deadlines. A deadline that only the admin can enforce may be an admin promise, not a user right. A timeout that requires looping over every participant may become unusable exactly when most needed. A cancellation path that can be called by the attacker before honest users react may convert a safety feature into an option.
+
+\section{Resource Exhaustion and Denial of Service}
+
+Every execution environment has resource limits. EVM transactions have gas limits. Solana transactions have compute unit limits, with documented defaults and maximums.\footnote{\href{https://solana.com/docs/core/fees}{Solana documentation, "Fees".}} Move-based systems have gas and object limits. CosmWasm execution consumes gas and storage. Storage rent, account creation, dynamic fields, event emission, serialization, and cryptographic verification all have costs. A program that is correct only with unbounded computation is not correct on-chain.
+
+\subsection{Gas, Compute, Storage, Accounts, and Objects}
+
+The most obvious denial-of-service bug is an unbounded loop:
+
+\begin{codeblock}
+claim_all_rewards():
+    for user in all_users:
+        transfer reward to user
+\end{codeblock}
+
+This function may work in tests and fail in production. Solidity's documentation warns that loops whose iteration count depends on storage can grow beyond the block gas limit and stall a contract.\footnote{\href{https://docs.soliditylang.org/en/latest/security-considerations.html}{Solidity documentation, "Security Considerations".}} The same pattern exists across runtimes. If the work grows with users, positions, accounts, dynamic fields, pending messages, validators, orders, or rewards, the reviewer should ask who controls that growth and who pays for the cleanup.
+
+Resource exhaustion is broader than loops:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.13}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.31\textwidth}X@{}}
+\toprule
+Resource & Attack shape & Safer design pressure \\
+\midrule
+Gas or compute & Force expensive branch, verification, or iteration & Bound work per call; split into batches; charge caller for work caused. \\
+Storage & Create many entries, dust positions, or unreclaimable records & Minimum sizes; deposits; cleanup paths; storage rent or bonds. \\
+Accounts or objects & Require too many accounts, objects, signers, or dynamic fields & Keep critical paths small; separate registration from settlement; cap inputs. \\
+External calls & Make recipient revert or consume gas & Pull payments; isolate failures; record owed amount before transfer. \\
+Serialization and proofs & Submit large payloads or expensive verification cases & Size limits; proof cost accounting; reject pathological inputs early. \\
+Queues & Grow pending work faster than processors can drain it & Bound batches; let anyone process; make items retryable or skippable. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Resource limits often turn into authority. Whoever can make the required work too large can decide whether the function remains usable. Whoever controls the recipient of a push payment can decide whether a batch completes. Whoever can add dust entries to a global set can decide when iteration becomes unaffordable.
+
+\subsection{Unbounded Work and Failure Propagation}
+
+The review target is not "avoid loops." Some loops are safe because their bounds are constant, their inputs are limited by transaction size, or the caller chooses and pays for the work. The real target is unbounded mandatory work on a critical path.
+
+\begin{codeblock}
+critical_path_review:
+    list functions required for deposits, withdrawals, settlement, liquidation, exits
+    identify loops, external calls, proof checks, account lists, and storage writes
+    mark which costs grow with adversary-controlled state
+    check whether one failing item reverts the whole operation
+    check whether work can be resumed after partial progress
+    check whether users can exit without unrelated cooperation
+\end{codeblock}
+
+Failure propagation is especially dangerous. Suppose a protocol distributes ETH to every winner in one call. One winner is a contract whose receive function reverts. If the whole distribution reverts, that recipient has veto power over everyone else's payout. Solidity's security considerations recommend withdrawal patterns over push patterns because sending Ether can fail and a recipient can block progress.\footnote{\href{https://docs.soliditylang.org/en/latest/security-considerations.html}{Solidity documentation, "Security Considerations".}}
+
+The safer pattern is to separate accounting from transfer:
+
+\begin{codeblock}
+record_payout(user, amount):
+    owed[user] += amount
+
+withdraw_payout():
+    amount = owed[msg.sender]
+    owed[msg.sender] = 0
+    transfer amount to msg.sender
+    if transfer fails:
+        owed[msg.sender] = amount
+        revert only this withdrawal
+\end{codeblock}
+
+The exact implementation differs by runtime. The principle does not. A failing participant should not be able to stop unrelated participants from making progress. A large queue should be drainable in bounded batches. A cleanup path should be permissionless if stale state blocks exits. A resource-heavy operation should have a continuation token or index so it can resume after partial completion.
+
+\section{Griefing and Economic Liveness}
+
+Griefing attacks are easy to underrate because they often lack the clean profit story of a theft. That is a mistake. A protocol can be harmed by an attacker who imposes cost, delays exits, breaks auctions, forces emergency procedures, consumes keeper capital, causes liquidations to fail, or makes honest users pay more than the attacker pays.
+
+\subsection{Low-Profit and Indirect-Profit Attacks}
+
+An attacker may not profit inside the target contract. The payoff may be elsewhere:
+
+\begin{codeblock}
+griefing_payoff:
+    attacker_cost = gas + capital lockup + opportunity cost + risk
+    victim_cost = delayed exit + failed settlement + bad price + lost reward
+    external_payoff = short position + competitor advantage + governance leverage
+
+    attack is plausible when:
+        external_payoff + strategic_value > attacker_cost
+\end{codeblock}
+
+The security review must include external incentives. A market maker may grief a settlement path to profit from price movement. A borrower may delay liquidation to avoid insolvency. A validator, sequencer, or block builder may censor a transaction for side-payment or strategic position. A competitor may force a protocol into emergency mode. A governance actor may use temporary liveness failure to influence votes.
+
+Examples of griefing patterns include:
+
+\begin{itemize}
+\item submitting dust positions that are expensive to process;
+\item repeatedly triggering callbacks that revert or consume gas;
+\item filling queues with low-value requests to delay high-value requests;
+\item withholding a reveal, signature, oracle update, keeper action, or bridge attestation;
+\item front-running finalization with a state change that makes settlement fail;
+\item forcing users into expensive paths while the attacker pays little;
+\item making a protocol look broken during a critical market window.
+\end{itemize}
+
+The reviewer should resist the lazy dismissal "the attacker loses money." The correct question is whether the attacker loses less than the victim, less than the protected value, or less than the external payoff.
+
+\subsection{Withholding, Censorship, and Optional Participation}
+
+Many protocols depend on participants who are expected to continue acting: revealers, keepers, signers, market makers, oracle reporters, validators, relayers, executors, solvers, guardians, bridge committees, and admins. If the protocol has no fallback when they stop, optional participation becomes a security dependency.
+
+Withholding is especially common in multi-step flows:
+
+\begin{codeblock}
+multi_step_flow:
+    user commits
+    user waits
+    user reveals
+    protocol settles
+\end{codeblock}
+
+If settlement requires the same user to reveal, the user has leverage. If settlement can be completed by anyone after a timeout, the leverage is lower. If the non-revealer loses a bond large enough to compensate affected users, the leverage is lower still. If the timeout path is more expensive than the normal path but still bounded and permissionless, the protocol at least has a credible recovery path.
+
+Censorship at the contract layer is not the same as chain-level censorship. A contract can create internal censorship by allowing one account, queue item, callback, or role to block everyone else. A bridge can create internal censorship if one message must finalize before later messages. A vault can create internal censorship if withdrawals are processed strictly in order and one malformed request always reverts. A game can create internal censorship if one player can keep a match unresolved indefinitely.
+
+\section{Designing Progress Guarantees}
+
+The answer to liveness risk is not one pattern. It is a design discipline: bound the work, isolate failures, price state growth, remove cheap discard options, and define recovery paths before the system enters a bad state.
+
+\subsection{Bounded Work and Pull-Based Recovery}
+
+A bounded operation has a maximum cost independent of adversarially grown global state, or it lets the caller choose a bounded slice of work. A pull-based operation lets each affected party claim or finalize its own result instead of making one transaction push all results to everyone.
+
+\begin{codeblock}
+bounded_batch:
+    process(start_index, max_items):
+        require max_items <= MAX_BATCH
+        i = start_index
+        processed = 0
+        while i < queue.length and processed < max_items:
+            if queue[i] is executable:
+                execute item i
+            else:
+                mark item i as skipped or retryable
+            i += 1
+            processed += 1
+        next_index = i
+\end{codeblock}
+
+This pseudocode is not a drop-in implementation. It is a review target. A real design must decide whether skipped items can be retried, who may retry them, whether skipping harms fairness, whether the order is important, whether partial progress is safe, and whether state changes are committed before external effects.
+
+Pull-based recovery also requires care. If every user must individually claim dust, the protocol may create stranded value. If claiming costs more than the amount owed, small users are economically denied service. If claims depend on a Merkle root, the root publication and proof verification become part of the liveness model. If claims expire too quickly, congestion can turn a claim window into loss.
+
+\subsection{Queues, Batches, Timeouts, and Escape Hatches}
+
+Good liveness design usually combines several controls:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.14}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.21\textwidth}>{\RaggedRight\arraybackslash}p{0.30\textwidth}X@{}}
+\toprule
+Control & Protects against & Failure to review \\
+\midrule
+Minimum deposits or bonds & Dust spam and cheap withholding & Minimum too low relative to cleanup cost or value at risk. \\
+Batch limits & Unbounded iteration & Batch cannot resume, skips unsafe, or ordering invariant broken. \\
+Pull payments & Reverting recipients and batch vetoes & Individual claims uneconomic or permanently expiring. \\
+Timeouts & Withheld reveals, signatures, messages, or actions & Timeout path expensive, centralized, or more biased than normal path. \\
+Permissionless execution & Absent keepers or admins & No incentive to execute, or caller can choose harmful partial execution. \\
+Escape hatch & Stuck funds and failed dependencies & Escape controlled by same failed party or opens theft path. \\
+Rate limits & Sudden queue overload or state growth & Rate limit traps users during legitimate emergency exits. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The hard part is tradeoff. Bounded batches may slow processing. Pull claims may shift gas cost to users. Bonds may exclude small users. Timeouts may let attackers force fallback states. Escape hatches may become privileged theft paths. A strong review names these tradeoffs rather than hiding them behind generic mitigation language.
+
+\section{Review Method: Randomness-Time-Liveness Review}
+
+A good review artifact for this chapter is a compact randomness-time-liveness review. It should be written for every program that uses randomness, deadlines, queues, callbacks, batch processing, external executors, or time-delayed exits.
+
+\begin{artifactbox}[Randomness-time-liveness review]
+The artifact should identify every entropy source, time source, bounded resource, optional participant, critical queue, and recovery path. It should end with explicit progress properties and tests that try to break them.
+\end{artifactbox}
+
+\begin{codeblock}
+randomness_time_liveness_review:
+    1. list critical progress obligations
+       withdrawals, claims, settlements, liquidations, exits, reveals
+
+    2. list entropy sources
+       block fields, VRF, commit-reveal, beacon, oracle, user input
+
+    3. list time sources
+       timestamp, height, slot, epoch, transaction index, off-chain clock
+
+    4. list bounded resources
+       gas, compute, storage, accounts, objects, proofs, events, queue length
+
+    5. list optional participants
+       users, keepers, revealers, signers, relayers, admins, callbacks
+
+    6. identify discard options
+       cancel, re-request, withhold, revert, reorder, delay, retry
+
+    7. define controls
+       bonds, deadlines, batch limits, pull paths, timeout paths, escape hatches
+
+    8. write tests
+       boundary times, maximum queue, reverting recipient, missing revealer,
+       stale randomness, resource exhaustion, skipped item, retry path
+\end{codeblock}
+
+The final line matters. Liveness bugs often survive ordinary unit tests because ordinary tests use small arrays, honest recipients, punctual keepers, cooperative revealers, generous gas, and happy-path timing. The test suite should include the malicious cases:
+
+\begin{itemize}
+\item a recipient whose callback or receive function always reverts;
+\item a queue at maximum intended length;
+\item a dust attacker who creates many low-value entries;
+\item a randomness request followed by attempted cancellation or changed input;
+\item a reveal that never arrives;
+\item a deadline transaction executed exactly at the boundary;
+\item a keeper that waits until the last moment or never acts;
+\item a partial batch that stops midway and resumes later.
+\end{itemize}
+
+The finding should be written in terms of broken progress, not merely code smell. "The loop is unbounded" is weaker than "withdrawals can become unexecutable once the queue exceeds the transaction gas limit, trapping all later withdrawals until an upgrade or privileged intervention." "The callback may revert" is weaker than "one recipient can block distribution to all other recipients." "The random number is manipulable" is weaker than "the operator can retry randomness until a favorable winner is selected."
+
+\section{Worked Example: A Raffle That Can Be Biased and Stalled}
+
+Consider a raffle contract:
+
+\begin{codeblock}
+buy_ticket():
+    require now < close_time
+    tickets.push(msg.sender)
+
+draw():
+    require now >= close_time
+    seed = hash(block.timestamp, block.prevrandao, tickets.length)
+    winner = tickets[seed % tickets.length]
+    pay prize to winner
+
+refund_all():
+    require cancelled
+    for ticket in tickets:
+        pay ticket buyer
+\end{codeblock}
+
+At first glance, this looks simple. Users buy tickets before the close time. Anyone can call \texttt{draw} after close. The winner is derived from block data. If cancelled, everyone is refunded.
+
+The review should reject it.
+
+First, the randomness is weak. The number of tickets is known. The close time is known. The timestamp and \texttt{prevrandao} value used by \texttt{draw} are not ordinary secrets. A block producer may have limited influence over inclusion and timing. A searcher can decide whether to call \texttt{draw} after simulating likely outcomes. If the organizer can cancel after seeing an unfavorable condition, cancellation is a discard option.
+
+Second, ticket purchase near the close boundary is underspecified. If the comparison is \texttt{now < close\_time}, what happens to transactions submitted before the deadline but included after it? Can a block producer include its own ticket as the last ticket while excluding others? Is the close time meant to be wall-clock time, block height, slot, or epoch?
+
+Third, payout is a push payment. If the winner is a contract that reverts on receipt, the draw may revert and the raffle may remain unresolved. If the code marks the raffle as drawn only after the transfer, the winner can veto finalization. If it marks the raffle as drawn before a failed transfer and does not record owed funds, the winner may be unable to claim.
+
+Fourth, refunds loop over every ticket. A successful raffle with many participants may become impossible to refund in one transaction. An attacker can buy many dust tickets to make cancellation unusable. A safety mechanism then becomes a liveness failure.
+
+A stronger design separates these concerns:
+
+\begin{codeblock}
+raffle_design:
+    close entry before requesting randomness
+    bind randomness request to raffle_id and ticket_count
+    disallow cancellation or ticket changes after request
+    store randomness on fulfillment without complex follow-on effects
+    derive winner from stored randomness
+    record prize owed to winner
+    let winner withdraw prize through pull payment
+    process refunds individually or in bounded batches
+    define timeout if randomness fulfillment never arrives
+\end{codeblock}
+
+The improved design still needs review. Who provides randomness? How many confirmations are required? What happens if fulfillment is delayed? Can the fulfillment function revert? Is the subscription funded? Can the organizer cancel only before requesting randomness? Is the timeout path less biased than the normal path? Are refunds economical for small ticket holders? Does the protocol disclose the residual trust assumption?
+
+The finding could be written as:
+
+\begin{codeblock}
+finding:
+    raffle draw and refund paths allow outcome bias and stalled progress.
+
+broken properties:
+    winner selection should not be cheaply retryable or cancelable
+    prize settlement should not depend on recipient cooperation
+    refund processing should remain executable regardless of ticket count
+
+impact:
+    organizer, block producer, or caller may bias winner selection;
+    winner payout may be blocked by a reverting recipient;
+    refund_all may exceed execution limits and trap participant funds.
+
+recommendation:
+    use request-bound randomness with no post-request input changes;
+    store fulfillment before settlement;
+    use pull-based prize and refund claims;
+    bound all batch work;
+    define timeout and cancellation rules before randomness request.
+\end{codeblock}
+
+This is the right level of analysis. It does not merely say "do not use block timestamp for randomness" or "avoid unbounded loops." It names the security promises: unbiased selection, recipient-independent settlement, bounded refund progress, and no cheap discard option.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why are randomness, time, and resource limits best treated as adversarial inputs rather than neutral environment values?
+\item What is adversarial optionality, and why does it matter for multi-step flows such as commit-reveal schemes?
+\item Why is \texttt{block.prevrandao} better than many older block-field tricks but still not a complete randomness solution?
+\item What is the difference between a safety invariant and a progress property?
+\item Why can a participant who never directly steals funds still be a serious attacker in a griefing scenario?
+\item How can a push-payment design allow one recipient to block unrelated users?
+\item Why are deadlines and timeout paths security-critical rather than merely user-experience details?
+\item What should a reviewer test to show that a queue, batch, or refund path remains executable under adversarial state growth?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Review a raffle, loot-box mint, game, or validator-selection mechanism that uses on-chain randomness. Produce a randomness review that identifies entropy source, commitment point, discard options, request binding, fulfillment behavior, and residual bias.
+
+\item Take a protocol with a deadline, epoch rule, withdrawal delay, auction close, or timelock. Write a boundary-time test plan covering before, exactly at, and after the boundary; delayed inclusion; stale transactions; missing keepers; and timeout execution.
+
+\item Build a resource-exhaustion map for a contract or program with a queue, array, account list, dynamic field set, reward distributor, or batch settlement function. Identify every operation whose cost grows with user-controlled state and propose bounded processing or pull-based recovery.
+
+\item Write a short griefing finding for a system where an attacker can spend little to delay exits, block payouts, withhold a reveal, or force expensive processing. Include attacker cost, victim cost, external payoff, broken progress property, and recommended control.
+\end{enumerate}

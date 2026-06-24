@@ -1,11 +1,654 @@
 \chapter{Smart Accounts and Delegated Authority}
 
-\section{Smart Accounts, User Operations, Bundlers, and Entry Points}
+\section{Purpose}
 
-\section{Paymasters, Sponsored Transactions, and Griefing Risk}
+\begin{principlebox}
+A smart account is not merely a wallet with better user experience. It is a programmable authority boundary. Its security depends on which policy validates an action, which delegate can act, who pays for execution, which modules can extend authority, how recovery changes control, and whether other protocols recognize its signatures correctly.
+\end{principlebox}
 
-\section{Session Keys, Delegated Permissions, and Scoped Authority}
+Chapter~21 defined authorization as a predicate over actor, action, target, and state. Chapter~23 showed that external execution changes what must be revalidated. Chapter~25 treated upgrades and lifecycle transitions as privileged state changes. Chapter~26 explained why sponsorship, bounded resources, and optional participation can become liveness problems. This chapter combines those lessons in the account layer.
 
-\section{Social Recovery, Guardians, and Recovery Attacks}
+Traditional externally owned accounts are simple: one private key authorizes transactions, and the account pays gas. That simplicity is also a failure mode. A stolen key is total compromise. A lost key is permanent loss. Every transaction must be signed directly. Users need native gas. Applications often assume \texttt{msg.sender} and \texttt{ecrecover} are enough to prove user intent.
 
-\section{Signature Validation, Replay Domains, and Wallet Compatibility}
+Smart accounts change those assumptions. The account can be a contract. It can validate a UserOperation through a policy. It can batch calls, use multiple signers, delegate limited authority to a session key, accept sponsorship from a paymaster, recover through guardians, install modules, and verify signatures through contract logic. These features improve usability, but every feature adds a new authority surface.
+
+The weak review says, "The wallet validates signatures." The useful review asks:
+
+\begin{codeblock}
+delegated_authority_review:
+    who is the account?
+    what object represents the user's intent?
+    which contract validates that intent?
+    which path executes after validation?
+    who pays gas, and what can they be charged for?
+    what delegate, module, hook, or guardian can act without the main key?
+    what nonce, domain, deadline, chain, target, selector, and value are bound?
+    how can authority be revoked, rotated, upgraded, or recovered?
+    will protocols that integrate the account verify its signatures correctly?
+\end{codeblock}
+
+This chapter is EVM-heavy because most current smart-account standards are EVM standards: ERC-4337, ERC-7562, EIP-7702, ERC-1271, ERC-6492, ERC-2771, ERC-7579, ERC-6900, ERC-7715, and related wallet patterns. The goal is not to memorize standard numbers. The goal is to learn a portable security method for programmable accounts: separate validation from execution, separate payer from authority, separate account from delegate, and separate signature bytes from valid authorization.
+
+\section{Accounts as Programmable Authority Boundaries}
+
+A normal transaction answers three questions at once: who signs, what executes, and who pays. Account abstraction separates these questions. The signer may be a main key, multiple keys, a passkey, a session key, a guardian quorum, or a contract policy. The execution may be one call, batched calls, module logic, delegated EOA code, or a recovery transition. The payer may be the account, a paymaster, a relay service, a sponsor, or a token-payment mechanism.
+
+\subsection{From Key Ownership to Validation Policy}
+
+An externally owned account is controlled by a private key. A smart account is controlled by code. Safe's account documentation states the important distinction: contract accounts can hold funds and receive transactions like EOAs, but no single private key necessarily verifies transactions; account code defines how transactions are completed.\footnote{\href{https://docs.safe.global/advanced/smart-account-overview}{Safe documentation, "How do Safe Smart Accounts work?"}.}
+
+That changes the review model:
+
+\begin{codeblock}
+eoa_model:
+    valid transaction =
+        signature by private key
+        correct nonce
+        sufficient balance
+        valid chain id
+
+smart_account_model:
+    valid operation =
+        account-specific validation policy accepts operation
+        nonce lane or replay rule accepts operation
+        gas payment source can pay
+        entry path is authorized
+        execution respects delegated scope
+\end{codeblock}
+
+The security boundary is now the validation policy. A policy may check ECDSA signatures, threshold signatures, passkeys, guardian signatures, session-key envelopes, module state, time windows, token balances, proof verification, or off-chain authorization. A reviewer must not reduce that policy to "signature valid." Signature validity is only one possible input to authorization.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.14}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.23\textwidth}>{\RaggedRight\arraybackslash}p{0.31\textwidth}X@{}}
+\toprule
+Account model & Authority source & Review focus \\
+\midrule
+EOA & One private key and nonce & Key compromise, nonce replay, chain replay, signing UI. \\
+Multisig account & Owner set and threshold & Owner management, threshold changes, signature ordering, module bypass. \\
+ERC-4337 account & \texttt{validateUserOp()} policy & EntryPoint trust, validation scope, nonce lanes, gas payment, execution path. \\
+Modular account & Installed validators, executors, hooks, modules & Module installation, hook ordering, storage isolation, revocation. \\
+Delegated EOA & EIP-7702 delegation code & Signed delegation, storage compatibility, initialization, sponsor abuse. \\
+Recovery account & Guardian or recovery policy & Guardian quorum, delay, cancellation, rotation, recovery replay. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Chapter~21 already taught authorization predicates. This chapter adds a new constraint: with smart accounts, the predicate itself may be modular, upgradeable, sponsored, delegated, or externally recognized through standards. The vulnerability may be in the policy, in the entry path that invokes it, in the module that bypasses it, or in a protocol that assumes the account behaves like an EOA.
+
+\subsection{Validation, Execution, Sponsorship, and Recovery}
+
+Smart-account design is easiest to review as four planes:
+
+\begin{codeblock}
+smart_account_planes:
+    validation:
+        decide whether this operation is authorized
+
+    execution:
+        perform calls, batch calls, delegate calls, token transfers, or module logic
+
+    sponsorship:
+        decide who pays gas and under what conditions
+
+    recovery:
+        change the account's future authority when normal authority is lost or compromised
+\end{codeblock}
+
+Many bugs come from mixing these planes. A validation module may accidentally execute state-changing logic. A sponsorship policy may approve payment for a call it did not fully constrain. A recovery module may become a hidden owner. A session key may be validated for one target but execute arbitrary calldata through a batch function. A dApp may verify the signature bytes but not the account policy behind them.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=10mm and 11mm]
+\node[security node, text width=28mm] (intent) {User intent};
+\node[security node, right=of intent, text width=30mm] (validation) {Validation policy};
+\node[security node, right=of validation, text width=28mm] (execution) {Execution path};
+\node[security node, below=of validation, text width=30mm] (sponsorship) {Gas sponsor or payer};
+\node[security node, below=of execution, text width=28mm] (recovery) {Recovery or rotation};
+
+\draw[security arrow] (intent) -- (validation);
+\draw[security arrow] (validation) -- (execution);
+\draw[security arrow] (sponsorship) -- (validation);
+\draw[security arrow] (sponsorship) -- (execution);
+\draw[security arrow] (recovery) -- (validation);
+\draw[security arrow] (recovery) -- (execution);
+\end{tikzpicture}
+\caption{Smart-account review separates intent validation, execution, sponsorship, and recovery.}
+\end{figure}
+
+The reviewer should write down which plane each function belongs to. A function that changes owners is recovery or lifecycle, not ordinary execution. A function that installs a module changes validation or execution policy, not merely configuration. A function that sponsors gas is financial exposure, not user convenience. A function that validates a signature is authority logic, not a helper.
+
+\section{ERC-4337: Validation Before Execution}
+
+ERC-4337 defines account abstraction without changing Ethereum consensus rules. It introduces a UserOperation object, a separate UserOperation mempool, bundlers, an EntryPoint contract, account validation, optional paymasters, and an execution step.\footnote{\href{https://eips.ethereum.org/EIPS/eip-4337}{ERC-4337, "Account Abstraction Using Alt Mempool".}} Its security value comes from a sharp separation: validation decides whether an operation can be included; execution performs the user's call after validation succeeds.
+
+\subsection{UserOperations, EntryPoint, Bundlers, and Accounts}
+
+A UserOperation is not a normal Ethereum transaction. It describes an account operation: sender account, nonce, deployment code if needed, calldata, gas limits, gas prices, optional paymaster data, and signature. Bundlers collect UserOperations, simulate them, and submit bundles through the EntryPoint. The EntryPoint calls account validation, optional paymaster validation, executes the call, and charges gas.
+
+\begin{codeblock}
+erc_4337_flow:
+    user or wallet builds UserOperation
+    wallet signs according to account policy
+    bundler receives UserOperation
+    bundler simulates validation
+    bundler submits bundle to EntryPoint.handleOps
+    EntryPoint calls account.validateUserOp
+    EntryPoint calls paymaster validation if present
+    EntryPoint executes account callData
+    EntryPoint accounts for gas payment
+\end{codeblock}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=9mm and 8mm]
+\node[security node, text width=24mm] (user) {User or wallet};
+\node[security node, right=of user, text width=28mm] (op) {UserOperation};
+\node[security node, right=of op, text width=24mm] (bundler) {Bundler};
+\node[security node, below=of bundler, text width=28mm] (entry) {EntryPoint};
+\node[security node, left=of entry, text width=29mm] (account) {Smart account};
+\node[security node, right=of entry, text width=24mm] (paymaster) {Paymaster};
+\node[security node, below=of entry, text width=27mm] (target) {Target calls};
+
+\draw[security arrow] (user) -- (op);
+\draw[security arrow] (op) -- (bundler);
+\draw[security arrow] (bundler) -- (entry);
+\draw[security arrow] (entry) -- node[above, font=\small] {validate} (account);
+\draw[security arrow] (entry) -- node[above, font=\small] {validate} (paymaster);
+\draw[security arrow] (entry) -- (target);
+\end{tikzpicture}
+\caption{ERC-4337 routes account operations through bundler simulation and EntryPoint validation before execution.}
+\end{figure}
+
+The account must trust the correct EntryPoint. ERC-4337 documentation notes that smart accounts should check that validation is invoked through the intended EntryPoint.\footnote{\href{https://docs.erc4337.io/core-standards/erc-4337.html}{ERC-4337 documentation, "ERC-4337".}} If an account accepts arbitrary callers into its validation or execution entry points, the EntryPoint boundary collapses. If the account trusts the wrong EntryPoint address on a chain, the account's validation assumptions may be false.
+
+The review should identify every call path into the account:
+
+\begin{codeblock}
+account_entry_review:
+    direct calls from ordinary transactions
+    calls through EntryPoint
+    calls through modules
+    calls through trusted forwarders
+    calls after EIP-7702 delegation
+    recovery calls
+    upgrade or install calls
+\end{codeblock}
+
+A smart account may intentionally allow direct execution by owners and ERC-4337 execution through EntryPoint. That is fine only if both paths enforce equivalent or intentionally different authority. A session key validated only in the ERC-4337 path must not be able to call a direct execution function. A recovery module must not bypass the normal owner threshold without its own delay and cancellation rules.
+
+\subsection{Simulation, Nonces, Deposits, and Validation Scope}
+
+Bundlers are economically exposed. They pay gas for bundle submission and expect reimbursement. ERC-4337 therefore relies on simulation: before accepting a UserOperation, a bundler locally checks validation, signature correctness, gas payment, and paymaster behavior. The ERC-4337 specification explains that UserOperation validation depends on EVM state and can be affected by other operations, so simulation and validation rules are needed.\footnote{\href{https://eips.ethereum.org/EIPS/eip-4337}{ERC-4337, "Account Abstraction Using Alt Mempool".}}
+
+ERC-7562 generalizes validation scope rules for account abstraction. Its motivation is direct: programmable validation must preserve the mempool property that once a transaction-like object is accepted, it is guaranteed to pay, otherwise cheap denial-of-service becomes possible.\footnote{\href{https://eips.ethereum.org/EIPS/eip-7562}{ERC-7562, "Account Abstraction Validation Scope Rules".}} It limits what validation code can do so a UserOperation cannot be made invalid by arbitrary state changes or force unpaid computation.
+
+The security boundary is validation determinism. During validation, the account should not depend on arbitrary mutable external state unless the relevant entity is staked and within the applicable validation rules. The account should not write storage in ways that break simulation. The paymaster should not accept sponsorship based on off-chain assumptions that can be invalidated before execution.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.14}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.31\textwidth}X@{}}
+\toprule
+ERC-4337 field or concept & Security role & Review question \\
+\midrule
+\texttt{sender} & Account whose policy validates and executes & Is the account deployed, counterfactual, or created by trusted factory code? \\
+\texttt{nonce} & Replay protection and ordering & Is the nonce scoped correctly for parallel lanes, sessions, modules, or recovery? \\
+\texttt{callData} & Execution instruction to the account & Is the validated scope the same as the executed call path? \\
+\texttt{signature} & Proof accepted by account policy & Is the signed digest bound to chain, EntryPoint, account, nonce, target, and value? \\
+\texttt{paymasterAndData} & Sponsorship and gas policy & Can the paymaster be charged for calls it did not intend to sponsor? \\
+\texttt{initCode} & Counterfactual account creation & Is factory, salt, initializer, and owner setup authenticated? \\
+Gas limits & Execution and validation budgets & Can caller-selected limits grief account, paymaster, or bundler? \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Nonce design deserves special attention. A single monotonic nonce is easy to reason about but hurts parallelism. Multiple nonce lanes allow session keys and independent flows, but create replay and cancellation complexity. A session key with its own nonce lane must not be able to reuse signatures across targets, modules, chains, or accounts. A recovery operation should not share a replay domain with normal execution.
+
+\section{Delegated Execution Mechanisms}
+
+Delegated authority appears in several forms. ERC-2771 lets a recipient contract accept calls from a trusted forwarder that appends the original signer to calldata. ERC-4337 lets the account's code validate and execute a UserOperation. EIP-7702 lets an EOA set delegation code through a signed authorization tuple. Session keys and modules let a separate key or contract act within a scope. These mechanisms are not equivalent, but they share a review rule: the protocol must know whose authority it is using, which delegate is trusted, and what the delegate is allowed to do.
+
+\subsection{Trusted Forwarders and Meta-Transaction Boundaries}
+
+ERC-2771 defines a contract-level pattern for native meta-transactions. A trusted forwarder verifies a signed request and calls the recipient, appending the transaction signer to calldata; the recipient extracts the original signer only if the caller is a trusted forwarder.\footnote{\href{https://eips.ethereum.org/EIPS/eip-2771}{ERC-2771, "Secure Protocol for Native Meta Transactions".}} The security consideration is blunt: a malicious forwarder can forge \texttt{\_msgSender()}, so recipients must be careful about which forwarders they trust.
+
+\begin{codeblock}
+trusted_forwarder_review:
+    recipient checks isTrustedForwarder(msg.sender)
+    recipient extracts signer only when caller is trusted
+    forwarder verifies signer, nonce, deadline, target, value, and calldata
+    forwarder cannot be upgraded into a malicious signer-forger
+    recipient uses _msgSender consistently instead of raw msg.sender
+\end{codeblock}
+
+This is a delegated authority boundary. The recipient no longer uses raw \texttt{msg.sender} as the user. It uses a derived sender supplied through a trusted forwarding protocol. If any function mixes \texttt{msg.sender} and \texttt{\_msgSender()} inconsistently, authorization may split. If one contract in a system trusts a forwarder and another does not, the same user action may produce different authorities in different components. If the forwarder is upgradeable, the forwarder's admin becomes part of the recipient's trust boundary.
+
+Meta-transactions are narrower than smart accounts. They solve "someone else submits and pays for the transaction." They do not by themselves provide account recovery, modular validation, session policies, or smart-account signature semantics. Do not blur the models. A dApp that supports ERC-2771 has not automatically become smart-account compatible.
+
+\subsection{EIP-7702 and EOA Delegation Risk}
+
+EIP-7702 is more subtle. It allows an EOA to set code in its account through signed authorization tuples. The authorization tuple includes chain ID, target delegation address, nonce, and signature values; a delegation indicator points the account to code at another address.\footnote{\href{https://eips.ethereum.org/EIPS/eip-7702}{EIP-7702, "Set Code for EOAs".}} Code executing operations then load and execute the delegated code in the authority account's context.
+
+This bridges EOAs and smart-account behavior, but it creates sharp risks:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.14}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.24\textwidth}>{\RaggedRight\arraybackslash}p{0.33\textwidth}X@{}}
+\toprule
+EIP-7702 surface & Failure mode & Review question \\
+\midrule
+Delegation signature & Delegates too much or to wrong code & Is target code, chain, nonce, calldata, value, and expiry bound? \\
+Initialization & Account code set without safe storage setup & Can an observer front-run account initialization? \\
+Storage context & New delegate interprets existing storage differently & Is storage namespaced or migration-safe? \\
+Sponsored relayers & User invalidates authorization or removes assets after sponsor commits & Is sponsorship bonded, quoted, or replay-protected? \\
+\texttt{tx.origin} assumptions & EOA now executes code-like behavior & Does any integrated protocol rely on \texttt{tx.origin == msg.sender}? \\
+Revocation & Delegation remains when user expects a temporary effect & Is clearing or replacing delegation explicit and understandable? \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+EIP-7702's own security considerations warn that delegate contracts should require signatures over replay protection, value, gas, target, and calldata; otherwise a malicious actor or sponsor can reuse or redirect authority.\footnote{\href{https://eips.ethereum.org/EIPS/eip-7702}{EIP-7702, "Set Code for EOAs".}} The same section warns about initialization front-running and storage management. This is exactly why Chapter~25 matters: EOA delegation is a lifecycle transition over account code and state.
+
+The reviewer's rule is simple: do not describe EIP-7702 as "temporary smart wallet mode" unless the actual implementation makes the delegated scope temporary, bounded, and revocable. The protocol primitive sets delegation state. The safety comes from the delegate contract, signed authorization format, storage discipline, and user interface.
+
+\section{Paymasters and Sponsored Execution}
+
+Paymasters separate gas payment from account authority. That is powerful. A user can transact without holding native gas. A dApp can subsidize onboarding. A protocol can accept token-based payment. A sponsor can pay for a limited class of actions. It is also dangerous because the payer may be charged even when the user operation fails, reverts, or consumes more gas than expected.
+
+\subsection{Who Pays, Who Can Be Griefed, and Who Gets Charged}
+
+ERC-4337 paymasters are optional contracts that sponsor gas under programmable conditions. The EntryPoint can call \texttt{validatePaymasterUserOp()} during validation and \texttt{postOp()} after execution. ERC-4337 documentation summarizes the risk: if paymaster validation succeeds, the paymaster covers execution costs, and if the operation fails, the paymaster still pays network fees.\footnote{\href{https://docs.erc4337.io/core-standards/erc-4337.html}{ERC-4337 documentation, "ERC-4337".}}
+
+That means sponsorship is a financial authorization:
+
+\begin{codeblock}
+paymaster_authorization:
+    sponsor agrees to pay for this account
+    for this operation
+    under this policy
+    within this gas limit
+    before this deadline
+    with this post-operation accounting
+\end{codeblock}
+
+The paymaster must not merely check "user is eligible." It must check what it is being charged for. It should bind account, target, selector, value, token, price quote, validity window, gas limits, and any off-chain authorization. If it sponsors a call that can execute arbitrary account calldata, then sponsorship may become an open gas drain.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.14}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.24\textwidth}>{\RaggedRight\arraybackslash}p{0.33\textwidth}X@{}}
+\toprule
+Paymaster risk & Attack shape & Control \\
+\midrule
+Deposit drain & Many sponsored operations fail or consume high gas & Strict policy, quotas, gas caps, rate limits, and monitoring. \\
+Policy mismatch & Paymaster sponsors broader calldata than intended & Bind target, selector, value, token, account, nonce, and deadline. \\
+Price abuse & Token reimbursement priced stale or manipulated & Fresh quotes, slippage bounds, oracle checks, and maximum subsidy. \\
+\texttt{postOp()} failure & Accounting or refund logic reverts or costs too much & Keep \texttt{postOp()} bounded, simple, and failure-aware. \\
+Simulation gap & Operation passes simulation but fails in bundle context & Follow validation scope rules and avoid variable external dependencies. \\
+Sponsor griefing & User invalidates state after sponsor commits & Short validity windows, deposits, signed commitments, or reputation. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Chapter~26 covered griefing generally. Here the payer split makes it concrete. If an attacker can make the paymaster spend more than the attacker pays, the attack may be profitable even without stealing from the paymaster's contract. If a sponsored operation creates expensive validation for bundlers, bundlers may drop the paymaster or account from local mempools, turning a gas abstraction feature into degraded liveness.
+
+\subsection{PostOp, Quotas, Reverts, and Sponsorship Abuse}
+
+The paymaster's post-operation logic is not an afterthought. It may charge a token fee, update quota, emit usage data, or settle a sponsor budget. But by the time \texttt{postOp()} runs, gas has been spent and the user's execution may have succeeded or reverted. A fragile \texttt{postOp()} can make sponsorship unreliable. An expensive \texttt{postOp()} can become a gas drain. A stateful \texttt{postOp()} can create accounting drift between off-chain sponsor policy and on-chain liability.
+
+\begin{codeblock}
+paymaster_review:
+    what exact operation is sponsored?
+    what maximum gas can be charged?
+    is token reimbursement priced safely?
+    can the user force revert after paymaster validation?
+    can postOp revert or run unbounded work?
+    can off-chain authorization be replayed?
+    can quota be bypassed through nonce lanes, chain IDs, or accounts?
+    what happens when deposit is low?
+\end{codeblock}
+
+Do not evaluate paymasters only through the user's lens. The paymaster is also a protected asset. Its deposit is capital at risk. Its reputation with bundlers is operational risk. Its policy database, API signer, rate limiter, and quota system are part of the security model, even though some of those components are off-chain.
+
+\section{Session Keys, Modules, and Scoped Permissions}
+
+Session keys are attractive because they reduce signing friction. A user can authorize a game key, a trading bot, a mobile device, or an application session to act for a limited time. That is safe only if the session key's authority is genuinely limited. A session key that can call the account's arbitrary execution function is not a session key. It is another owner.
+
+\subsection{Permission Envelopes and Attenuated Authority}
+
+The security model for session keys is attenuation: a delegate receives less authority than the main account. ERC-4337 documentation describes session keys and delegation as temporary authorization patterns, often implemented wallet-by-wallet or through plugins, with constraints such as \texttt{validUntil} and target contract.\footnote{\href{https://docs.erc4337.io/smart-accounts/session-keys-and-delegation.html}{ERC-4337 documentation, "Session Keys and Delegation".}} ERC-7715, a draft permission-request standard, similarly emphasizes scoped permissions and warns dApps to request only needed permissions with reasonable expiration.\footnote{\href{https://eips.ethereum.org/EIPS/eip-7715}{ERC-7715, "Request Permissions from Wallets"}.}
+
+A useful permission envelope is explicit:
+
+\begin{codeblock}
+permission_envelope:
+    account
+    delegate key or session account
+    chain id
+    verifying account or module
+    allowed target contracts
+    allowed selectors
+    token and value limits
+    per-period spend limits
+    start time and expiry
+    nonce or nonce lane
+    revocation rule
+    allowed calldata shape
+\end{codeblock}
+
+The most common failure is under-specification. The policy says "this key may trade on Protocol X," but the implementation checks only that the target address is Protocol X's router. If the router supports arbitrary multicall, permit transfer, external callback, or delegate-like execution, the key may do more than intended. The policy says "maximum 100 USDC per day," but the implementation checks token amount on one function and misses another selector. The policy says "game session only," but the session can transfer NFTs out of the account.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.14}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.23\textwidth}>{\RaggedRight\arraybackslash}p{0.32\textwidth}X@{}}
+\toprule
+Permission field & Why it matters & Failure mode \\
+\midrule
+Target & Limits which contracts can be called & Router or module exposes arbitrary downstream execution. \\
+Selector & Limits which functions can be called & Same target has admin, transfer, permit, or sweep functions. \\
+Value and token & Limits economic exposure & Native value, token amount, or approval path omitted. \\
+Calldata shape & Limits parameters, recipient, path, or asset & Delegate changes recipient, slippage, pool, or token route. \\
+Time window & Limits duration of compromise & No expiry or overly long session. \\
+Nonce lane & Prevents replay and cross-session collision & Signature reused across sessions, modules, accounts, or chains. \\
+Revocation & Lets owner stop delegated authority & Stale signatures remain usable, or revocation is delayed. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Session-key review should end in negative tests: wrong target, wrong selector, wrong recipient, excess value, expired permission, reused nonce, changed chain ID, changed account, changed module, arbitrary batch call, and revocation after signature creation.
+
+\subsection{Modules, Hooks, Plugins, and Installation Risk}
+
+Modular accounts move authority into installable components. ERC-7579 defines minimal interfaces for modular smart accounts and modules to improve interoperability.\footnote{\href{https://eips.ethereum.org/EIPS/eip-7579}{ERC-7579, "Minimal Modular Smart Accounts".}} ERC-6900 defines modular smart contract accounts with validation functions, execution functions, and hooks.\footnote{\href{https://eips.ethereum.org/EIPS/eip-6900}{ERC-6900, "Modular Smart Contract Accounts".}} Safe's documentation warns that modules and guards are security-critical because modules can execute through alternative access patterns and guards can block transactions.\footnote{\href{https://docs.safe.global/advanced/smart-account-overview}{Safe documentation, "How do Safe Smart Accounts work?"}.}
+
+Modularity creates reviewable boundaries:
+
+\begin{codeblock}
+module_review:
+    who can install module?
+    what module type is installed?
+    what selectors, hooks, validators, or executors are added?
+    what storage does the module read or write?
+    can module call account execution?
+    can module bypass owner threshold?
+    can module block exits or recovery?
+    how is module removed?
+\end{codeblock}
+
+Module installation is a lifecycle transition. It changes what the account can do and who can cause it to act. A module that can execute transactions without owner confirmation is equivalent to a new authority. A hook that runs before execution can censor actions. A hook that runs after execution can grief or revert settlement depending on the account design. A fallback handler can make the account appear to support interfaces with security consequences. A module that uses \texttt{delegatecall} into account storage creates storage-collision and upgrade risks.
+
+The right mental model is not "plugin." It is "new account law." Installing a module amends the rules of the account.
+
+\section{Recovery, Guardians, and Account Lifecycle}
+
+Recovery is one of the strongest reasons to use smart accounts. A user can lose a device or key and still regain access through guardians, time delays, passkeys, multisig owners, recovery modules, or policy verifiers. But recovery is also one of the highest-authority transitions in an account. It changes who controls future assets.
+
+\subsection{Owner Rotation, Guardian Quorums, and Timelocks}
+
+Social recovery systems typically let a quorum of guardians approve replacing the account's owner or signer. ERC-7093, a draft social recovery interface, separates guardian identity verification, recovery policy verification, and account recovery, and includes recovery nonce concepts to prevent replay.\footnote{\href{https://eips.ethereum.org/EIPS/eip-7093}{ERC-7093, "Social Recovery Interface".}} The draft status matters: treat it as a design reference, not a universally deployed standard.
+
+Recovery review should ask:
+
+\begin{codeblock}
+recovery_review:
+    who are guardians?
+    how are guardians added, removed, and rotated?
+    what quorum is required?
+    is there a delay before recovery executes?
+    can current owner cancel a malicious recovery?
+    what nonce or recovery id prevents replay?
+    can guardians recover to an arbitrary address?
+    can recovery module be upgraded or removed?
+    what happens if guardians are unavailable?
+\end{codeblock}
+
+A guardian quorum is an authority set. If the quorum can recover immediately to any new owner, then compromising that quorum is account compromise. A delay and cancellation path reduce risk but introduce liveness tradeoffs. A long delay protects against malicious recovery but hurts users who genuinely lost access. A short delay improves usability but gives the owner little time to cancel. Guardian privacy can protect guardians from social attack, but may make users unable to audit their recovery set. Institutional guardians may be more reliable but add centralization and legal process risk.
+
+\subsection{Recovery Modules as Privileged State Transitions}
+
+Recovery is not a side feature. It is a privileged state transition:
+
+\begin{codeblock}
+recover_account(new_owner):
+    verify recovery request
+    verify guardian quorum or policy
+    verify recovery nonce
+    enforce delay
+    allow cancellation by current authority
+    update owner or validation policy
+    revoke stale sessions if required
+    emit evidence
+\end{codeblock}
+
+The last two lines are easy to miss. If a recovery changes the owner but leaves old session keys, modules, delegated code, paymaster permissions, or allowances intact, the recovered account may still be compromised. If recovery does not emit enough evidence, users and monitoring systems may not see that control changed. If recovery is controlled by a module, module installation and removal are part of recovery security.
+
+Chapter~25's lifecycle method applies directly. Recovery changes account authority over persistent state. It should have preconditions, postconditions, event evidence, tests, and rollback or cancellation behavior. A recovery module that can be installed by a single owner, then used later to replace the owner, is a delayed privilege escalation unless the installation itself is governed with the seriousness of owner change.
+
+\section{Signature Compatibility and Replay Domains}
+
+Smart accounts break many dApp assumptions. A protocol that verifies only ECDSA signatures through \texttt{ecrecover} may reject contract accounts. A protocol that treats any signature bytes as authorization may accept the wrong account's policy. A protocol that omits chain ID, verifying contract, nonce, deadline, or account address may permit replay. A protocol that uses permits may work for EOAs but fail for smart accounts. Compatibility is not UX polish. It is security correctness.
+
+\subsection{ERC-1271, ERC-6492, and Undeployed Accounts}
+
+ERC-1271 defines a standard contract method for validating signatures on behalf of contract accounts: \texttt{isValidSignature(hash, signature)} returns a magic value when valid and must not modify state.\footnote{\href{https://eips.ethereum.org/EIPS/eip-1271}{ERC-1271, "Standard Signature Validation Method for Contracts".}} Applications that support smart accounts should call this method when the signer is a contract instead of assuming \texttt{ecrecover}.
+
+ERC-6492 extends that idea to counterfactual accounts that are not deployed yet. If a contract account does not exist on-chain, ordinary ERC-1271 verification cannot call it; ERC-6492 wraps enough deployment or preparation data for the verifier to validate a predeployment signature.\footnote{\href{https://eips.ethereum.org/EIPS/eip-6492}{ERC-6492, "Signature Validation for Predeploy Contracts".}} It also warns about verification ordering: identifiable counterfactual signatures should not be treated as ordinary ECDSA signatures first.
+
+\begin{codeblock}
+signature_verification_order:
+    if signature has ERC-6492 wrapper:
+        perform counterfactual verification path
+    else if signer has contract code:
+        call ERC-1271 isValidSignature
+    else:
+        recover EOA signer and compare address
+\end{codeblock}
+
+This decision tree is a teaching model, not a universal library. Real implementations must handle chain-specific RPC behavior, bytecode checks, precompiles, CREATE2 factories, and failure modes. The core lesson is stable: signature verification depends on account type and deployment state.
+
+Smart-account signatures may also be state-dependent. A signature valid today may become invalid after owner rotation, module removal, threshold change, or recovery. That is sometimes desirable. But dApps must not cache smart-account signature validity forever unless the signed message and account policy make that safe.
+
+\subsection{EIP-712, Permits, Domain Separation, and Wallet Compatibility}
+
+EIP-712 defines typed structured data signing with domain separation. Its specification explicitly says it does not include replay protection by itself.\footnote{\href{https://eips.ethereum.org/EIPS/eip-712}{EIP-712, "Typed structured data hashing and signing".}} Replay protection must be added by the application through nonces, deadlines, chain IDs, verifying contracts, account-specific domains, or consumed-order state.
+
+ERC-2612 permit illustrates the pattern: it adds \texttt{permit}, \texttt{nonces}, and \texttt{DOMAIN\_SEPARATOR()} so token approvals can be authorized by signature instead of an on-chain \texttt{approve} call.\footnote{\href{https://eips.ethereum.org/EIPS/eip-2612}{ERC-2612, "Permit Extension for EIP-20 Signed Approvals".}} That solves one UX problem but introduces signature integration constraints. A permit implementation designed only for EOA ECDSA signatures may not accept ERC-1271 contract signatures. A dApp that asks a smart account to sign a permit should know whether the token supports that account type.
+
+\begin{codeblock}
+signed_authorization_review:
+    message type is explicit
+    domain includes chain id and verifying contract
+    account or owner is explicit
+    target and selector are explicit
+    value, token, spender, recipient, and amount are explicit
+    nonce is consumed exactly once
+    deadline is enforced
+    smart-account signature path is supported
+    signature is not replayable across modules, chains, accounts, or versions
+\end{codeblock}
+
+The most common integration bugs are boring and expensive: wrong domain separator, missing chain ID, stale cached domain after upgrade, permit not compatible with contract wallets, assuming \texttt{tx.origin}, assuming \texttt{msg.sender} is the user when a forwarder or EntryPoint is involved, or using ECDSA recovery for an account that validates through ERC-1271.
+
+\section{Review Method: Delegated Authority Review}
+
+A delegated-authority review should produce a concrete artifact, not a general statement that the account uses account abstraction.
+
+\begin{artifactbox}[Delegated authority review]
+The artifact should map validation paths, execution paths, payers, delegates, modules, recovery authorities, signature domains, and revocation mechanisms. It should end with negative tests that try to escape scope.
+\end{artifactbox}
+
+\begin{codeblock}
+delegated_authority_review_package:
+    1. account identity
+       address, factory, implementation, proxy, EntryPoint, chain
+
+    2. validation paths
+       owner signatures, ERC-4337 validation, modules, passkeys, guardians
+
+    3. execution paths
+       direct execute, batch execute, module execute, forwarded calls, delegated EOA code
+
+    4. payer paths
+       account deposit, paymaster, relayer, token reimbursement, sponsor API
+
+    5. delegation inventory
+       session keys, modules, hooks, guards, forwarders, 7702 delegates
+
+    6. permission envelopes
+       target, selector, token, value, calldata shape, expiry, nonce, revocation
+
+    7. recovery model
+       guardians, quorum, delay, cancellation, owner rotation, stale authority cleanup
+
+    8. signature compatibility
+       ERC-1271, ERC-6492, EIP-712 domains, permit support, replay protection
+
+    9. negative tests
+       wrong target, wrong selector, arbitrary batch, expired session,
+       reused nonce, revoked key, guardian replay, wrong EntryPoint,
+       paymaster overcharge, smart-account signature on EOA-only path
+\end{codeblock}
+
+The finding should name the escaped authority. "Session key is unsafe" is weak. "A session key intended only for game actions can call the account's generic batch executor and transfer ERC-20 tokens to arbitrary recipients" is useful. "Paymaster griefing" is weak. "The paymaster sponsors any account calldata signed by an allowlisted user, so an attacker can force the paymaster to pay for high-gas reverted calls outside the intended onboarding flow" is useful.
+
+\section{Worked Example: A Sponsored Session Key That Escapes Its Scope}
+
+Consider a smart account used by a trading application. The user wants a session key that can rebalance a position for one day. The application also sponsors gas through a paymaster so the user does not need native ETH.
+
+The intended policy:
+
+\begin{codeblock}
+intended_permission:
+    delegate = session_key
+    target = TradingRouter
+    selector = rebalance(position_id, max_slippage)
+    max_notional = 10,000 USDC
+    valid_until = tomorrow
+    nonce_lane = session_key_lane
+    payer = TradingPaymaster
+\end{codeblock}
+
+The implementation validates only:
+
+\begin{codeblock}
+actual_validation:
+    require signature by session_key
+    require block.timestamp <= valid_until
+    require userOp.sender == account
+    require target == TradingRouter
+\end{codeblock}
+
+The account execution function supports batching:
+
+\begin{codeblock}
+executeBatch(calls):
+    for call in calls:
+        call.target.call(call.value, call.data)
+\end{codeblock}
+
+The TradingRouter supports a multicall-like path that can call token approvals and arbitrary adapters. The paymaster sponsors any UserOperation from the account if the session key signature is valid and the target field in the policy says \texttt{TradingRouter}.
+
+This is broken. The policy intended to allow one rebalance function. The implementation allowed any calldata to the router. If the router can route to arbitrary adapters, the session key can create approvals, move tokens, or execute a different trade path. If \texttt{executeBatch} is the actual account call and the validation checks only one extracted target, the session key may include additional calls after the checked call. If the paymaster checks the same weak envelope, it pays for the attack.
+
+A correct review writes the escaped authority:
+
+\begin{codeblock}
+escaped_authority:
+    session key can execute arbitrary router calldata
+    session key can use account batch execution if batch is not parsed fully
+    paymaster sponsors calls beyond intended rebalance action
+    approval or token transfer side effects exceed max_notional policy
+\end{codeblock}
+
+The corrected policy must bind the execution shape:
+
+\begin{codeblock}
+safe_validation:
+    require signature by session_key over permission_id and userOpHash
+    require account == signed_account
+    require chain_id == signed_chain_id
+    require entry_point == signed_entry_point
+    require nonce_lane == session_key_lane
+    require block.timestamp <= valid_until
+    decode account calldata
+    require function == executeSingle or approved batch schema
+    require target == TradingRouter
+    require selector == rebalance
+    require position_id belongs to account
+    require token exposure <= max_notional
+    require recipient == account or allowed vault
+    require no arbitrary adapter call
+    consume nonce
+\end{codeblock}
+
+The paymaster should validate the same economic envelope, or a stricter one:
+
+\begin{codeblock}
+paymaster_policy:
+    sponsor only signed permission_id
+    sponsor only bounded gas limits
+    sponsor only approved account and router
+    reject arbitrary batch calldata
+    enforce sponsor quota
+    expire authorization quickly
+    record usage after operation
+\end{codeblock}
+
+The finding:
+
+\begin{codeblock}
+finding:
+    sponsored session key can escape intended rebalance scope.
+
+broken property:
+    delegated authority must be limited to one rebalance action with
+    bounded notional, deadline, nonce, target, selector, and calldata shape.
+
+impact:
+    attacker controlling or obtaining the session key can execute unintended
+    router calls, create approvals or token movements, and make the paymaster
+    fund unauthorized execution.
+
+recommendation:
+    bind the signed permission to account, chain, EntryPoint, nonce lane,
+    target, selector, value, token exposure, recipient, calldata schema,
+    expiry, and revocation state; parse the full account execution payload;
+    reject arbitrary batch or multicall escape paths; mirror the envelope in
+    paymaster validation.
+\end{codeblock}
+
+This example closes Part~IV's contract-vulnerability arc. The bug is not just "bad signature check." It touches authorization, external control flow, accounting exposure, lifecycle state, liveness and griefing, and signature compatibility. That is why smart accounts belong at the end of this part.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why is a smart account better modeled as a programmable authority boundary than as a normal wallet?
+\item What security distinction does ERC-4337 make between validation and execution?
+\item Why do bundlers need simulation and validation-scope rules before accepting UserOperations?
+\item How does a paymaster change the threat model compared with a user paying gas directly?
+\item Why is a session key unsafe unless its target, selector, value, calldata shape, deadline, nonce, and revocation rule are explicit?
+\item How can an installed module or hook become equivalent to a new account owner?
+\item Why is social recovery a privileged state transition rather than a backup feature?
+\item Why does \texttt{ecrecover}-only signature verification break smart-account compatibility?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Review an ERC-4337 smart account implementation or toy design. Produce a validation-execution map that identifies EntryPoint checks, nonce handling, account validation, execution function, gas payment path, and direct-call bypasses.
+
+\item Design a session-key permission envelope for a game action, trading action, or subscription payment. Include target, selector, value or token limit, calldata constraints, expiry, nonce lane, revocation, and negative tests.
+
+\item Review a paymaster policy. Identify what the paymaster sponsors, how it bounds gas and calldata, how it handles failed execution, how it prevents replay, and how its deposit could be drained or griefed.
+
+\item Take a dApp signature flow and make it smart-account compatible. Specify when to use EOA recovery, ERC-1271, ERC-6492, EIP-712 domain checks, nonces, deadlines, and chain-specific verification.
+\end{enumerate}

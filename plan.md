@@ -584,19 +584,54 @@ Part II applies the Part I method below the application layer: how histories bec
 
 ### 26. Randomness, Time, DoS, and Griefing
 
-* 26.1 Unsafe Randomness from Block Data, Local State, and Predictable Inputs
-* 26.2 Time Assumptions, Slot Assumptions, and Timestamp Dependence
-* 26.3 Gas, Compute, Storage, and Account-Based DoS
-* 26.4 Griefing Attacks with Low or Indirect Profit
-* 26.5 Liveness Failures: Stuck Funds, Frozen Queues, and Broken Exits
+* 26.1 Purpose
+* 26.2 Adversarial Optionality
+  * 26.2.1 Randomness, Time, and Resources as Inputs
+  * 26.2.2 Progress Is a Security Property
+* 26.3 Randomness and Entropy Sources
+  * 26.3.1 Public State Is Not Secret
+  * 26.3.2 Commit-Reveal, VRFs, and Beacon Randomness
+* 26.4 Time, Slots, Blocks, and Deadlines
+  * 26.4.1 Timestamps, Heights, Slots, and Epochs
+  * 26.4.2 Windows, Expiry, and Keeper Timing
+* 26.5 Resource Exhaustion and Denial of Service
+  * 26.5.1 Gas, Compute, Storage, Accounts, and Objects
+  * 26.5.2 Unbounded Work and Failure Propagation
+* 26.6 Griefing and Economic Liveness
+  * 26.6.1 Low-Profit and Indirect-Profit Attacks
+  * 26.6.2 Withholding, Censorship, and Optional Participation
+* 26.7 Designing Progress Guarantees
+  * 26.7.1 Bounded Work and Pull-Based Recovery
+  * 26.7.2 Queues, Batches, Timeouts, and Escape Hatches
+* 26.8 Review Method: Randomness-Time-Liveness Review
+* 26.9 Worked Example: A Raffle That Can Be Biased and Stalled
 
 ### 27. Smart Accounts and Delegated Authority
 
-* 27.1 Smart Accounts, User Operations, Bundlers, and Entry Points
-* 27.2 Paymasters, Sponsored Transactions, and Griefing Risk
-* 27.3 Session Keys, Delegated Permissions, and Scoped Authority
-* 27.4 Social Recovery, Guardians, and Recovery Attacks
-* 27.5 Signature Validation, Replay Domains, and Wallet Compatibility
+* 27.1 Purpose
+* 27.2 Accounts as Programmable Authority Boundaries
+  * 27.2.1 From Key Ownership to Validation Policy
+  * 27.2.2 Validation, Execution, Sponsorship, and Recovery
+* 27.3 ERC-4337: Validation Before Execution
+  * 27.3.1 UserOperations, EntryPoint, Bundlers, and Accounts
+  * 27.3.2 Simulation, Nonces, Deposits, and Validation Scope
+* 27.4 Delegated Execution Mechanisms
+  * 27.4.1 Trusted Forwarders and Meta-Transaction Boundaries
+  * 27.4.2 EIP-7702 and EOA Delegation Risk
+* 27.5 Paymasters and Sponsored Execution
+  * 27.5.1 Who Pays, Who Can Be Griefed, and Who Gets Charged
+  * 27.5.2 PostOp, Quotas, Reverts, and Sponsorship Abuse
+* 27.6 Session Keys, Modules, and Scoped Permissions
+  * 27.6.1 Permission Envelopes and Attenuated Authority
+  * 27.6.2 Modules, Hooks, Plugins, and Installation Risk
+* 27.7 Recovery, Guardians, and Account Lifecycle
+  * 27.7.1 Owner Rotation, Guardian Quorums, and Timelocks
+  * 27.7.2 Recovery Modules as Privileged State Transitions
+* 27.8 Signature Compatibility and Replay Domains
+  * 27.8.1 ERC-1271, ERC-6492, and Undeployed Accounts
+  * 27.8.2 EIP-712, Permits, Domain Separation, and Wallet Compatibility
+* 27.9 Review Method: Delegated Authority Review
+* 27.10 Worked Example: A Sponsored Session Key That Escapes Its Scope
 
 ---
 
