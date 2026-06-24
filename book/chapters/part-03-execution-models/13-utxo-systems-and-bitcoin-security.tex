@@ -1,0 +1,540 @@
+\chapter{UTXO Systems and Bitcoin Security}
+
+\section{Purpose}
+
+\begin{principlebox}
+A UTXO system does not maintain account balances. It maintains a set of unspent outputs, and every accepted transaction consumes some outputs and creates new ones.
+\end{principlebox}
+
+Part I taught the reusable security model: identify state, inputs, authority, transition rules, evidence, and invariants. Part II showed that transaction results become meaningful only inside a history-selection and settlement model. Part III now turns to execution models. The first execution model is the unspent transaction output model, because it forces reviewers to abandon account-based habits.
+
+In an account system, a reviewer often asks, ``what is this account's balance?'' In a UTXO system, that question is already a wallet abstraction. The base machine remembers discrete spendable outputs. Each output names a value and a spending condition. A later transaction can spend that output only by naming it and satisfying its condition. The transaction does not debit an account. It destroys old claims and creates new claims.
+
+That difference changes security review. Authorization is not a global account permission. It is satisfaction of a particular output's locking condition. Replay does not look like reusing an account nonce. Double spending is prevented by consuming an outpoint exactly once in the accepted history. Change is not an accounting detail; it is a newly created output that can leak ownership, strand value, or become the wrong authority's spendable claim. Fees are not a field paid from an account; they are the difference between total input value and total output value.
+
+This chapter is not a Bitcoin history lesson and not a full Lightning chapter. It teaches the UTXO execution model and the Bitcoin-specific mechanics that a security reviewer must understand before reviewing wallets, payment flows, custody policies, timelocked contracts, presigned transactions, bridge deposit policies, or protocols that rely on Bitcoin settlement.
+
+\section{UTXOs as State}
+
+\subsection{The State Is the Unspent Output Set}
+
+Bitcoin transactions consume previous outputs and create new outputs. An output that has not yet been consumed is an unspent transaction output, or UTXO. Bitcoin's developer documentation describes a transaction as spending outputs from earlier transactions and creating outputs that can later be spent by future transactions.\footnote{\href{https://developer.bitcoin.org/devguide/transactions.html}{Bitcoin Developer Guide, ``Transactions''}.}
+
+For security review, the current UTXO set is the spendable state:
+
+\begin{codeblock}
+UTXO set:
+    outpoint -> {
+        value,
+        locking condition,
+        metadata needed for validation
+    }
+\end{codeblock}
+
+An outpoint is a reference to a specific output of a specific transaction. If a transaction has identifier \texttt{txid} and the output index is \texttt{vout}, the outpoint is:
+
+\begin{codeblock}
+(txid, vout)
+\end{codeblock}
+
+A valid transaction removes the referenced outpoints from the UTXO set and inserts its newly created outputs:
+
+\begin{codeblock}
+apply_utxo_transaction(utxo_set, transaction):
+    require no duplicate outpoints in transaction.inputs
+    input_value = 0
+
+    for input in transaction.inputs:
+        prevout = input.outpoint
+        require prevout exists in utxo_set
+        require input satisfies prevout.locking_condition
+        input_value += prevout.value
+
+    output_value = sum(transaction.outputs.value)
+    require input_value >= output_value
+
+    remove every consumed prevout from utxo_set
+    add every new output to utxo_set
+    fee = input_value - output_value
+    return updated_utxo_set, fee
+\end{codeblock}
+
+The duplicate-outpoint check appears first because the ``\texttt{require prevout exists}'' test alone does not prevent the same outpoint from appearing in two inputs. Without an explicit uniqueness requirement, a naive implementation could accumulate the same input value twice before the removal step, producing an inflated input total and therefore an understated fee. Consensus rules reject duplicate outpoints; the pseudocode must state that requirement explicitly at the entry point rather than relying on removal-during-iteration to implicitly enforce it.
+
+This model makes conservation explicit. A transaction cannot partially spend an output. If a user spends a 1~BTC output to pay 0.3~BTC, the transaction must create a payment output and usually a change output. The original 1~BTC output disappears. The change output becomes a new spendable claim.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=12mm and 18mm]
+\node[security node] (u1) {UTXO A\\0.7 BTC};
+\node[security node, below=of u1] (u2) {UTXO B\\0.5 BTC};
+\node[security node, right=of u1, yshift=-8mm] (tx) {Transaction\\spends A+B};
+\node[security node, right=of tx, yshift=10mm] (pmt) {Output 0\\payment};
+\node[security node, right=of tx, yshift=-10mm] (chg) {Output 1\\change};
+
+\draw[security arrow] (u1) -- (tx);
+\draw[security arrow] (u2) -- (tx);
+\draw[security arrow] (tx) -- (pmt);
+\draw[security arrow] (tx) -- (chg);
+\end{tikzpicture}
+\caption{A UTXO transaction consumes old spendable claims and creates new spendable claims.}
+\end{figure}
+
+The practical review question is:
+
+\begin{codeblock}
+Which old claims are consumed?
+Which new claims are created?
+Who can satisfy each new spending condition?
+What value disappears as fee?
+\end{codeblock}
+
+\subsection{No Account Balance Exists at Consensus Level}
+
+A wallet may show a balance, but that balance is computed by scanning outputs that the wallet believes it can spend. The chain does not store an account balance for the user. This matters because wallet behavior becomes part of the security surface:
+
+\begin{itemize}
+\item coin selection decides which outputs are linked together as inputs;
+\item change output detection affects privacy;
+\item dust outputs can become uneconomical to spend;
+\item address reuse can cluster activity;
+\item wallet labels may not correspond to consensus facts; and
+\item signing devices must understand which outputs and scripts they are authorizing.
+\end{itemize}
+
+If a protocol says that a Bitcoin user ``has'' some amount, ask where that claim is represented. Is it a UTXO controlled by the user's key? A multisig output? A Taproot output with several possible spend paths? An exchange database balance? A Lightning channel balance? A bridge accounting entry? These are different assets under Chapter~2's method.
+
+\subsection{Fees Are Implied by Missing Value}
+
+Bitcoin transactions do not include a separate fee field in the same way an account transaction may include explicit gas fields. The transaction fee is:
+
+\[
+\text{fee} = \sum \text{inputs} - \sum \text{outputs}
+\]
+
+This simple equation has serious review implications. If a wallet constructs the wrong change output, the difference may become a miner fee. If a signing device cannot verify the values of previous outputs, it may be unable to detect an excessive fee. Segregated Witness changed signature hashing so signers can commit to input amounts in a safer way for offline signing.\footnote{\href{https://github.com/bitcoin/bips/blob/master/bip-0143.mediawiki}{BIP-143, ``Transaction Signature Verification for Version 0 Witness Program''}.}
+
+For every transaction, the reviewer should be able to fill this table:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.24\textwidth}X@{}}
+\toprule
+Question & Review significance \\
+\midrule
+Which outpoints are consumed? & Identifies the exact prior claims destroyed by the transition \\
+Which script or witness satisfies each input? & Identifies spend authority and spend path \\
+What new outputs are created? & Identifies new assets and future authorities \\
+Which output is change? & Exposes privacy, wallet correctness, and authority assignment risk \\
+What is the fee? & Detects value loss, fee-bump strategy, and possible signing mistakes \\
+Which fields affect locktime or replacement? & Determines timing, cancellation, and fee-policy assumptions \\
+\bottomrule
+\end{tabularx}
+\caption{UTXO transaction review starts from consumed claims, created claims, and implied fee.}
+\end{table}
+
+\section{Transaction Anatomy and Review Evidence}
+
+\subsection{Inputs Name Previous Outputs}
+
+Each input names a previous output and supplies data that helps satisfy that output's spending condition. In legacy transactions, this data included \texttt{scriptSig}. In SegWit transactions, witness data is separated from the transaction data used for the traditional transaction identifier, which changes malleability and evidence questions.\footnote{\href{https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki}{BIP-141, ``Segregated Witness''}.}
+
+A reviewer should separate:
+
+\begin{itemize}
+\item the transaction identifier;
+\item the witness transaction identifier when witness data is present;
+\item the outpoints being spent;
+\item the locking scripts of those prior outputs;
+\item the witness or unlocking data supplied by this transaction; and
+\item the newly created outputs.
+\end{itemize}
+
+Do not treat a transaction hash as a complete explanation. A hash identifies bytes. It does not tell you whether a signer understood the change output, whether a child transaction depends on it, whether a timelock path remains spendable, or whether a wallet clustered unrelated funds.
+
+\subsection{Outputs Encode Future Authority}
+
+Every output is a future spending condition. Common output types hide script details behind address formats, but the security model is still a predicate: the spender must satisfy the condition encoded by the output.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.28\textwidth}X@{}}
+\toprule
+Output idea & Spending condition & Review focus \\
+\midrule
+Single-key payment & Valid signature under a specified key or key hash & Is the key controlled by the intended party? \\
+Multisig policy & Enough valid signatures from a set of keys & Threshold, key custody, recovery path, signing order, hidden policy \\
+Timelocked path & Valid signature plus time or sequence condition & Clock, MTP, relative delay, monitoring, timeout path \\
+Hashlocked path & Reveal a preimage matching a hash & Secret reuse, preimage publication, timeout fallback \\
+Taproot key path & Schnorr signature for the aggregated output key & Hidden policy, key aggregation assumptions, signer coordination \\
+Taproot script path & Reveal script path and satisfy that script & Which paths are possible, what remains hidden, and what path was actually used \\
+\bottomrule
+\end{tabularx}
+\caption{A UTXO output is a future authority rule, not only a payment destination.}
+\end{table}
+
+\subsection{Change Is a Security Surface}
+
+Change outputs are easy to dismiss as wallet plumbing. That is a mistake. Change creates a new asset under a new spending condition. Bad change handling can:
+
+\begin{itemize}
+\item leak ownership by linking inputs and outputs;
+\item send change to the wrong wallet branch or wrong script type;
+\item create dust that costs more to spend than it is worth;
+\item break multisig custody policy if the change path is weaker than the input path;
+\item strand funds if a hardware signer or descriptor cannot later recognize the change output; and
+\item turn a transaction-construction bug into a huge accidental fee.
+\end{itemize}
+
+The signer must not only ask whether the payment output is correct. It must ask whether every other output is intended. In UTXO systems, the unauthorized output can be the change output.
+
+\begin{artifactbox}[Transaction and PSBT Evidence Worksheet]
+\begin{artifactchecklist}
+\item list every input outpoint and value;
+\item identify the previous output type and spending condition for every input;
+\item identify every output, value, and script type;
+\item mark payment, change, fee, dust, and data-carrying outputs;
+\item compute fee and fee rate;
+\item record locktime, sequence values, and replacement signaling;
+\item record whether witness data changes the evidence you need;
+\item state what claim the transaction proves, and what it does not prove;
+\item if reviewing a PSBT, verify that previous output scripts and values are present for every input and that they match the claimed outpoints;
+\item check the sighash type on every input and confirm it is appropriate for the intended spend path and custody policy;
+\item verify that change outputs are derivable under the wallet's descriptor or signing policy, and that the signing device can independently confirm change ownership before it approves;
+\item confirm that no unsigned inputs remain that a co-signer or relay intermediary could modify after partial signing; and
+\item for multisig PSBTs, check the partial signature set against the required threshold and the expected key set before considering the transaction ready to broadcast.
+\end{artifactchecklist}
+\end{artifactbox}
+
+\section{Spending Conditions: Script, Witnesses, and Taproot}
+
+\subsection{Script Is Predicate Logic for Spending}
+
+Bitcoin Script is deliberately limited. It is not a general smart-contract environment like the EVM. It is a stack-based language used to decide whether a particular spend of a particular output is valid. A script does not run forever, call arbitrary contracts, or mutate global contract storage. It evaluates a spending condition.
+
+The limitations of Bitcoin Script define the boundary of what UTXO contracts can express without additional mechanisms:
+
+\begin{itemize}
+\item \emph{No arbitrary global mutable state.} A script cannot read or write a shared storage trie. Each script evaluation is self-contained. State that must persist across transactions must be encoded in the UTXO graph itself, not in contract storage slots shared among scripts.
+\item \emph{No EVM-like contract storage.} There is no persistent key-value store attached to a script address. A script cannot accumulate a running total, count prior invocations, or recall inputs from earlier transactions.
+\item \emph{No general future-output covenants without specific mechanisms.} Standard scripts cannot inspect or constrain the outputs of the transaction spending them. Restricting where funds may flow after a spend requires either trusted off-chain coordination, hash-lock preimage commitments, or specific covenant opcodes that are not part of the current standard script set---such as the proposed \texttt{OP\_CTV} or \texttt{OP\_VAULT} extensions.
+\item \emph{No loops or unbounded computation.} Script execution terminates by construction. There is no general looping construct and no recursion. This eliminates gas-accounting complexity but also prevents iterative or accumulating logic inside a single script evaluation.
+\end{itemize}
+
+These constraints matter for the rest of Part~III. Reviewers must not import EVM mental models when analysing UTXO contracts. A UTXO ``contract'' is a spending predicate on a specific output, not a persistent stateful object. Complex multi-step protocols must distribute their state across a graph of UTXOs and coordinate through off-chain signing or pre-committed transaction graphs.
+
+That limitation is a security feature and a design constraint. It reduces some classes of shared-state complexity, but it does not remove security analysis. UTXO contracts can still fail through wrong paths, wrong keys, unsafe timelocks, missing recovery, malleable construction, fee pinning, secret reuse, bad wallet policy, or misunderstood settlement assumptions.
+
+\begin{codeblock}
+spend_valid(prevout, input, transaction_context):
+    locking_condition = prevout.script
+    unlocking_data = input.script_or_witness
+    return evaluate(locking_condition, unlocking_data, transaction_context)
+\end{codeblock}
+
+The transaction context matters. Signatures commit to parts of the transaction according to a signature hash mode, and timelocks and sequence values are interpreted under consensus and policy rules. A reviewer should not read a script as an isolated text snippet. It is evaluated inside a specific transaction.
+
+\subsection{Signature Scope and Sighash Modes}
+
+A Bitcoin signature does not always commit to the entire transaction. The \texttt{SIGHASH} flag appended to each signature selects exactly which parts of the transaction are covered. Partial commitment enables useful patterns---such as crowdfunding constructions where multiple parties contribute inputs independently---but it introduces attack surface whenever signers or co-signers can modify uncommitted fields after a device has already signed.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.25\textwidth}>{\RaggedRight\arraybackslash}p{0.27\textwidth}X@{}}
+\toprule
+Flag & What is committed & Review risk \\
+\midrule
+\texttt{SIGHASH\_ALL} & All inputs; all outputs & Default and safest for ordinary payments \\
+\texttt{SIGHASH\_NONE} & All inputs; no outputs & Any party can redirect all output value to an arbitrary destination after the device has signed \\
+\texttt{SIGHASH\_SINGLE} & All inputs; only the output at the same index & Other outputs remain free; missing counterpart outputs require version-specific review before signing \\
+\texttt{ANYONECANPAY} modifier & Only the signing input; no other inputs & Additional inputs can be attached by any party after signing; dangerous in presigned flows where fee contribution and input composition must be fixed \\
+\bottomrule
+\end{tabularx}
+\caption{Sighash flags determine what a Bitcoin signature commits to. Modes with partial output or input commitment allow post-signing modification of unconstrained fields.}
+\end{table}
+
+SegWit version~0 (BIP-143) and Taproot (BIP-341 and BIP-342) define extended sighash algorithms that commit to the values of all inputs. This closes a fee-inflation attack against legacy offline signers that could not verify previous output amounts independently. A signing device that cannot retrieve and verify previous output values cannot safely confirm the fee even under \texttt{SIGHASH\_ALL}; committing to input amounts in the witness sighash was introduced specifically to fix this for hardware and air-gapped devices.
+
+For PSBT and presigned flows, sighash selection carries direct security consequences beyond individual transaction review. A signing device presented with a PSBT must confirm that the sighash flag on each input is appropriate for the intended spend policy:
+
+\begin{codeblock}
+PSBT sighash review:
+    for each input:
+        what sighash type is present in the PSBT field?
+        is it appropriate for this spend path and custody policy?
+        does the signing device display the sighash type before confirming?
+        can outputs be modified after signing without invalidating this signature?
+        if ANYONECANPAY: who can add additional inputs, and at what value?
+        if SIGHASH_SINGLE: under this input version and sighash algorithm,
+            what happens if the matching output index is absent?
+\end{codeblock}
+
+\texttt{ANYONECANPAY} combined with \texttt{SIGHASH\_ALL} or \texttt{SIGHASH\_SINGLE} appears in legitimate constructions such as pay-to-endpoint crowdfunding and certain fee-contribution protocols. In presigned protocol flows, however, the ability to attach inputs after signing means that a counterparty or relay node can alter the transaction's fee profile, reveal additional policy through contributed inputs, or construct a package whose interaction with fee-bumping and pinning constraints the original signer did not anticipate.
+
+\subsection{Witness Separation Changes Evidence}
+
+SegWit separates witness data from the legacy transaction serialization used for the traditional \texttt{txid}. This was introduced partly to fix transaction malleability issues and to support safer signature hashing for witness programs.\footnote{\href{https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki}{BIP-141, ``Segregated Witness''}.}
+
+For security review, this means:
+
+\begin{itemize}
+\item the \texttt{txid} may not commit to witness data for SegWit spends;
+\item the \texttt{wtxid} identifies the witness-including transaction serialization;
+\item protocols that depend on transaction identifiers must know which identifier they mean;
+\item presigned transaction flows should avoid relying on malleable identifiers; and
+\item evidence packets should include witness data when spend-path analysis matters.
+\end{itemize}
+
+\subsection{Taproot Has Key Paths and Script Paths}
+
+Taproot lets an output be spent either through a key path or by revealing and satisfying a script path committed inside the output. BIP-341 describes Taproot as combining Schnorr signatures, Merkleized alternative scripts, and a mechanism where the common cooperative case can look like a single public-key spend.\footnote{\href{https://github.com/bitcoin/bips/blob/master/bip-0341.mediawiki}{BIP-341, ``Taproot: SegWit version 1 spending rules''}.}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm and 18mm]
+\node[security node] (output) {Taproot\\output};
+\node[security node, below left=of output] (keypath) {Key-path\\spend};
+\node[security node, below right=of output] (scriptroot) {Script-path\\spend};
+\node[security node, below=of scriptroot, xshift=-12mm] (patha) {Path A};
+\node[security node, below=of scriptroot, xshift=18mm] (pathb) {Path B};
+
+\draw[security arrow] (output) -- (keypath);
+\draw[security arrow] (output) -- (scriptroot);
+\draw[security arrow] (scriptroot) -- (patha);
+\draw[security arrow] (scriptroot) -- (pathb);
+\end{tikzpicture}
+\caption{A Taproot output can hide alternative spending paths until a script path is used.}
+\end{figure}
+
+Taproot changes what is visible. In the cooperative case, complex policy may be hidden. In a script-path spend, the used script path is revealed, but unused alternatives may remain hidden. A reviewer must distinguish:
+
+\begin{itemize}
+\item policy that exists but is not visible on-chain until exercised;
+\item policy that a signer claims exists but cannot prove from chain data alone;
+\item key-aggregation assumptions among participants; and
+\item recovery paths that may be unavailable if a signer, secret, or timeout assumption fails.
+\end{itemize}
+
+\section{Timelocks, Presigned Transactions, and Off-Chain Contracts}
+
+\subsection{Timelocks Turn Time Into a Spending Condition}
+
+Bitcoin supports absolute and relative timing constraints. Absolute locktime can prevent a transaction or path from being valid until a specified block height or time. Relative locktime can require that an output age by a certain number of blocks or time units before a dependent spend becomes valid. BIP-68 defines relative lock-time semantics using \texttt{nSequence}; BIP-112 introduces \texttt{CHECKSEQUENCEVERIFY}; and BIP-113 uses median time past for lock-time calculations.\footnote{\href{https://bips.dev/68/}{BIP-68, ``Relative lock-time using consensus-enforced sequence numbers''}.}\footnote{\href{https://bips.dev/112/}{BIP-112, ``CHECKSEQUENCEVERIFY''}.}\footnote{\href{https://bips.dev/113/}{BIP-113, ``Median time-past as endpoint for lock-time calculations''}.}
+
+The four locktime mechanisms interact in non-obvious ways. Table~\ref{tab:locktime-mechanisms} separates their scopes, activation conditions, and distinct security roles.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.18\textwidth}>{\RaggedRight\arraybackslash}p{0.13\textwidth}>{\RaggedRight\arraybackslash}p{0.08\textwidth}X@{}}
+\toprule
+Field\,/\,opcode & Scope & BIP & Security role and key interaction \\
+\midrule
+\texttt{nLockTime} & Transaction & --- & Delays validity until a block height or MTP timestamp. Inert when every input has final \texttt{nSequence}~(\texttt{0xFFFFFFFF}); one non-final input activates it. \\
+CLTV (\texttt{OP\_CHECK\-LOCKTIME\-VERIFY}) & Script path & BIP-65 & Compares a stack value with transaction \texttt{nLockTime}. Fails if \texttt{nLockTime} is too low or the input \texttt{nSequence} is final. Locks a path to a minimum height or MTP. \\
+\texttt{nSequence} & Per input & BIP-68, BIP-125 & Has three roles: relative lock-time when bit~31 is unset; RBF opt-in at \texttt{nSequence}~$\leq$~\texttt{0xFFFFFFFD}; finality at \texttt{0xFFFFFFFF}, disabling relative lock-time and \texttt{nLockTime} for that input. \\
+CSV (\texttt{OP\_CHECK\-SEQUENCE\-VERIFY}) & Script path & BIP-112 & Compares a stack value with input \texttt{nSequence}. Enforces minimum UTXO age; time values use MTP. The input must be non-final and encode the matching time type. \\
+RBF signaling & Per-input policy & BIP-125 & Any input with \texttt{nSequence}~$\leq$~\texttt{0xFFFFFFFD} signals opt-in RBF relay. Policy only, not consensus. \\
+\bottomrule
+\end{tabularx}
+\caption{Locktime mechanisms and their interactions. \texttt{nLockTime} is inert when all inputs are final. \texttt{nSequence} simultaneously governs relative lock-time, RBF signaling, and finality; a reviewer must check all three roles for every input in a timelocked or presigned transaction.}
+\label{tab:locktime-mechanisms}
+\end{table}
+
+The review question is not only ``is there a timelock?'' It is:
+
+\begin{codeblock}
+Who can spend before the timeout?
+Who can spend after the timeout?
+What must they know or sign?
+Which transaction must confirm first?
+Can the required transaction be fee-bumped?
+What happens if the chain is congested?
+What monitoring is required before the deadline?
+\end{codeblock}
+
+\subsection{Presigned Transactions Move Risk Earlier}
+
+Many UTXO contract protocols rely on transactions being signed before they are broadcast. A refund transaction may be signed before funding is safe. A channel update may require revocation or penalty logic. A vault design may require an emergency path. The risk is not only whether the final broadcast transaction is valid. The risk is whether every participant holds the right presigned transaction, can identify it, can broadcast it in time, and can pay enough fee for confirmation under stress.
+
+Presigned flows create failure modes that account-based reviewers often miss:
+
+\begin{itemize}
+\item a party funds an output before receiving a valid refund transaction;
+\item a presigned transaction spends a malleable or wrong outpoint;
+\item an old state can be broadcast if revocation logic fails;
+\item a signer cannot later raise fees because the transaction structure lacks a usable fee-bump path;
+\item a watchtower or monitor misses a deadline; and
+\item a timeout value assumes normal mempool conditions when the adversary can create congestion or pinning.
+\end{itemize}
+
+\subsection{Off-Chain Contracts Depend on On-Chain Escape}
+
+Lightning and other off-chain contract protocols matter here only as examples of a broader UTXO lesson: off-chain safety depends on credible on-chain enforcement. If a party must go on-chain before a deadline to protect funds, then mempool policy, fees, replacement, package relay, monitoring, and settlement are part of the security model.
+
+Do not write:
+
+\begin{codeblock}
+Users can always close on-chain.
+\end{codeblock}
+
+Write:
+
+\begin{codeblock}
+Users can protect funds if they or their watchtower detect the event,
+construct the correct transaction, broadcast it through a path that
+relays it, fee-bump it if necessary, and get it confirmed before the
+relevant deadline.
+\end{codeblock}
+
+That statement is longer because it is honest.
+
+\section{Fee Policy, RBF, CPFP, Package Relay, and Pinning}
+
+\subsection{Consensus Validity Is Not Relay Policy}
+
+A transaction can be consensus-valid and still fail to propagate through the network's relay policies. Mempool policy is local node policy. It shapes what transactions nodes store, relay, replace, package, and mine by default. It is not identical to consensus validity, and it evolves over time.
+
+This distinction is crucial for UTXO contract protocols. If a safety path depends on a transaction being relayed and confirmed quickly, then the protocol depends on policy and fee-market assumptions, not only consensus rules.
+
+\subsection{RBF Is Policy, Not Guaranteed Cancellation}
+
+BIP-125 defines opt-in full replace-by-fee signaling and relay conditions for replacing one unconfirmed transaction with another that pays a higher fee.\footnote{\href{https://bips.dev/125/}{BIP-125, ``Opt-in Full Replace-by-Fee Signaling''}.} A wallet may present RBF as ``speed up'' or ``cancel,'' but a reviewer should be more precise.
+
+Replacement can fail because:
+
+\begin{itemize}
+\item the original transaction has already confirmed;
+\item peers or miners saw different versions;
+\item the replacement does not satisfy relay policy;
+\item a related child transaction changes package economics;
+\item the transaction did not signal replaceability under relevant policy;
+\item the replacement spends different inputs and is no longer equivalent; or
+\item the user's wallet, node, or service misreports propagation.
+\end{itemize}
+
+RBF is a fee-management tool. It is not erasure, and it is not a security proof that the first transaction cannot confirm.
+
+\subsection{CPFP and Package Relay}
+
+Child-pays-for-parent uses a high-fee child transaction to incentivize miners to include a low-fee parent. The child spends an output from the parent; the package's combined fee rate becomes attractive. Package relay attempts to improve how related transactions are evaluated and relayed together. Bitcoin Optech tracks package relay as a topic because it directly affects fee bumping and contract protocols.\footnote{\href{https://bitcoinops.org/en/topics/package-relay/}{Bitcoin Optech, ``Package relay''}.}
+
+The review question is:
+
+\begin{codeblock}
+Which output is available for fee bumping?
+Who controls it?
+Can a child transaction be constructed before the deadline?
+Will the relevant package satisfy relay and mining policy?
+Can a counterparty attach a child that blocks replacement or consumes limits?
+\end{codeblock}
+
+\subsection{Transaction Pinning}
+
+Transaction pinning is a family of attacks where an adversary uses mempool policy, package limits, replacement rules, or transaction structure to make a victim's fee-bumping or replacement strategy fail. Bitcoin Optech treats transaction pinning as a major contract-protocol topic because it can undermine time-sensitive protocols that need reliable confirmation.\footnote{\href{https://bitcoinops.org/en/topics/transaction-pinning/}{Bitcoin Optech, ``Transaction pinning''}.}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=10mm and 16mm]
+\node[security node] (parent) {Low-fee\\parent};
+\node[security node, below left=of parent] (honest) {Honest\\fee-bump};
+\node[security node, below right=of parent] (attacker) {Attacker\\child};
+\node[security node, below=of parent, yshift=-15mm] (policy) {Relay policy\\or package limit};
+
+\draw[security arrow] (parent) -- (honest);
+\draw[security arrow] (parent) -- (attacker);
+\draw[security arrow] (honest) -- (policy);
+\draw[security arrow] (attacker) -- (policy);
+\end{tikzpicture}
+\caption{Pinning attacks exploit transaction structure and relay policy to interfere with confirmation strategy.}
+\end{figure}
+
+The fix is not one universal rule. It may involve anchor outputs, package relay support, careful output structure, shorter dependency chains, policy-aware wallet behavior, or TRUC (Topologically Restricted Until Confirmation) transactions, also referred to as v3-style relay. TRUC is a relay policy introduced in Bitcoin Core 28.0 that limits descendant count and package size to reduce pinning surface. It is \emph{not} a consensus rule: it is not enforced by all nodes, it is not guaranteed to be present on any given relay path, and its applicability depends on the mempool policy version of the nodes that see and forward a transaction. Protocols that depend on TRUC-style guarantees must verify both the Bitcoin Core version and the relay-policy configuration of nodes on their critical broadcast path before treating pinning resistance as reliable.\footnote{\href{https://bitcoincore.org/en/2025/06/06/relay-statement/}{Bitcoin Core, ``Bitcoin Core project statement on relay policy''}.}\footnote{\href{https://bitcoinops.org/en/bitcoin-core-28-wallet-integration-guide/}{Bitcoin Optech, ``Bitcoin Core 28.0 wallet integration guide''}.}
+
+\section{Worked Example: Timelocked Escrow}
+
+Consider a two-party escrow. Alice pays Bob if both cooperate. If Bob disappears, Alice can refund after a relative timelock. The design uses a funding transaction and a presigned refund transaction.
+
+\begin{codeblock}
+Funding output:
+    cooperative path:
+        Alice signature + Bob signature
+
+    refund path after delay:
+        Alice signature + relative timelock satisfied
+\end{codeblock}
+
+The simple product claim is:
+
+\begin{quote}
+Alice is safe because she has a refund path.
+\end{quote}
+
+That claim is incomplete. A reviewer should build the transaction graph:
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm and 18mm]
+\node[security node] (fund) {Funding\\transaction};
+\node[security node, below left=of fund] (coop) {Cooperative\\spend};
+\node[security node, below right=of fund] (refund) {Refund\\transaction};
+\node[security node, below=of refund] (bump) {Fee-bump\\child};
+
+\draw[security arrow] (fund) -- (coop);
+\draw[security arrow] (fund) -- (refund);
+\draw[security arrow] (refund) -- (bump);
+\end{tikzpicture}
+\caption{The refund right is only useful if the refund path can confirm in time.}
+\end{figure}
+
+The review then asks:
+
+\begin{enumerate}
+\item Did Alice receive a valid refund transaction before funding?
+\item Does the refund spend the exact funding outpoint?
+\item Does the refund have a usable fee strategy?
+\item Can Alice attach a child transaction to raise the effective fee?
+\item Can Bob create a competing child or transaction package that pins the refund?
+\item Does the timelock leave enough time for detection, broadcast, fee bumping, and confirmation?
+\item Is Alice monitoring the chain herself, through a service, or through a trusted wallet?
+\end{enumerate}
+
+Now the security claim becomes precise:
+
+\begin{securitymodelbox}[Escrow Refund Claim]
+Alice can recover funds if she obtains the refund transaction before funding, if the refund spends the correct outpoint under the intended script path, if her monitoring detects the need to refund before the deadline, if her wallet can broadcast and fee-bump the refund under prevailing relay policy, and if the transaction confirms before Bob can force a worse state.
+\end{securitymodelbox}
+
+That claim is less marketable than ``Alice has a refund.'' It is also the claim a security reviewer can test.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item What is a UTXO, and why is it more precise than saying that a user has a Bitcoin account balance?
+\item Why must a UTXO transaction spend an entire output, and how do change outputs and implied fees follow from that rule?
+\item What is the difference between a locking condition and the witness or unlocking data supplied to satisfy it?
+\item Why does SegWit make reviewers distinguish between \texttt{txid} and \texttt{wtxid}?
+\item What is the difference between Taproot key-path spending and script-path spending, and what evidence is visible in each case?
+\item What roles do \texttt{nLockTime}, CLTV, \texttt{nSequence}, CSV, and RBF signaling play in timelocked transactions?
+\item How can sighash modes and PSBT signing flows create risk after a signer has approved a transaction?
+\item Why are RBF, CPFP, package relay, pinning, and TRUC-style policy relevant for timelocked or presigned protocols?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Inspect a Bitcoin transaction using a block explorer or local tooling. List every input outpoint, every output, the likely change output, total input value, total output value, fee, fee rate, locktime, sequence values, and whether the spend uses witness data. State what the transaction proves and what it does not prove.
+
+\item Draw a UTXO transition for a wallet that spends two inputs to make one payment and one change output. Then modify the diagram for a case where the wallet accidentally omits the change output. Explain who receives the missing value.
+
+\item Analyze a presigned refund flow. Alice funds a 2-of-2 output with Bob after receiving a refund transaction. Identify the evidence Alice must verify before broadcasting the funding transaction, including outpoint, refund destination, timelock type and encoding, sighash type on each input, fee strategy, spend path, and the relevant rows of Table~\ref{tab:locktime-mechanisms}.
+
+\item A protocol relies on a timeout transaction confirming within 24 hours. An attacker broadcasts a low-fee parent and attaches a child that interferes with the honest party's fee-bump strategy. Write a short pinning-risk memo: what policy assumptions matter, what artifact you would inspect, what mitigation you would recommend, and what residual risk remains. Include a note on whether TRUC-style relay would address the attack and what relay-path and version assumptions that mitigation requires.
+\end{enumerate}

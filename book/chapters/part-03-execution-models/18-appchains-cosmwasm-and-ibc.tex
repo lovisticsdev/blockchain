@@ -1,0 +1,435 @@
+\chapter{Appchains, CosmWasm, and IBC}
+
+\section{Purpose}
+
+\begin{principlebox}
+Appchain security review is stack-composition review. The reviewer must identify which layer owns state, which layer has authority, and which boundary turns one system's assumption into another system's risk.
+\end{principlebox}
+
+Part~III has deliberately avoided treating execution models as cosmetic VM choices. Bitcoin, Ethereum, Solana, and Move do not merely expose different syntax. They create different security questions. Cosmos-style appchains add another pattern: the blockchain itself is an application-specific state machine assembled from consensus, ABCI, SDK modules, keepers, module accounts, governance, upgrade handlers, optional CosmWasm contracts, and IBC.
+
+This chapter is not a full Cosmos SDK programming tutorial, not a CosmWasm Rust course, and not a complete IBC bridge chapter. Those would be too broad and too shallow. The goal here is narrower and more useful: teach how to review an appchain stack without flattening it into "a chain with smart contracts."
+
+A general-purpose smart-contract chain usually asks reviewers to inspect contracts deployed into a relatively fixed execution environment. An appchain asks reviewers to inspect the environment itself. The bank module, staking module, governance module, upgrade module, wasm module, IBC module, custom application modules, validator set, token economics, and governance process may all be part of the protocol's trusted computing base.
+
+\section{Appchains and the Consensus/Application Boundary}
+
+\subsection{Appchains as Sovereign State Machines}
+
+The Cosmos SDK describes itself as a framework for building application-specific blockchains.\footnote{\href{https://docs.cosmos.network/sdk/latest/learn/intro/overview}{Cosmos SDK Documentation, ``Overview''}.} That phrase should be taken literally. In an appchain, application logic can live at protocol level rather than only inside user-deployed contracts. The chain's state transition function is assembled from modules.
+
+\begin{codeblock}
+appchain review habit:
+    consensus orders transactions
+    application routes messages
+    modules mutate scoped state
+    governance can change parameters or schedule upgrades
+    contracts may exist inside a wasm module
+    IBC may connect the chain to external state machines
+\end{codeblock}
+
+This creates a broader security boundary than a contract review. A DeFi protocol on an appchain may depend on:
+
+\begin{itemize}
+\item the validator set and consensus finality;
+\item the bank module's balance semantics;
+\item staking and slashing rules;
+\item governance-controlled parameters;
+\item module accounts holding escrowed assets;
+\item CosmWasm contract code and migration authority;
+\item IBC channels, client state, relayers, and packet timeouts; and
+\item upgrade handlers that migrate stores at a specific height.
+\end{itemize}
+
+The chain is not merely a host. It is part of the protocol.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[node distance=8mm and 13mm]
+\node[security node, text width=35mm] (consensus) {CometBFT\\consensus};
+\node[security node, below=of consensus, text width=35mm] (abci) {ABCI\\application boundary};
+\node[security node, below=of abci, text width=35mm] (baseapp) {BaseApp\\routing};
+\node[security node, below=of baseapp, xshift=-40mm, text width=34mm] (sdk) {SDK modules\\bank, staking, gov};
+\node[security node, below=of baseapp, text width=34mm] (wasm) {\texttt{x/wasm}\\CosmWasm};
+\node[security node, below=of baseapp, xshift=40mm, text width=34mm] (ibc) {IBC modules\\clients, channels};
+\node[security node, below=of wasm, text width=35mm] (contracts) {Contracts\\state and messages};
+\draw[security arrow] (consensus) -- (abci);
+\draw[security arrow] (abci) -- (baseapp);
+\draw[security arrow] (baseapp) -- (sdk);
+\draw[security arrow] (baseapp) -- (wasm);
+\draw[security arrow] (baseapp) -- (ibc);
+\draw[security arrow] (wasm) -- (contracts);
+\end{tikzpicture}
+}
+\caption{A Cosmos-style appchain composes consensus, the ABCI application boundary, SDK modules, optional CosmWasm contracts, and IBC.}
+\end{figure}
+
+That stack is powerful because the protocol can customize its own execution environment. It is risky for the same reason. The more logic moves into chain modules and governance, the less useful a narrow contract-only audit becomes.
+
+\subsection{CometBFT, ABCI, and the Application Boundary}
+
+CometBFT provides Byzantine Fault Tolerant consensus for replicated state machines. The Application Blockchain Interface, or ABCI, is the boundary between the consensus engine and the application. CometBFT's ABCI specification describes methods through which the consensus engine interacts with the application, including transaction checking, proposal processing, block finalization, and committing application state.\footnote{\href{https://docs.cometbft.com/main/spec/abci/}{CometBFT Documentation, ``ABCI''}.}
+
+For review, the important separation is:
+
+\begin{codeblock}
+consensus layer:
+    orders transactions
+    validates blocks under consensus rules
+    finalizes a sequence of application inputs
+
+application layer:
+    decodes transactions
+    routes messages
+    runs module logic
+    mutates state
+    returns app hash
+\end{codeblock}
+
+Chapter~8 already covered finality and BFT assumptions. Do not re-audit consensus here unless the chain changes validator rules, evidence handling, or consensus parameters. The new question is how finalized transactions become application state.
+
+The application must be deterministic. If honest nodes execute the same finalized block and compute different app hashes, the chain has a consensus-breaking application bug. This is why serialization, store iteration, time access, randomness, floating-point behavior, external calls, and migration code are security-relevant. Appchain logic is not allowed to behave like a web server that calls arbitrary outside services during request handling.
+
+A reviewer should locate the consensus/application boundary before reviewing custom modules:
+
+\begin{codeblock}
+boundary review:
+    how transactions are decoded
+    how messages are routed
+    which ante handlers run before execution
+    which modules can run begin-block or end-block logic
+    how app hash is computed
+    which upgrade height changes application behavior
+\end{codeblock}
+
+This prevents a common mistake: blaming consensus for an application-state bug, or blaming a module for a sequencing/finality assumption. The security claim must name the layer.
+
+\section{Cosmos SDK State and Authority}
+
+\subsection{Modules, Keepers, and Stores}
+
+Cosmos SDK applications are built from modules. The SDK module-design documentation describes modules as encapsulated components with their own state, messages, and logic.\footnote{\href{https://docs.cosmos.network/sdk/latest/guides/module-design/module-design-considerations}{Cosmos SDK Documentation, ``Module Design Considerations''}.} Reviewers should treat a module as a protocol component, not as a library.
+
+The core pattern is:
+
+\begin{codeblock}
+transaction
+    -> messages
+    -> router
+    -> Msg server
+    -> keeper
+    -> module store
+    -> events / responses
+\end{codeblock}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.92\textwidth}{!}{%
+\begin{tikzpicture}[node distance=9mm and 12mm]
+\node[security node, text width=28mm] (msg) {Proto Msg};
+\node[security node, right=of msg, text width=28mm] (router) {Router};
+\node[security node, right=of router, text width=30mm] (server) {MsgServer};
+\node[security node, right=of server, text width=30mm] (keeper) {Keeper};
+\node[security node, below=of keeper, xshift=-18mm, text width=30mm] (store) {Module store};
+\node[security node, below=of keeper, xshift=22mm, text width=30mm] (account) {Module account};
+\draw[security arrow] (msg) -- (router);
+\draw[security arrow] (router) -- (server);
+\draw[security arrow] (server) -- (keeper);
+\draw[security arrow] (keeper) -- (store);
+\draw[security arrow] (keeper) -- (account);
+\end{tikzpicture}
+}
+\caption{SDK module review follows messages into servers, keepers, module stores, and module accounts.}
+\end{figure}
+
+Keepers are especially important. A keeper encapsulates access to module state and often exposes methods used by other modules. A narrow keeper interface can enforce good boundaries. A broad keeper interface can leak power across modules. If Module A can call a keeper method from Module B that bypasses normal message authorization, Module A is now part of Module B's authority boundary.
+
+Module accounts are another recurring source of mistakes. They are special accounts controlled by modules, often used for escrow, minting, burning, fee collection, distribution, or IBC transfers. A reviewer should not describe a module account as if it were a normal user account. The correct question is which module can move funds from it, under which messages, params, hooks, or governance actions.
+
+\begin{codeblock}
+module review:
+    messages accepted by the module
+    signer and authority fields on each message
+    keeper methods and who can call them
+    store prefixes and key structure
+    module accounts and their permissions
+    hooks called by other modules
+    parameters that change behavior
+    events that external systems rely on
+\end{codeblock}
+
+This chapter is about execution models, so we will not catalogue every SDK module bug. The principle is enough: SDK module authority is protocol authority.
+
+\subsection{Parameters, Governance, and Upgrade Authority}
+
+Appchains make governance unusually concrete. Parameters are not only social preferences. They are live protocol behavior. Governance proposals may change params, spend community funds, update module authority, approve CosmWasm actions, or schedule upgrades. The Cosmos SDK governance module documentation describes proposal submission, voting, and execution of proposal messages.\footnote{\href{https://cosmos-docs.mintlify.app/sdk/latest/modules/gov/README}{Cosmos SDK Documentation, ``Governance Module''}.}
+
+This makes governance a root security boundary. A chain can have excellent module code and still be unsafe if governance can quickly set dangerous parameters, seize module authority, migrate contracts, change oracle settings, or schedule an upgrade that users cannot exit before activation.
+
+\begin{codeblock}
+governance review:
+    who can submit proposals
+    deposit and spam controls
+    voting period and quorum
+    veto or emergency powers
+    which message types governance can execute
+    which module authority address is trusted
+    timelock or exit window before activation
+    off-chain coordination required for validators
+\end{codeblock}
+
+The \texttt{x/upgrade} module makes upgrade authority explicit. The upgrade module documentation describes scheduling upgrade plans at a named height and running upgrade handlers that may migrate application state.\footnote{\href{https://cosmos-docs.mintlify.app/sdk/latest/modules/upgrade/README}{Cosmos SDK Documentation, ``Upgrade Module''}.} An upgrade is not just a binary replacement. It can change code, store layout, params, invariants, and supported messages. It can also strand nodes that fail to upgrade.
+
+For security review, an upgrade plan should be treated as a state transition:
+
+\begin{codeblock}
+upgrade transition:
+    pre-upgrade state
+    governance authorization
+    upgrade height
+    binary version
+    upgrade handler
+    store migration
+    post-upgrade invariants
+    rollback or halt assumptions
+\end{codeblock}
+
+The word "sovereign" is sometimes used as a compliment. In security review it is also a warning. Sovereignty means the chain's governance and validator set may be able to change the rules that application users rely on.
+
+\section{CosmWasm Contract Execution}
+
+\subsection{CosmWasm as a Contract Layer Inside an Appchain}
+
+CosmWasm adds WebAssembly smart contracts to Cosmos SDK chains through the \texttt{x/wasm} module. The CosmWasm documentation describes contracts through an actor model: contracts communicate by messages, and a contract cannot directly mutate another contract's state.\footnote{\href{https://book.cosmwasm.com/actor-model/contract-as-actor.html}{The CosmWasm Book, ``Contract as Actor''}.}
+
+This should feel familiar after Solana and Move but not identical. A CosmWasm contract has isolated storage and exposes entry points. The chain module executes contract code, routes messages, stores contract state, and enforces contract admin and migration rules. CosmWasm is therefore not "just Wasm." It is Wasm execution embedded inside SDK module authority.
+
+CosmWasm entry points include initialization and execution paths such as \texttt{instantiate}, \texttt{execute}, \texttt{query}, \texttt{migrate}, and \texttt{reply}; many contracts also define sudo-like privileged paths when the host chain uses them.\footnote{\href{https://book.cosmwasm.com/basics/entry-points.html}{The CosmWasm Book, ``Entry Points''}.}
+
+\begin{codeblock}
+contract review:
+    instantiate message and initial admin
+    execute messages and sender checks
+    query paths and derived assumptions
+    migrate entry point and migration admin
+    reply handlers for submessage results
+    sudo paths exposed by the host chain
+    custom chain messages enabled by the appchain
+\end{codeblock}
+
+The admin field deserves direct attention. A contract admin that can migrate code may effectively change the contract's rules while preserving address, storage, and user assumptions. A protocol that markets itself as immutable but keeps a migration admin has not removed upgrade risk; it has moved upgrade risk into contract admin policy.
+
+CosmWasm also inherits chain-specific behavior. A contract can emit SDK messages such as bank sends or wasm executes, and appchains may enable custom messages for staking, governance, token factories, IBC hooks, or application-specific modules. A CosmWasm review must therefore identify the host chain, not just the contract code.
+
+\subsection{Storage, Messages, and Submessages}
+
+CosmWasm contract storage is isolated key-value storage for that contract. The CosmWasm Book introduces storage as part of the contract's environment and commonly uses helper libraries to structure access.\footnote{\href{https://book.cosmwasm.com/basics/state.html}{The CosmWasm Book, ``State''}.} From a review perspective, storage keys, maps, indexes, and version fields are the contract's durable state model.
+
+\begin{codeblock}
+contract state review:
+    config item
+    ownership or admin fields
+    user balance maps
+    pending operation maps
+    sequence numbers
+    migration version
+    IBC channel or denom configuration
+\end{codeblock}
+
+CosmWasm execution returns a \texttt{Response}. The response can include events and messages. A contract can request follow-on actions such as bank transfers, contract calls, staking operations, or IBC messages, depending on what the host chain permits. Submessages are particularly important because they can ask the runtime to call back into the contract's \texttt{reply} entry point with success or failure information.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.92\textwidth}{!}{%
+\begin{tikzpicture}[node distance=9mm and 12mm]
+\node[security node, text width=30mm] (execute) {Execute\\entry point};
+\node[security node, right=of execute, text width=32mm] (state) {Read/write\\contract state};
+\node[security node, right=of state, text width=32mm] (resp) {Response\\events/messages};
+\node[security node, below=of resp, xshift=-22mm, text width=32mm] (sub) {SubMsg\\external action};
+\node[security node, below=of resp, xshift=22mm, text width=32mm] (reply) {Reply\\callback};
+\draw[security arrow] (execute) -- (state);
+\draw[security arrow] (state) -- (resp);
+\draw[security arrow] (resp) -- (sub);
+\draw[security arrow] (sub) -- (reply);
+\draw[security arrow] (reply) -- (state);
+\end{tikzpicture}
+}
+\caption{CosmWasm contracts may emit messages and receive reply callbacks from submessage execution.}
+\end{figure}
+
+This creates callback-style failure modes. A contract may update state before emitting a submessage, then mishandle the reply. It may assume a submessage succeeded when it did not. It may allow a reply from the wrong submessage ID to finalize the wrong operation. It may expose a migration path that changes storage layout without preserving versioned invariants.
+
+The review correction is to treat message emission as part of control flow, not as a log. The contract is asking the chain to do more work after the current function returns.
+
+\section{IBC Security Model}
+
+\subsection{Clients, Connections, Channels, Packets, and Relayers}
+
+IBC is not one bridge contract. It is a protocol stack for interchain communication. At the core, IBC uses clients, connections, channels, packet commitments, acknowledgements, timeouts, and relayers. The channel and packet semantics specification defines how packets are sent, received, acknowledged, and timed out across ordered or unordered channels.\footnote{\href{https://github.com/cosmos/ibc/blob/main/spec/core/ics-004-channel-and-packet-semantics/README.md}{IBC Specification, ``ICS-004 Channel and Packet Semantics''}.}
+
+For review, split the actors:
+
+\begin{codeblock}
+light client:
+    verifies counterparty chain headers and state proofs
+
+connection:
+    binds two clients into an authenticated link
+
+channel:
+    binds application endpoints over a connection
+
+packet:
+    carries application data with sequence and timeout metadata
+
+relayer:
+    observes one chain and submits proofs/messages to another
+\end{codeblock}
+
+Relayers are liveness actors, not trusted signers for packet validity. If a packet proof is invalid, the receiving chain should reject it. If relayers stop, packets may stall until another relayer acts. This distinction matters. A protocol that says "IBC is trustless" but relies on a single relayer for timely liquidations, oracle updates, or withdrawals has a liveness dependency even if packet validity remains proof-based.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.96\textwidth}{!}{%
+\begin{tikzpicture}[node distance=8mm and 12mm]
+\node[security node, text width=31mm] (send) {Chain A\\send packet};
+\node[security node, right=of send, text width=31mm] (commit) {Packet\\commitment};
+\node[security node, right=of commit, text width=31mm] (relayer) {Relayer\\proof relay};
+\node[security node, right=of relayer, text width=31mm] (recv) {Chain B\\recv packet};
+\node[security node, below=of recv, text width=31mm] (ack) {Ack or\\timeout};
+\draw[security arrow] (send) -- (commit);
+\draw[security arrow] (commit) -- (relayer);
+\draw[security arrow] (relayer) -- (recv);
+\draw[security arrow] (recv) -- (ack);
+\draw[security arrow] (ack) -- (relayer);
+\end{tikzpicture}
+}
+\caption{IBC packet flow separates packet commitment, proof relay, receive handling, acknowledgement, and timeout.}
+\end{figure}
+
+The transport layer does not define the economic meaning of the packet. It proves and delivers data between application endpoints. The application module decides what the data does.
+
+\subsection{IBC Applications and Token Semantics}
+
+IBC applications interpret packet payloads. The canonical example is ICS-20 fungible token transfer. The ICS-20 specification describes token transfer over IBC and the source/sink mechanism for escrow, minting, burning, and unescrowing vouchers.\footnote{\href{https://cosmos-docs.mintlify.app/ibc/latest/spec/app/ics-020-fungible-token-transfer/README}{IBC Documentation, ``ICS-020 Fungible Token Transfer''}.}
+
+Token semantics are easy to state badly. An IBC voucher is not the same thing as the original token on its origin chain. It is a representation whose meaning depends on the transfer path, denom trace, source or sink status, channel, and application module behavior.
+
+\begin{codeblock}
+ICS-20 review:
+    base denom on source chain
+    transfer path and denom trace
+    port and channel identifiers
+    sender and receiver addresses
+    escrow or burn on sending side
+    mint or unescrow on receiving side
+    timeout and refund behavior
+    acknowledgement handling
+\end{codeblock}
+
+This matters for asset accounting. A protocol that accepts \texttt{uatom} and \texttt{ibc/...} as if they were the same asset has already blurred the risk boundary. The voucher may depend on a counterparty chain's security, an IBC client, an active channel, relayer liveness, and correct denom trace handling.
+
+IBC applications can also carry memos, callbacks, hooks, or application-specific payloads depending on the chain stack. Those features are useful but dangerous if they blur transport and application authority. A packet proving that data was sent over a channel does not prove that the data is economically safe to execute.
+
+\section{Appchain Failure Modes}
+
+Appchain failures often occur at boundaries. The following table is intentionally compact; the point is not to list every Cosmos bug, but to train boundary review.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.25\textwidth}>{\RaggedRight\arraybackslash}X@{}}
+\toprule
+Layer & Authority or evidence & Common failure \\
+\midrule
+Validator set & Voting power and finality evidence & Weak or concentrated voting power, halt risk, censorship, unsafe social recovery assumptions. \\
+SDK module & Keeper methods, module accounts, store keys & Over-broad keeper access, wrong signer field, unsafe module-account movement. \\
+Governance & Proposal execution and authority addresses & Fast parameter capture, malicious upgrade, community-pool spend, unsafe admin transfer. \\
+Upgrade path & Plan, handler, migration, app hash & Broken store migration, missing invariant check, validator coordination failure. \\
+CosmWasm & Contract admin, storage, messages, replies & Unsafe migration, reply confusion, bad submessage assumptions, chain-specific custom message abuse. \\
+IBC & Client state, channel state, packet commitments & Client expiry, frozen client, wrong channel, relayer liveness failure, denom trace confusion. \\
+\bottomrule
+\end{tabularx}
+\caption{Appchain review should identify the layer that owns each authority and evidence claim.}
+\end{table}
+
+Several of these failures are governance-shaped. That is not an excuse to stop reviewing them as "off-chain risk." If governance can change a parameter that liquidates users, upgrade code that controls custody, or migrate the contract that computes shares, governance is part of the security model.
+
+\section{Worked Example: Cross-Chain Vault on a CosmWasm Appchain}
+
+Consider a Cosmos appchain with the bank module, staking, governance, \texttt{x/wasm}, and IBC transfer enabled. A CosmWasm vault accepts an IBC voucher, issues vault shares, and later allows withdrawal. Governance can migrate contract code and change a chain parameter that affects transfer fees. IBC relayers move packets between the appchain and the source chain.
+
+The weak review says, "audit the vault contract." That misses the system.
+
+\begin{codeblock}
+cross-chain vault review:
+    source asset and denom trace
+    IBC port and channel
+    transfer module escrow or voucher minting
+    vault contract storage and share accounting
+    contract admin and migration authority
+    bank module balance movement
+    governance-controlled params
+    upgrade height and store migration risk
+    relayer liveness and timeout/refund path
+\end{codeblock}
+
+The deposit path might be:
+
+\begin{codeblock}
+source chain:
+    user sends ICS-20 transfer
+    transfer module escrows source tokens
+    packet commitment is written
+
+relayer:
+    relays proof to appchain
+
+appchain:
+    IBC transfer module receives packet
+    voucher denom is minted or unescrowed
+    user executes vault deposit
+    vault contract records shares
+\end{codeblock}
+
+The contract's share invariant is only one part of safety:
+
+\begin{codeblock}
+vault invariant:
+    total_shares matches recorded user shares
+    voucher balance covers redeemable claims
+    denom trace is the intended asset path
+    governance cannot migrate code without accepted risk
+    IBC timeout and refund paths do not strand user accounting
+\end{codeblock}
+
+A finding might therefore be outside the contract. If the vault accepts any denom with the same display symbol, the bug is denom-trace confusion. If governance can migrate the contract instantly, the bug is upgrade authority. If only one relayer services withdrawals during stress, the bug is liveness concentration. If a submessage reply finalizes shares before the bank transfer result is verified, the bug is callback accounting.
+
+The execution model is the system boundary. The appchain, contract, IBC path, and governance process are one security object.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why is an appchain review broader than a contract review on a fixed general-purpose chain?
+\item What security boundary does ABCI create between consensus and the application?
+\item Why are keepers and module accounts authority surfaces in Cosmos SDK modules?
+\item How can governance-controlled parameters become direct security risk?
+\item Why is a chain upgrade a state transition rather than a mere software release?
+\item What does CosmWasm's actor model prevent, and what does it not prevent?
+\item Why are submessages and reply handlers part of contract control flow?
+\item Why is a relayer a liveness dependency rather than a trusted signer for IBC validity?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Given a Cosmos SDK module design, identify its messages, signer fields, keeper authority, store keys, module accounts, params, hooks, and governance-controlled actions.
+
+\item Review a CosmWasm contract interface. Identify instantiate authority, execute messages, query-only paths, migration/admin control, submessage reply logic, storage keys, and any chain-specific custom messages.
+
+\item Trace an ICS-20 token transfer. Identify source chain, sink chain, escrow or mint action, denom trace, port, channel, timeout, acknowledgement, refund path, and relayer liveness assumption.
+
+\item Write a security memo for an appchain upgrade. Include validator coordination, governance authorization, upgrade height, binary version, handler, store migration, contract migration effects, IBC/client impact, post-upgrade invariants, and rollback or halt assumptions.
+\end{enumerate}

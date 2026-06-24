@@ -1,0 +1,526 @@
+\chapter{Block Production, Mempools, and MEV}
+
+\section{Purpose}
+
+\begin{principlebox}
+Block production is ordering authority. In shared-state systems, the actor that can see, include, exclude, delay, or order transactions can change economic outcomes without making any invalid state transition.
+\end{principlebox}
+
+Chapter 8 explained how chains select history. Chapter 9 explained that participants observe local network views rather than a universal screen. This chapter studies what happens between those ideas and execution: someone constructs the block, batch, or ordered transaction list.
+
+That construction step is not passive packaging. It decides which valid transactions execute, which valid transactions wait, and which neighboring transactions execute before or after them. For financial applications, that ordering can be the difference between fair execution and extraction, solvency and bad debt, successful defense and delayed response.
+
+MEV is the usual name for this problem space. Ethereum's documentation defines maximal extractable value as value that can be extracted from block production beyond standard rewards and gas fees by including, excluding, or changing the order of transactions.\footnote{\href{https://ethereum.org/developers/docs/mev/}{ethereum.org, ``Maximal extractable value''}.} That definition is useful, but a security reviewer should make one conceptual shift: MEV is not merely a collection of trading tricks. It is evidence that transaction ordering is a security boundary.
+
+The practical questions are:
+
+\begin{codeblock}
+Who sees the transaction before inclusion?
+Who can simulate it?
+Who can include it?
+Who can exclude it?
+Who can order it relative to other transactions?
+Who can route, sell, or internalize the order flow?
+What user or protocol invariant depends on these answers?
+\end{codeblock}
+
+A protocol can enforce every local validity rule and still be unsafe if it assumes fair visibility, first-come-first-served inclusion, neutral ordering, or harmless pending-state exposure.
+
+\section{The Transaction Supply Chain}
+
+\subsection{From Intent to Settled State}
+
+A transaction begins as intent. A user wants to swap, borrow, repay, bridge, liquidate, claim, vote, pause, upgrade, or execute some maintenance action. The system turns that intent into signed bytes and sends those bytes into an adversarial ordering market.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=7mm and 6mm,
+  stage/.style={security node, text width=23mm, minimum height=8mm}
+]
+\node[stage] (intent) {User or\\system intent};
+\node[stage, right=of intent] (sign) {Signed\\transaction};
+\node[stage, right=of sign] (submit) {Submission\\path};
+\node[stage, right=of submit] (visible) {Visibility and\\simulation};
+\node[stage, below=of visible] (build) {Block or\\batch building};
+\node[stage, left=of build] (include) {Inclusion and\\ordering};
+\node[stage, left=of include] (execute) {Execution};
+\node[stage, left=of execute] (settle) {Settlement\\policy};
+
+\draw[security arrow] (intent) -- (sign);
+\draw[security arrow] (sign) -- (submit);
+\draw[security arrow] (submit) -- (visible);
+\draw[security arrow] (visible) -- (build);
+\draw[security arrow] (build) -- (include);
+\draw[security arrow] (include) -- (execute);
+\draw[security arrow] (execute) -- (settle);
+\end{tikzpicture}
+\caption{A transaction's security path includes visibility, ordering, inclusion, execution, and settlement.}
+\end{figure}
+
+The signed transaction may pass through a wallet, RPC provider, node, public mempool, private relay, searcher, builder, sequencer, solver, miner, validator, or proposer. Each actor may see different information and have different power.
+
+The exposure question is not abstract. A signed transaction may reveal:
+
+\begin{itemize}
+\item the sender and target contract;
+\item calldata or instruction data;
+\item maximum fee, priority fee, or bid;
+\item nonce or sequence number;
+\item slippage tolerance and deadline;
+\item trade route or liquidation target;
+\item governance or admin action;
+\item bridge message or keeper operation;
+\item an account-abstraction operation or sponsored action.
+\end{itemize}
+
+Once revealed, information cannot be unrevealed. Replacement or cancellation may change which transaction lands, but it does not erase the strategy from actors that already observed it.
+
+\subsection{Validity Is Not Intent Satisfaction}
+
+A transaction can be valid and still fail the user's intent. The contract may enforce the minimum output the user signed, but the user may still receive far worse execution than expected. A liquidation may be valid, but delayed enough to allow bad debt. A pause transaction may be valid, but censored until attackers drain more value. A governance execution may be valid, but ordered before a defensive action.
+
+For any high-value transaction, write both:
+
+\begin{codeblock}
+validity condition:
+    what must be true for the transaction to execute without reverting
+
+intent condition:
+    what the user, keeper, protocol, or administrator needs the action
+    to accomplish
+\end{codeblock}
+
+Security lives in the gap between those two conditions.
+
+\section{Public Mempools and Private Order Flow}
+
+\subsection{Public Mempools Are Observable Waiting Rooms}
+
+A public mempool is a local set of pending transactions a node may store, relay, or consider for inclusion. Chapter 9 emphasized that mempools are local views. Here the additional point is that public mempools are adversarially observable.
+
+If a pending transaction is public, other actors may simulate it, copy its target, trade before it, trade after it, replace a competing transaction, bid for better position, or route around it. The mempool is not a fairness queue. It is an information surface.
+
+Pending also does not mean included. A transaction may be dropped, replaced, underpriced, invalidated by a nonce change, invalidated by state changes, included in a block that later reorgs, accepted by one provider but unknown to another, hidden in a private path, or delayed by a sequencer.
+
+Applications should therefore treat pending data as evidence, not state. User interfaces can display pending actions. Safety-critical accounting, bridge release, liquidation, governance, and withdrawal decisions need inclusion and settlement rules.
+
+\subsection{Private Submission Changes Who Must Be Trusted}
+
+Private submission can reduce public visibility. It can also create a more privileged observer.
+
+A private path may involve:
+
+\begin{itemize}
+\item a private RPC endpoint;
+\item an MEV relay;
+\item a block builder;
+\item a wallet backend;
+\item a solver or intent network;
+\item a market maker;
+\item a sequencer endpoint;
+\item an application-specific relayer.
+\end{itemize}
+
+The public mempool may not see the transaction, but the private intermediary may see full calldata, simulate the transaction, decide whether to forward it, choose which builders or sequencers receive it, censor it, leak it, trade against it, auction it, or fail silently.
+
+The review question is not ``public or private?'' It is:
+
+\begin{codeblock}
+Who receives the transaction?
+What do they learn?
+Can they simulate or trade against it?
+Can they guarantee or only attempt inclusion?
+Can they censor, delay, leak, or auction it?
+What is the fallback if private inclusion fails?
+Does fallback reveal the transaction after delay?
+\end{codeblock}
+
+Private routing is often useful. It is not a proof of protection.
+
+\subsection{Routing Forms Have Different Trust Shapes}
+
+The same signed intent can move through several market structures. Do not evaluate them by label. Evaluate what each route reveals, who can act on it, and what guarantee the user actually receives.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.18\textwidth}>{\RaggedRight\arraybackslash}p{0.32\textwidth}X@{}}
+\toprule
+Route & What changes & New or remaining risk \\
+\midrule
+Public mempool & Broad visibility and competitive inclusion & Front-running, sandwiching, copying, replacement races \\
+Private RPC & Public visibility may decrease & Provider can censor, leak, route selectively, or fail silently \\
+Bundle & Transactions express desired ordering or joint inclusion & Builder or relay trust, failed inclusion, strategy leakage \\
+Order-flow auction & Competition moves off-chain & Auctioneer power, opaque rules, preferential access, weak disclosure \\
+Intent or solver route & User states desired outcome, solver chooses execution path & Solver collusion, weak competition, unverifiable execution quality \\
+Sequencer submission & Ordering passes through L2 or app-domain sequencer & Censorship, downtime, forced inclusion lag \\
+\bottomrule
+\end{tabularx}
+\caption{Routing choices shift visibility and trust. They do not remove ordering risk.}
+\end{table}
+
+\subsection{Bundles and Auctions Express Ordering Intent}
+
+A bundle is a package of transactions submitted with ordering or inclusion conditions. It can express constraints that a single public mempool transaction cannot: include these transactions together, keep them in this order, target a specific block, allow certain transactions to revert, or pay only if the opportunity succeeds.
+
+Flashbots Auction documentation describes bundles as arrays of signed transactions with metadata such as target block and optional timing or revert conditions, sent through a private communication channel.\footnote{\href{https://docs.flashbots.net/flashbots-auction/overview}{Flashbots, ``Flashbots Auction''}.} The security lesson is broader than Flashbots. Bundles let actors express ordering intent to privileged intermediaries.
+
+Bundles are useful because they can reduce public failed bids and allow more precise execution. They are risky because they concentrate visibility:
+
+\begin{codeblock}
+Who receives the bundle?
+Can they inspect full transaction contents?
+Can they copy or merge the strategy?
+Can they censor it or prefer another bundle?
+What happens if the bundle is not included?
+What happens if only part of the intended strategy lands elsewhere?
+Does the user or searcher know which builder, relay, or proposer path failed?
+\end{codeblock}
+
+Auctions move competition from public gas bidding into a market with its own rules. That can reduce network spam and failed on-chain bidding. It can also make execution quality less transparent. A security review should treat auction design as protocol design: who sets the rules, who observes the bids, who settles disputes, and who can exclude participants?
+
+\subsection{Replacement Is Policy, Not Erasure}
+
+Replacement and cancellation are policy-dependent mechanisms. In Ethereum-like account systems, a user may try to replace a pending transaction by submitting another transaction with the same nonce and a higher effective fee. In Bitcoin, BIP-125 defines opt-in replace-by-fee relay policy for transactions that signal replaceability and satisfy fee and relay conditions.\footnote{\href{https://github.com/bitcoin/bips/blob/master/bip-0125.mediawiki}{Bitcoin BIP-125, ``Opt-in Full Replace-by-Fee Signaling''}.}
+
+Replacement can fail because the original already landed, the replacement fee was insufficient, peers saw different versions, a private route handled replacement differently, the transaction was bundled, the nonce was consumed elsewhere, or a sequencer ignored the replacement model the user expected.
+
+The security rule is simple: do not reveal sensitive intent and assume it can be taken back. Replacement is a best-effort path to a different on-chain result. It is not deletion.
+
+\section{Ordering Authorities}
+
+\subsection{The Actors Are Not Interchangeable}
+
+Modern block production often splits visibility, routing, building, proposal, and settlement across different actors. Ethereum's external builder specifications define interfaces used in proposer-builder separation, where block builders and validators interact through standardized APIs.\footnote{\href{https://ethereum.github.io/builder-specs/}{Ethereum Builder Specs, ``Builder APIs''}.} Flashbots describes MEV-Boost as middleware that lets validators receive blocks from a competitive builder market through relays.\footnote{\href{https://docs.flashbots.net/flashbots-mev-boost/introduction}{Flashbots, ``MEV-Boost''}.}
+
+Those are Ethereum-specific designs. They should not be imported blindly into Bitcoin, Solana, Cosmos chains, rollups, appchains, or centralized sequencers. The general lesson is broader: the actor who signs a transaction, sees it, builds around it, submits it, proposes it, or settles it may be different.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.17\textwidth}>{\RaggedRight\arraybackslash}p{0.35\textwidth}X@{}}
+\toprule
+Actor & Typical power & Review question \\
+\midrule
+Wallet & Constructs, simulates, and routes transactions & Does it leak intent, choose safe defaults, and disclose routing assumptions? \\
+RPC provider & Accepts reads and writes, may relay transactions & Can it drop, filter, lag, misreport, or leak transaction metadata? \\
+Searcher & Finds profitable ordering opportunities & Can it copy, front-run, back-run, or compete around user actions? \\
+Solver & Fulfills intents or orders under some rule & Does the user get enforceable output quality and solver competition? \\
+Builder & Constructs blocks or block candidates & Can it order, censor, copy bundles, or favor private order flow? \\
+Relay & Connects builders and proposers or protects block contents & Can it withhold, filter, fail late, or concentrate liveness? \\
+Proposer or miner & Publishes a block under consensus rules & Can it omit, include, reorder, withhold, or choose among builders? \\
+Sequencer & Orders transactions for a rollup or app-specific domain & What forced-inclusion, censorship, and downtime rules constrain it? \\
+Keeper & Performs maintenance actions such as liquidations or rebalances & Can the protocol survive delayed, censored, or monopolized keepers? \\
+\bottomrule
+\end{tabularx}
+\caption{The transaction supply chain contains actors with different visibility, ordering power, and incentives.}
+\end{table}
+
+This table is not a universal architecture diagram. It is a review prompt. For each protocol, replace the generic actors with the actual actors that see and order transactions.
+
+\subsection{Sequencers Are Ordering Authorities}
+
+Rollups, appchains, and L2 systems often use sequencers to order transactions before final settlement elsewhere. A centralized sequencer can provide fast confirmations and smoother user experience, but it is also a concentrated inclusion and ordering dependency. A decentralized sequencer set may reduce single-operator risk while adding committee, network, and incentive complexity.
+
+Sequencer security questions include:
+
+\begin{itemize}
+\item Can the sequencer temporarily censor a transaction?
+\item Is there a forced-inclusion path through another domain?
+\item How long can users be delayed before the escape path works?
+\item Are preconfirmations economically or cryptographically accountable?
+\item Can the sequencer reorder around oracle updates, liquidations, or exits?
+\item What happens during sequencer downtime?
+\end{itemize}
+
+Rollup details return later. Here the principle is enough: a sequencer is not just infrastructure. It is an ordering authority.
+
+\section{Inclusion, Exclusion, and Ordering Power}
+
+\subsection{Ordering Is a State-Transition Input}
+
+A block is an ordered list of transactions. If transactions touch shared state, order changes results.
+
+Examples:
+
+\begin{itemize}
+\item A swap before another swap receives a different price than the same swap after it.
+\item A liquidation before an oracle update differs from a liquidation after it.
+\item A withdrawal before a pause differs from a withdrawal after a pause.
+\item A governance execution before a defensive upgrade differs from execution after it.
+\item A bridge claim before a fraud alert differs from a claim after the alert.
+\end{itemize}
+
+Therefore ordering is not metadata. It is part of the state transition. A protocol that says ``anyone can call this function'' must also ask what happens when adversaries choose neighboring transactions.
+
+\subsection{Inclusion Power Can Be Enough}
+
+An ordering actor does not always need to place a transaction before or after another one. Sometimes delay is sufficient.
+
+Temporary exclusion can matter when:
+
+\begin{itemize}
+\item slippage expires;
+\item a liquidation window closes;
+\item an oracle update grows stale;
+\item a governance deadline passes;
+\item a withdrawal queue advances;
+\item a bridge challenge period changes;
+\item an emergency pause would stop ongoing loss.
+\end{itemize}
+
+Censorship resistance is therefore not binary. A better question is:
+
+\begin{codeblock}
+Which component can prevent this transaction from reaching inclusion,
+for how long, at what cost, with what detection, and with what fallback?
+\end{codeblock}
+
+This connects Chapter 10 back to Chapter 9. Observation and propagation determine whether a transaction reaches candidates for inclusion. Block production determines whether it actually executes.
+
+\subsection{Ordering Assumptions Should Become Invariants}
+
+Weak ordering claims sound like this:
+
+\begin{codeblock}
+Users should get a fair price.
+Liquidations should be competitive.
+The pause function protects the system.
+\end{codeblock}
+
+Reviewable claims are sharper:
+
+\begin{codeblock}
+A swap must either execute within the user's signed output bound and
+deadline or revert, regardless of neighboring transactions.
+
+The lending market must remain solvent if profitable liquidations are
+delayed for N blocks during congestion.
+
+If a valid pause transaction is delayed for N blocks, maximum additional
+loss must remain below X or an alternative inclusion path must exist.
+\end{codeblock}
+
+These are not merely nicer sentences. They turn ordering risk into something testable.
+
+\section{MEV Patterns That Matter for Security}
+
+\subsection{Front-Running, Back-Running, and Sandwiching}
+
+Front-running means acting before a victim because the victim's pending transaction reveals useful information. Examples include buying before a large swap, copying a revealed claim, executing before a defensive admin transaction, or submitting a higher-fee transaction for the same scarce opportunity.
+
+Back-running means acting immediately after a state change. Examples include arbitraging after a pool price changes, liquidating after an oracle update, claiming a reward after another transaction updates an index, or rebalancing after a vault changes allocation.
+
+Sandwiching combines both. The attacker trades before the victim to move price, lets the victim execute at a worse price within their accepted bounds, then trades after the victim to close the position.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=8mm and 8mm,
+  stage/.style={security node, text width=27mm, minimum height=8mm},
+  bad/.style={security node, draw=securityred, text width=27mm, minimum height=8mm}
+]
+\node[bad] (a1) {Attacker\\front-run};
+\node[stage, right=of a1] (v) {Victim\\swap};
+\node[bad, right=of v] (a2) {Attacker\\back-run};
+\node[stage, below=of v] (pool) {AMM pool\\state changes};
+
+\draw[security arrow] (a1) -- (v);
+\draw[security arrow] (v) -- (a2);
+\draw[security arrow] (a1) -- (pool);
+\draw[security arrow] (v) -- (pool);
+\draw[security arrow] (a2) -- (pool);
+\end{tikzpicture}
+\caption{A sandwich uses one transaction before and one transaction after the victim to extract value from the victim's accepted price bounds.}
+\end{figure}
+
+The foundational Flash Boys 2.0 paper documented how decentralized-exchange arbitrage, priority gas auctions, and transaction-ordering competition created security concerns reaching beyond individual trades into consensus incentives.\footnote{Phil Daian et al., \href{https://arxiv.org/abs/1904.05234}{``Flash Boys 2.0: Frontrunning in Decentralized Exchanges, Miner Extractable Value, and Consensus Instability''}.}
+
+\subsection{Arbitrage and Liquidations Are Ambiguous}
+
+Not all MEV is a bug in the simple sense. Arbitrage can move AMM prices back toward external markets. Liquidations can protect a lending protocol from bad debt. Keepers can perform necessary maintenance.
+
+But useful activity can still create security risk. If arbitrage is required for oracle correctness, the protocol depends on arbitrageurs. If liquidations protect solvency, the protocol depends on liquidator inclusion. If keeper maintenance is profitable only in normal conditions, the protocol may fail under congestion when maintenance is most needed.
+
+Ask:
+
+\begin{codeblock}
+What useful work does the MEV opportunity perform?
+Who competes for it?
+Can one actor monopolize it?
+What happens if it is delayed or censored?
+Can the protocol internalize or redirect some value?
+Does the opportunity create one-block rewards large enough to distort
+block production incentives?
+\end{codeblock}
+
+The answer may be different for arbitrage, liquidations, oracle updates, rebalances, auctions, and bridge relays.
+
+\subsection{Time-Bandit Pressure Crosses Layers}
+
+If a previous block contains unusually high extractable value, a later block producer may be tempted to reorg that block and capture the value. This is the intuition behind time-bandit attacks. The point is not that every profitable opportunity causes reorgs. The point is that application-level extractable value can feed back into consensus incentives.
+
+The causal chain is:
+
+\begin{codeblock}
+application design creates concentrated extractable value
+-> ordering competition becomes profitable
+-> block production incentives change
+-> reorg, censorship, or coalition incentives may increase
+\end{codeblock}
+
+Chapter 11 will handle economic feasibility in more detail. Chapter 10's job is to make the dependency visible.
+
+\section{Mitigations and Their Failure Modes}
+
+\subsection{Controls Must Match the Failure}
+
+There is no single thing called ``MEV protection.'' Different failures need different controls.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.35\textwidth}X@{}}
+\toprule
+Control & Helps with & Main failure mode \\
+\midrule
+Slippage and deadlines & Bound bad swap execution and stale execution & Too loose permits extraction; too tight increases failures \\
+Private submission & Reduces public mempool visibility & Intermediary can censor, leak, internalize, or fail silently \\
+Commit-reveal & Hides a secret until after commitment & Reveal censorship, griefing, extra transactions, poor UX \\
+Batch auction & Reduces continuous-time priority races & Auctioneer or solver power, latency, complex clearing rules \\
+Intent or solver system & Gives users enforceable output constraints & Solver trust, collusion, weak competition, opaque execution quality \\
+Forced inclusion path & Limits sequencer or provider censorship & Delay, higher cost, complex user recovery, L1 dependency \\
+PBS or builder market & Separates proposing from specialized block construction & Builder and relay concentration, private order-flow centralization \\
+Protocol redesign & Reduces value of adversarial ordering & Harder product design, changed UX, migration risk \\
+\bottomrule
+\end{tabularx}
+\caption{MEV mitigations should be evaluated by the failure they address and the assumptions they introduce.}
+\end{table}
+
+EIP-1559, for example, changed Ethereum fee mechanics by introducing a protocol-computed base fee and user-specified priority fee, but it did not make fees a guarantee of inclusion.\footnote{\href{https://eips.ethereum.org/EIPS/eip-1559}{Vitalik Buterin et al., ``EIP-1559: Fee market change for ETH 1.0 chain''}.} Fees buy probability under a market and policy environment. They do not remove censorship, invalidation, private routing failure, or builder omission.
+
+\subsection{The Strongest Fix Is Often Less Extractable Design}
+
+Hiding transactions can help. Reducing the value of adversarial ordering is usually more durable.
+
+Design moves include:
+
+\begin{itemize}
+\item enforce explicit output bounds;
+\item avoid first-come-first-served allocation for scarce assets;
+\item avoid revealing secrets in calldata before protection;
+\item use robust oracle windows and manipulation checks;
+\item bound liquidation bonuses and bad-debt exposure;
+\item design auctions as sealed bids or batches where fairness matters;
+\item avoid one-block rewards that justify reorg attempts;
+\item provide alternative inclusion paths for emergency actions;
+\item separate display convenience from accounting finality.
+\end{itemize}
+
+Batch-auction and fair-ordering research, including Clockwork Finance, is useful background for designs that reduce continuous-time racing rather than merely hiding orders.\footnote{Tarun Chitra et al., \href{https://arxiv.org/abs/2109.04347}{``Clockwork Finance''}.}
+
+\section{Worked Example: Large AMM Swap Through the Supply Chain}
+
+A user swaps 500,000 units of Token A for Token B through a two-pool AMM route. The transaction uses ordinary public RPC submission, a 2\% slippage tolerance, and a 20-minute deadline. The protocol team says: ``the swap is safe because the user sets slippage.''
+
+That is incomplete. Slippage protects a minimum outcome. It does not protect expected execution quality.
+
+\subsection{Exposure and Intended Invariant}
+
+The public transaction reveals route, amount, slippage, deadline, sender, target contract, and calldata. Searchers and builders can simulate the swap against current state and candidate neighboring transactions.
+
+The user's enforceable invariant is:
+
+\begin{codeblock}
+The swap must either return at least the signed minimum output before
+the deadline or revert.
+\end{codeblock}
+
+Suppose the quote is 1,000,000 units of Token B and slippage is 2\%. The minimum output is:
+
+\[
+1{,}000{,}000 \times (1 - 0.02) = 980{,}000
+\]
+
+The 20,000-unit gap is not automatically stolen. But it is the space in which adverse price movement, sandwiching, route competition, or stale execution can harm the user while the transaction still succeeds.
+
+\subsection{Attack and Review}
+
+An attacker may buy Token B before the victim to move the route price, let the victim execute at a worse price, then sell Token B after the victim. Whether this is profitable depends on liquidity depth, pool fees, gas cost, slippage, competition, builder access, and failed-transaction risk.
+
+The finding should not say only ``MEV risk.'' It should name the mechanism:
+
+\begin{codeblock}
+Large public swaps expose route, size, slippage, and deadline before
+inclusion. For shallow routes, the signed 2% slippage tolerance creates
+an exploitable execution window. The protocol enforces the user's
+minimum output but does not protect expected execution quality.
+\end{codeblock}
+
+The mitigation set should be explicit:
+
+\begin{itemize}
+\item tighter default slippage for shallow routes;
+\item price-impact warnings;
+\item shorter deadlines during normal conditions;
+\item private or batch execution as an optional route with disclosed trust assumptions;
+\item route splitting only when it reduces net execution risk;
+\item intent-based execution only when solver competition and output guarantees are meaningful.
+\end{itemize}
+
+Residual risk remains. Some trades are large relative to available liquidity. The protocol should not pretend routing alone can make them safe.
+
+\section{Transaction Supply-Chain Risk Register}
+
+For high-value actions, produce a transaction supply-chain register:
+
+\begin{codeblock}
+Action:
+User or system intent:
+Signed fields that constrain execution:
+Information revealed before inclusion:
+Submission path:
+Public or private visibility:
+Actors who can see it:
+Actors who can simulate it:
+Actors who can include, exclude, or order it:
+Replacement or cancellation assumptions:
+Bundle, auction, or solver assumptions:
+State variables affected by neighboring transactions:
+Worst useful ordering for an attacker:
+Maximum tolerable inclusion delay:
+Value at risk:
+Mitigations:
+Residual risk:
+\end{codeblock}
+
+For keeper, governance, bridge, oracle, and emergency actions, add the fallback route and the consequence of delay. Those actions often fail not because they were invalid, but because they arrived too late.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why is block production more than transaction packaging?
+\item What is the difference between transaction validity and intent satisfaction?
+\item Why is a public mempool an information surface rather than a fair queue?
+\item Why does private submission change the trust boundary instead of eliminating trust?
+\item Why is transaction replacement or cancellation not guaranteed erasure?
+\item How do proposers, builders, relays, miners, sequencers, searchers, solvers, and keepers differ as security actors?
+\item Why is ordering part of the state transition in shared-state applications?
+\item Why can useful MEV, such as arbitrage or liquidation, still create security risk?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Choose one action: large AMM swap, liquidation, bridge message relay, governance execution, emergency pause, or oracle update. Write a transaction supply-chain register for it, including who sees it, who can order it, maximum tolerable delay, mitigations, and residual risk.
+
+\item A wallet offers public RPC submission and a private MEV-protection endpoint. Compare the two routes by visibility, censorship risk, simulation ability, inclusion confidence, privacy leakage, fallback behavior, and user disclosure.
+
+\item A user submits a swap with nonce 42, then submits a cancellation transaction with the same nonce. The swap still executes. List plausible causes and write what the wallet should track before telling the user the transaction was canceled.
+
+\item A lending protocol relies on external liquidators. During congestion, profitable liquidations are delayed for five blocks. Analyze bad-debt risk, keeper incentives, oracle freshness, censorship paths, and protocol controls that could bound loss.
+\end{enumerate}

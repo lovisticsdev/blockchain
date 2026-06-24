@@ -1,0 +1,664 @@
+\chapter{Lifecycle and Upgrade Risk}
+
+\section{Purpose}
+
+\begin{principlebox}
+A deployment, initialization, migration, or upgrade is a privileged state transition. It can change the code that interprets existing state, the configuration that directs value, the authority that controls future transitions, and the trust assumptions users accepted when they entered the system.
+\end{principlebox}
+
+Most vulnerability chapters study ordinary user-facing behavior: deposits, withdrawals, transfers, calls, accounting updates, approvals, and callbacks. Lifecycle risk is different. It lives in the transitions that happen before normal operation, between versions, during emergencies, and at deprecation. These transitions are often performed by deployers, multisigs, governance, scripts, chain administrators, or upgrade authorities. That does not make them outside the security model. It makes them some of the highest-authority transitions in the system.
+
+Chapter~21 taught that authority is transition power. Chapter~22 showed that addresses and asset definitions are security facts. Chapter~23 showed that proxies and external boundaries can change the code context of execution. Chapter~24 showed that persistent accounting state has to be interpreted consistently. This chapter combines those lessons.
+
+The weak review says, "Only the owner can upgrade." The useful review asks:
+
+\begin{codeblock}
+lifecycle_review:
+    what code is deployed?
+    what state already exists?
+    what initialization or migration function can write that state?
+    what configuration directs assets, prices, roles, and dependencies?
+    who can change code, config, authority, pause state, or recovery state?
+    what user assumption changes after the transition?
+    what invariant must hold before and after the transition?
+    what evidence proves the transition happened as intended?
+\end{codeblock}
+
+This chapter is not a proxy tutorial. Proxies are one important EVM mechanism. The discipline is broader: deployment parameters, initializer safety, storage layout, upgrade authorities, Solana ProgramData, CosmWasm migrations, Move package policies, dependency upgrades, pause controls, emergency powers, and user notice. The common method is to treat every lifecycle operation as a state transition with preconditions, postconditions, authority, evidence, and rollback or recovery behavior.
+
+\section{Lifecycle as a Security Boundary}
+
+Normal runtime functions are not the only places where invariants can fail. A protocol may be perfectly correct after initialization but unsafe before initialization. It may be safe at version 1 and unsafe after version 2 reinterprets the same storage. It may be safe while a dependency is immutable and unsafe once that dependency can be upgraded by a third party. It may be safe under one oracle address and unsafe after a configuration script points to a stale feed.
+
+\subsection{Deployment Is a State Transition}
+
+Deployment is not just uploading bytecode. Deployment chooses initial code, constructor or initializer arguments, dependency addresses, ownership, upgrade authority, pause status, fee recipients, token addresses, oracle feeds, domain separators, chain IDs, verifier keys, program IDs, code IDs, package IDs, admin caps, and default limits. Many of those choices are hard to change safely later.
+
+\begin{codeblock}
+lifecycle_map:
+    build
+    deploy code
+    initialize state
+    configure dependencies
+    verify deployment
+    operate
+    pause or throttle
+    upgrade code
+    migrate state
+    recover or roll back
+    deprecate
+    make immutable
+\end{codeblock}
+
+Each step has a security question. During build, did the bytecode match reviewed source and dependencies? During deployment, did the script use the intended network, chain ID, salt, owner, and constructor or initializer arguments? During initialization, can anyone front-run or repeat the setup? During configuration, are dependency addresses correct for that chain and asset? During operation, can configuration drift? During upgrade, does the new code preserve state interpretation? During migration, do all old invariants still hold under the new schema? During deprecation, can funds exit safely?
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=8mm and 8mm]
+\node[security node, text width=20mm] (deploy) {Deploy};
+\node[security node, right=of deploy, text width=22mm] (init) {Initialize};
+\node[security node, right=of init, text width=23mm] (config) {Configure};
+\node[security node, right=of config, text width=22mm] (operate) {Operate};
+\node[security node, below=of operate, text width=22mm] (pause) {Pause};
+\node[security node, left=of pause, text width=22mm] (upgrade) {Upgrade};
+\node[security node, left=of upgrade, text width=22mm] (migrate) {Migrate};
+\node[security node, left=of migrate, text width=22mm] (immutable) {Immutable};
+
+\draw[security arrow] (deploy) -- (init);
+\draw[security arrow] (init) -- (config);
+\draw[security arrow] (config) -- (operate);
+\draw[security arrow] (operate) -- (pause);
+\draw[security arrow] (pause) -- (upgrade);
+\draw[security arrow] (upgrade) -- (migrate);
+\draw[security arrow] (migrate) -- (immutable);
+\draw[security arrow] (migrate.north) to[bend left=18] (operate.south);
+\end{tikzpicture}
+\caption{Lifecycle transitions change the conditions under which normal protocol transitions execute.}
+\end{figure}
+
+Lifecycle review should therefore happen before launch and before every material change. A system with an excellent runtime audit and a careless deployment script is not secure. A system with correct version 2 code and an unsafe migration is not secure. A system with good upgrade logic but a compromised upgrade key is not secure.
+
+\subsection{Upgradeability and Immutability as User Assumptions}
+
+Upgradeability is neither automatically good nor automatically bad. It is a trust assumption. It lets a protocol patch bugs, add features, respond to incidents, and adapt to external changes. It also lets whoever controls the upgrade path change the rules after users have deposited assets, granted approvals, integrated contracts, or built dependent systems. Ethereum.org's upgrade guidance captures this tradeoff: upgrades can fix vulnerabilities and add features, but they also reduce immutability, add complexity, and create trust in the upgrade authority.\footnote{\href{https://ethereum.org/developers/docs/smart-contracts/upgrading/}{Ethereum.org, ``Upgrading smart contracts''}.}
+
+The security model must say which assumption users are relying on:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.31\textwidth}X@{}}
+\toprule
+Lifecycle model & User assumption & Review focus \\
+\midrule
+Immutable code & Code will not change at same address or package identity & Deployment correctness, parameter safety, dependency immutability, escape paths. \\
+Timelocked upgrade & Code can change after a delay & Notice, exit window, queued actions, emergency bypasses, role custody. \\
+Multisig upgrade & Signers can approve code change & Signer security, threshold, signer independence, operation review, key rotation. \\
+Governance upgrade & Token or council process controls change & Proposal payloads, quorum, timelock, voter concentration, execution scripts. \\
+Emergency admin & A privileged actor can pause, rescue, or patch quickly & Scope, logging, rate limits, sunset path, abuse resistance. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The failure is not "upgradeable." The failure is undisclosed, unbounded, untested, or unauditable upgradeability. If users think they are interacting with immutable rules while an unseen actor can replace the rules tomorrow, the protocol's security story is false even if the current code is clean.
+
+\section{Initialization and Configuration}
+
+Initialization and configuration are where many systems are born compromised. The code may be correct, but the first state may be wrong. The owner may be wrong. The asset may be wrong. The verifier key may be wrong. The implementation may be left usable by attackers. The initializer may be callable twice. The configuration may point to a mainnet address on a testnet fork, an old oracle, a wrong token, or a dependency controlled by another team.
+
+\subsection{Constructors, Initializers, and Implementation Locking}
+
+Constructor assumptions become dangerous in proxy-based systems. In a normal Solidity deployment, a constructor runs once as part of contract creation. In a proxy system, the implementation constructor does not initialize the proxy's storage. OpenZeppelin's upgrade documentation explains that upgradeable contracts should use initializer functions instead of constructors, and that ordinary initializer functions must be protected because they can otherwise be called more than once.\footnote{\href{https://docs.openzeppelin.com/upgrades-plugins/writing-upgradeable}{OpenZeppelin Upgrades documentation, ``Writing Upgradeable Contracts''}.}
+
+That changes the review method:
+
+\begin{codeblock}
+initializer_review:
+    list all variables that must be initialized
+    list all parent initializers that must run
+    prove initializer runs exactly once for each deployed instance
+    prove implementation contract cannot be taken over
+    verify initializer arguments against deployment manifest
+    verify reinitializers are versioned and authorized
+    verify no field relies on constructor-only initialization
+\end{codeblock}
+
+OpenZeppelin also warns not to leave implementation contracts uninitialized and recommends locking them with \texttt{\_disableInitializers} in the implementation constructor.\footnote{\href{https://docs.openzeppelin.com/upgrades-plugins/writing-upgradeable\#initializing-the-implementation-contract}{OpenZeppelin Upgrades documentation, ``Initializing the Implementation Contract''}.} The reason is subtle but important. Users interact through the proxy, but the implementation is still an on-chain contract. If an attacker can initialize the implementation and trigger dangerous implementation-only behavior, the proxy system may be affected indirectly, especially where the implementation contains unsafe operations.
+
+The same initialization discipline appears outside EVM proxies. Solana programs may rely on initializer instructions to create and populate program-derived state accounts. CosmWasm contracts receive instantiate messages and may later receive migrate messages. Move modules may have one-time initialization behavior or package capabilities. The runtime syntax differs, but the security question is the same: which state must exist before normal operation, and who is allowed to create it?
+
+\subsection{Parameters, Addresses, and Configuration Drift}
+
+Configuration is executable risk disguised as data. A token address decides what asset enters the system. An oracle address decides what price is trusted. A bridge endpoint decides which remote messages are accepted. A fee recipient decides who receives value. A pause flag decides whether users can exit. A role decides who can mint, upgrade, rescue, or migrate.
+
+\begin{artifactbox}[Configuration register]
+Maintain a register for every privileged or security-critical configuration value. The register should name the value, its authority, allowed range, current value, chain, dependency version, last change, and invariant affected.
+\end{artifactbox}
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.19\textwidth}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.20\textwidth}X@{}}
+\toprule
+Configuration & Security role & Change authority & Failure mode \\
+\midrule
+Asset address & Defines accepted value & Admin, deploy script, governance & Wrong token, wrapped asset mismatch, malicious asset. \\
+Oracle feed & Defines external price evidence & Admin or oracle registry & Stale feed, wrong decimals, wrong quote currency. \\
+Upgrade admin & Controls code transition & Multisig, timelock, cap owner & Unauthorized replacement of protocol rules. \\
+Fee recipient & Receives protocol value & Admin or governance & Wrong recipient or lost funds. \\
+Pause flag & Gates transitions & Guardian or governance & Exits blocked or bypass abused. \\
+Remote endpoint & Accepts cross-domain messages & Admin or bridge config & Forged remote, wrong domain, replay path. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Configuration drift is the slow version of a bad deployment. It happens when the code still matches the audit but the addresses, roles, limits, keys, dependencies, or external assumptions have moved. A protocol that was safe with oracle feed A may be unsafe after switching to feed B with different decimals or update cadence. A vault that was safe with a normal ERC-20 may be unsafe after accepting a fee-on-transfer token. A Solana program that was safe with one Token Program may behave differently with Token Extensions. A Move package dependency that was safe when immutable may become a different risk if a compatible dependency can be upgraded.
+
+The review should require a change process for configuration, not only a list of current values.
+
+\begin{codeblock}
+configuration_change:
+    proposed value
+    reason for change
+    authority required
+    validation checks
+    affected invariants
+    affected integrations
+    effective time
+    monitoring
+    rollback or replacement path
+\end{codeblock}
+
+\section{Code Change With Persistent State}
+
+Upgrades are dangerous because code changes while state persists. The new code inherits old balances, roles, mappings, flags, nonces, indexes, debts, shares, pending withdrawals, accounting accumulators, and dependency addresses. If the new code interprets any of that state differently, the protocol's history changes meaning.
+
+\subsection{Proxy Execution and Storage Context}
+
+The EVM proxy pattern separates the address and storage that users interact with from the implementation code that executes. Calls reach the proxy, the proxy delegates execution to an implementation, and the implementation logic reads and writes the proxy's storage. OpenZeppelin's proxy documentation describes this delegation model and notes that EIP-1967 storage slots are used to avoid clashes with implementation storage.\footnote{\href{https://docs.openzeppelin.com/contracts/4.x/api/proxy}{OpenZeppelin Contracts documentation, ``Proxy''}.}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=9mm and 14mm]
+\node[security node, text width=28mm] (user) {User call};
+\node[security node, right=of user, text width=32mm] (proxy) {Proxy address\\and storage};
+\node[security node, right=of proxy, text width=36mm] (impl) {Implementation\\code};
+\node[security node, below=of proxy, text width=32mm] (state) {Persistent state};
+\node[security node, below=of impl, text width=36mm] (newimpl) {New implementation};
+
+\draw[security arrow] (user) -- (proxy);
+\draw[security arrow] (proxy) -- node[above]{delegatecall} (impl);
+\draw[security arrow] (proxy) -- (state);
+\draw[security arrow] (newimpl) -- node[right]{upgrade target} (impl);
+\end{tikzpicture}
+\caption{A proxy upgrade changes the code interpreting persistent proxy storage.}
+\end{figure}
+
+This is why proxy review is not only "who can call upgrade?" It is:
+
+\begin{codeblock}
+proxy_review:
+    proxy type and admin model
+    implementation slot and upgrade function
+    initializer and reinitializer paths
+    storage layout compatibility
+    selector clashes and fallback behavior
+    delegatecall boundaries
+    implementation locking
+    rollback or bricking scenarios
+\end{codeblock}
+
+Transparent proxies, UUPS proxies, beacons, diamonds, clones, and custom dispatchers have different mechanics. Transparent proxies put admin behavior in the proxy. UUPS places upgrade logic in the implementation. Beacons let many proxies follow one beacon implementation. Diamonds route selectors to facets. Custom systems may not follow standard assumptions at all. The reviewer should name the mechanism before applying a checklist.
+
+\subsection{Storage Layout, Namespaces, and Compatibility}
+
+Storage layout is not an implementation detail. It is the schema for persistent value. OpenZeppelin's upgrade documentation warns that new contract versions must not change the order or type of existing state variables because doing so can mix up stored values and cause critical errors.\footnote{\href{https://docs.openzeppelin.com/upgrades-plugins/writing-upgradeable\#modifying-your-contracts}{OpenZeppelin Upgrades documentation, ``Modifying Your Contracts''}.} Solidity's own security guidance adds a more specialized warning: stored internal function pointers can become invalid after code updates.\footnote{\href{https://docs.soliditylang.org/en/latest/security-considerations.html\#internal-function-pointers-in-upgradeable-contracts}{Solidity documentation, ``Security Considerations: Internal Function Pointers in Upgradeable Contracts''}.}
+
+The simplest storage-layout bug looks like this:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Slot & Version 1 meaning & Version 2 meaning \\
+\midrule
+0 & \texttt{asset} & \texttt{feeBps} \\
+1 & \texttt{owner} & \texttt{asset} \\
+2 & \texttt{totalAssets} & \texttt{owner} \\
+3 & \texttt{totalSupply} & \texttt{totalAssets} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+No ordinary user function changed storage directly. The upgrade reinterpreted it. The old asset address becomes a fee. The old owner becomes an asset address. The old accounting variable becomes authority. This can be instantly catastrophic.
+
+A storage review should produce a diff:
+
+\begin{codeblock}
+storage_layout_diff:
+    old variable order
+    new variable order
+    inherited variables
+    library storage namespaces
+    gaps or reserved slots
+    removed variables and leftover values
+    renamed variables and semantic meaning
+    new variables appended or namespaced
+    mappings and nested structs
+    compiler version and optimizer assumptions
+\end{codeblock}
+
+Namespaced storage, storage gaps, and explicit layout tools can reduce risk. They do not remove the need for a semantic review. A new variable appended safely may still change behavior unsafely. A variable renamed without moving may still cause a semantic mismatch if old values mean something else under the new code.
+
+\section{Runtime-Specific Upgrade Models}
+
+Upgrade risk is portable, but upgrade mechanisms are not. A reviewer who treats every chain like EVM proxies will miss Solana upgrade authority. A reviewer who treats every Move package like a Solidity implementation will miss package policy and capability custody. A reviewer who treats CosmWasm migration like a proxy upgrade will miss admin-controlled code IDs and migrate messages.
+
+\subsection{EVM Proxies, Beacons, and Upgrade Functions}
+
+For EVM systems, the reviewer should first identify the upgrade shape:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.30\textwidth}X@{}}
+\toprule
+Mechanism & Where upgrade logic lives & Main review risk \\
+\midrule
+Transparent proxy & Proxy admin path & Admin confusion, selector behavior, centralized upgrade authority. \\
+UUPS proxy & Implementation upgrade function & Missing or weak \texttt{\_authorizeUpgrade}, bricking through bad implementation. \\
+Beacon proxy & Beacon contract & Many proxies change at once; beacon admin becomes shared critical authority. \\
+Diamond & Selector-to-facet dispatch & Selector routing, facet storage, partial upgrade permissions. \\
+Custom proxy & Project-specific dispatcher & Nonstandard slots, fallback behavior, missing compatibility checks. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The review should trace a full upgrade:
+
+\begin{codeblock}
+evm_upgrade_trace:
+    caller -> governance or multisig
+    governance -> timelock if any
+    timelock -> proxy admin, beacon, or implementation
+    upgrade function -> implementation slot change
+    optional call -> reinitializer or migration
+    event -> observable evidence
+    post-upgrade checks -> code hash, storage layout, invariants
+\end{codeblock}
+
+The common severe bugs are familiar but still worth naming: uninitialized proxies, uninitialized implementations, public reinitializers, wrong proxy admin, missing authorization in UUPS, upgrade to a non-upgradeable implementation, storage collision, selector clash, unsafe delegatecall, unsafe selfdestruct assumptions, and governance payloads that call the wrong address.
+
+\subsection{Solana ProgramData and Upgrade Authority}
+
+Solana does not use EVM proxy storage to upgrade ordinary programs. Programs deployed through loader-v3 can be upgraded if an upgrade authority is set. Solana's program deployment documentation explains that upgrading requires the upgrade authority, uploads new bytecode through a buffer, writes it to ProgramData, and that setting the upgrade authority to \texttt{None} makes the program immutable.\footnote{\href{https://solana.com/docs/core/programs/program-deployment}{Solana documentation, ``Program Deployment''}.}
+
+The review surface is therefore:
+
+\begin{codeblock}
+solana_upgrade_review:
+    program id
+    programdata account
+    upgrade authority
+    buffer authority
+    verified build or bytecode hash
+    slot where upgrade becomes effective
+    state accounts interpreted by new code
+    account schema version
+    migration or one-time authority instruction
+    whether authority should be revoked
+\end{codeblock}
+
+The persistent state in Solana usually lives in accounts owned by the program, not in the program bytecode account itself. An upgrade can change how those accounts are deserialized, which accounts are required, which PDA seeds are accepted, which token program is called, and which authority checks are enforced. The upgrade may be mechanically valid while semantically unsafe.
+
+The Solana-specific lifecycle question is not "is there a proxy?" It is "who can replace the program code that controls these state accounts, and can the new code still interpret all existing accounts correctly?"
+
+\subsection{CosmWasm Migration and Admin Control}
+
+CosmWasm gives migration a more explicit shape. A contract can be instantiated with an admin. A migratable contract defines a migrate entry point and receives a migrate message when the admin points the contract to new code. Terra's CosmWasm migration documentation describes the two key components: a \texttt{MigrateMsg} and a designated administrator allowed to perform migrations.\footnote{\href{https://docs.terra.money/develop/terrain/contract-migration/}{Terra documentation, ``Migrating CosmWasm contracts on Terra''}.}
+
+That explicitness is helpful. It does not make migration safe by default. The migrate function is a state transition over existing storage:
+
+\begin{codeblock}
+cosmwasm_migration_review:
+    old code id
+    new code id
+    admin address
+    migrate message schema
+    stored contract version
+    old state schema
+    new state schema
+    compatibility checks
+    failure behavior
+    events and version update
+\end{codeblock}
+
+The migration should reject incompatible old versions, initialize new fields, preserve old balances and permissions, update stored version metadata, and leave the contract usable or cleanly halted. A no-op migrate function may be correct for a logic-only patch. It is dangerous when the new code expects new state.
+
+\subsection{Move Package Policies and Upgrade Capabilities}
+
+Move-based systems make upgradeability part of package policy and capabilities. Sui packages are immutable package objects, but Sui provides an upgrade process using an \texttt{UpgradeCap}; Sui documentation notes requirements such as layout compatibility and an \texttt{UpgradeTicket}.\footnote{\href{https://docs.sui.io/develop/publish-upgrade-packages/upgrade}{Sui documentation, ``Upgrading Packages''}.} Sui custom upgrade policies protect access to the \texttt{UpgradeCap} and can restrict compatibility policy over time.\footnote{\href{https://docs.sui.io/develop/publish-upgrade-packages/custom-policies}{Sui documentation, ``Custom Upgrade Policies''}.}
+
+Aptos Move packages also support upgrade policies. The Aptos Move book explains that compatible upgrades must preserve existing resource storage and public APIs, while immutable packages cannot be upgraded; it also warns that even compatible dependency upgrades can be hazardous because semantics can change.\footnote{\href{https://aptos-labs.github.io/move-book/modules-and-packages.html\#package-upgrades}{Aptos Move Book, ``Package Upgrades''}.}
+
+The key distinction is that compatibility checks are not the same as economic safety. A new package may preserve public signatures and storage types but change interest-rate logic, fee behavior, access control, event meaning, dependency behavior, or abort conditions. Reviewers should therefore track:
+
+\begin{codeblock}
+move_upgrade_review:
+    package id or address
+    upgrade policy
+    UpgradeCap or publishing authority
+    public API compatibility
+    resource layout compatibility
+    dependency policies
+    module initializer behavior
+    migration function if state changes are needed
+    semantic changes to assets, authority, and accounting
+\end{codeblock}
+
+\section{Migration as a State Transition}
+
+Migration is not "copy state." It is a transition from one state schema and code interpretation to another. A migration can preserve balances but break allowances. It can preserve shares but break reward indexes. It can preserve owner addresses but change admin semantics. It can preserve storage layout but change economic meaning.
+
+\subsection{Schema Changes and Invariant Preservation}
+
+Every migration should name the invariant before and after:
+
+\begin{codeblock}
+migration_invariant:
+    before:
+        sum(user_shares) == total_supply
+        total_claims <= managed_assets
+        every withdrawal request has owner, shares, assets, timestamp
+
+    migration:
+        add withdrawal_epoch
+        convert pending requests into new queue format
+        initialize fee_bps to governance-approved value
+
+    after:
+        sum(user_shares) == total_supply
+        total_claims <= managed_assets
+        every old withdrawal remains claimable or cancellable
+        no user receives a stronger or weaker claim unintentionally
+\end{codeblock}
+
+A migration can fail by omission. New code expects a field that old state does not have. A queue receives a default timestamp of zero. A role defaults to the zero address. A fee defaults to maximum rather than zero. A version variable is not updated, allowing migration to run again. A pending operation from Chapter~23 is forgotten. An accounting accumulator from Chapter~24 is reset.
+
+\begin{failuremodebox}[Default value migration]
+Default values are not neutral. Zero can mean no fee, no authority, no deadline, no collateral, empty queue, disabled feature, or unlimited behavior depending on the code.
+\end{failuremodebox}
+
+The migration should be tested with historical states, not only fresh fixtures. A fresh deployment does not contain old dust, weird mappings, paused flags, partial withdrawals, stale roles, deprecated assets, or strategy losses. If the protocol has been live, the migration test set should include real or realistic state snapshots.
+
+\subsection{Versioning, Adapters, and Dependency Migration}
+
+Versioning is a security tool when it prevents ambiguous state interpretation. It is theater when it is only a string. A useful version system answers:
+
+\begin{codeblock}
+versioning_review:
+    what version is stored on-chain?
+    who can change it?
+    what code paths require which version?
+    can migration run twice?
+    can a downgrade occur?
+    can adapters route old users to old code safely?
+    can external integrations detect the new version?
+    what dependencies changed with the version?
+\end{codeblock}
+
+Adapters can reduce migration risk by avoiding immediate state mutation. A protocol may keep old positions under old logic and route new positions to new logic. That can be safer than rewriting everything, but it increases integration complexity. Users and downstream protocols may now need to know which version a position belongs to.
+
+Dependency migration is often more dangerous than internal migration. A protocol may upgrade because an oracle feed changed, a bridge endpoint changed, a token implementation changed, a governance executor changed, or a dependency package upgraded. That means the migration must include external dependency assumptions, not only local storage.
+
+\section{Governance, Emergency Controls, and User Risk}
+
+Upgrade risk is inseparable from authority. A technically perfect upgrade function controlled by a single hot key is not a low-risk system. A multisig without a runbook is better, but not sufficient. A timelock without monitoring is a delay, not meaningful user notice. Governance without payload review can execute the wrong code with perfect quorum.
+
+\subsection{Upgrade Authority, Timelocks, and Multisigs}
+
+The authority map for upgrades should be explicit:
+
+\begin{codeblock}
+upgrade_authority_map:
+    propose upgrade
+    review code hash
+    approve upgrade
+    queue upgrade
+    cancel upgrade
+    execute upgrade
+    run migration
+    pause during migration
+    unpause after verification
+    revoke or rotate authority
+    make immutable
+\end{codeblock}
+
+Each action may have a different authority. A guardian may pause but not upgrade. Governance may approve upgrades but a timelock executes them. A multisig may control emergency fixes. A package capability may be held by a custom policy object. The security review should separate these powers rather than compress them into "admin."
+
+Timelocks create an exit window, but they also slow emergency response. Emergency bypasses speed response, but they weaken the promise of notice. Multisigs reduce single-key risk, but signer concentration, shared custody providers, social pressure, unclear payloads, and key compromise still matter. Governance distributes authority, but token concentration, vote buying, proposal complexity, and execution payload opacity can create new risks.
+
+The chapter's point is not to pick one governance design. It is to require the design to match the risk being accepted by users.
+
+\subsection{Pause, Recovery, Rollback, and Communication}
+
+Pause and recovery controls are lifecycle transitions too. They can protect users during an incident. They can also trap users, privilege insiders, or hide a broken migration.
+
+Review pause powers by transition:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.28\textwidth}X@{}}
+\toprule
+Control & Legitimate purpose & Abuse or failure mode \\
+\midrule
+Pause deposits & Stop new risk entering system & Existing users still exposed if exits are also blocked. \\
+Pause withdrawals & Stop exploit drain & Users may be trapped; privileged exits may become unfair. \\
+Rescue tokens & Recover mistaken transfers & Admin can extract assets that users believe are managed. \\
+Emergency upgrade & Patch critical bug quickly & Bypasses notice and review. \\
+Rollback & Revert to previous logic & Old logic may be incompatible with migrated state. \\
+Make immutable & Remove future upgrade trust & Bugs become permanent unless exits or migrations exist. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Rollback is especially misunderstood. Reinstalling old code does not necessarily restore old state. If version 2 migrated storage, changed accounting, emitted cross-chain messages, consumed nonces, or created new positions, version 1 may not be able to interpret the state anymore. A real rollback plan says which state changes can be undone, which cannot, and how users are made whole if rollback is impossible.
+
+Communication is part of the security surface because users and integrators need evidence. What was upgraded? Which code hash? Which storage layout diff? Which migration script? Which roles changed? Which invariants were checked? Which dependencies changed? Which emergency powers remain?
+
+\section{Review Method: Lifecycle Review Package}
+
+Lifecycle review should leave a document that another reviewer, operator, or incident responder can use. A good package includes:
+
+\begin{artifactbox}[Lifecycle review package]
+The output is not a vibe check. It is an evidence bundle for deployment, configuration, upgrade authority, storage compatibility, migration safety, and user-facing trust assumptions.
+\end{artifactbox}
+
+\begin{codeblock}
+lifecycle_review_package:
+    deployment manifest
+    code hash and source verification
+    initialization checklist
+    configuration register
+    authority map
+    proxy or runtime upgrade model
+    storage or schema diff
+    migration plan
+    dependency change log
+    invariant checklist
+    test traces and state snapshots
+    pause and emergency runbook
+    rollback or recovery analysis
+    user notice and monitoring plan
+\end{codeblock}
+
+For upgrades, the core table is:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.24\textwidth}X@{}}
+\toprule
+Review item & Required evidence \\
+\midrule
+Old code and new code & Source, bytecode hash, compiler settings, dependency lockfile. \\
+Persistent state & Storage layout, account schema, resource layout, pending operations. \\
+Changed behavior & Functions, access checks, accounting, external calls, events, limits. \\
+Authority & Who proposes, approves, executes, migrates, pauses, and cancels. \\
+Dependencies & Tokens, oracles, bridges, packages, programs, code IDs, endpoints. \\
+Invariants & Before-and-after assertions over assets, claims, roles, and queues. \\
+Operational plan & Timing, monitoring, emergency pause, rollback, user notice. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The review should include negative tests:
+
+\begin{codeblock}
+negative_lifecycle_tests:
+    attacker calls initializer first
+    initializer called twice
+    reinitializer called by wrong actor
+    upgrade proposed to wrong implementation
+    storage layout reordered
+    old state migrated twice
+    migration fails halfway
+    stale dependency remains configured
+    pause blocks user exits indefinitely
+    rollback code cannot interpret migrated state
+\end{codeblock}
+
+Lifecycle risk is where engineering discipline and governance discipline meet. The code can enforce some rules. The process must enforce the rest.
+
+\section{Worked Example: A Vault Upgrade That Breaks State}
+
+Consider a vault running behind an EVM proxy. Version 1 stores:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Slot & Variable & Meaning \\
+\midrule
+0 & \texttt{asset} & Underlying token address \\
+1 & \texttt{owner} & Admin allowed to configure vault \\
+2 & \texttt{totalManagedAssets} & Internal accounting numerator \\
+3 & \texttt{withdrawalDelay} & Delay before withdrawals can execute \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Version 2 intends to add performance fees and a new oracle:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Slot & Variable & Meaning \\
+\midrule
+0 & \texttt{feeBps} & Performance fee rate \\
+1 & \texttt{asset} & Underlying token address \\
+2 & \texttt{oracle} & Price feed address \\
+3 & \texttt{owner} & Admin allowed to configure vault \\
+4 & \texttt{totalManagedAssets} & Internal accounting numerator \\
+5 & \texttt{withdrawalDelay} & Delay before withdrawals can execute \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This upgrade is invalid. It reorders existing storage. After the upgrade, the old asset address is interpreted as a fee. The old owner is interpreted as the asset. The old accounting numerator is interpreted as an oracle address. The old withdrawal delay is interpreted as owner. Every normal function may now operate on nonsense state.
+
+The team then adds a reinitializer:
+
+\begin{codeblock}
+reinitialize_v2(oracle, fee_bps):
+    self.oracle = oracle
+    self.feeBps = fee_bps
+\end{codeblock}
+
+That still does not fix the storage layout. Worse, if the reinitializer is public or not version-gated, anyone can point the oracle to a malicious feed or reset the fee. If the implementation contract is not locked, an attacker may initialize the implementation and interfere with assumptions around upgrade authorization or unsafe logic.
+
+A correct upgrade plan starts differently:
+
+\begin{codeblock}
+safe_v2_layout:
+    slot 0: asset
+    slot 1: owner
+    slot 2: totalManagedAssets
+    slot 3: withdrawalDelay
+    slot 4: feeBps
+    slot 5: oracle
+\end{codeblock}
+
+Then the migration is reviewed as a transition:
+
+\begin{codeblock}
+v2_migration:
+    require caller == upgrade executor or governance
+    require current_version == 1
+    validate oracle address and decimals
+    validate fee_bps <= max_fee
+    set fee_bps
+    set oracle
+    set current_version = 2
+    emit migration event
+    assert totalManagedAssets unchanged
+    assert asset unchanged
+    assert owner unchanged
+\end{codeblock}
+
+The finding is not merely "storage collision." It is broader:
+
+\begin{codeblock}
+finding:
+    proposed vault upgrade reorders persistent storage and exposes a
+    reinitializer that can change oracle and fee configuration.
+
+invariant violated:
+    upgrade must preserve the meaning of existing asset, owner, and
+    accounting state while adding new fields only through a controlled,
+    one-time migration.
+
+impact:
+    new implementation may misinterpret asset, authority, oracle, and
+    accounting variables, allowing loss of funds, broken withdrawals, or
+    unauthorized configuration.
+
+recommendation:
+    append or namespace new storage;
+    lock the implementation;
+    gate and version the reinitializer;
+    validate all new configuration;
+    test the upgrade against a state snapshot;
+    publish code hash, storage diff, and migration evidence.
+\end{codeblock}
+
+That is lifecycle review at the right depth. It joins code, state, authority, configuration, and user assumptions in one finding.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why is deployment a state transition rather than a purely operational step?
+\item What user assumptions change when a protocol is upgradeable rather than immutable?
+\item Why do proxy-based contracts require initializers instead of relying on implementation constructors?
+\item What is the difference between an upgrade authority bug and a storage-layout compatibility bug?
+\item Why can a mechanically compatible Move package upgrade still be semantically dangerous?
+\item How does Solana program upgrade risk differ from EVM proxy upgrade risk?
+\item Why is rollback not guaranteed to restore safety after a migration?
+\item What evidence should a lifecycle review package include before an upgrade is executed?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Take a proxy-based contract or toy vault and produce a storage-layout diff between two versions. Identify whether every existing slot keeps the same type and semantic meaning.
+
+\item Build a configuration register for a protocol with at least one token, oracle, admin, fee recipient, pause flag, and dependency address. For each item, name the change authority and the invariant affected by a bad change.
+
+\item Review a proposed Solana, CosmWasm, Sui, or Aptos upgrade. Identify the upgrade authority or capability, the code or package identity, the state that persists, the compatibility rule, and the migration evidence required before execution.
+
+\item Write a lifecycle review package for a vault upgrade that adds a new fee and oracle. Include deployment manifest, authority map, storage or schema diff, migration plan, invariant checklist, negative tests, and user notice requirements.
+\end{enumerate}

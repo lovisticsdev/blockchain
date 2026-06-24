@@ -1,0 +1,591 @@
+\chapter{Accounting, Precision, and Rounding}
+
+\section{Purpose}
+
+\begin{principlebox}
+Accounting security is value conservation under discrete integer representations. Precision, rounding, share price, indices, and donations are not math trivia. They decide who receives value when exact economic quantities cannot be represented exactly.
+\end{principlebox}
+
+Chapter~22 asked what an asset movement actually means. Chapter~23 asked what happens when execution crosses an external boundary. This chapter asks a quieter question that destroys protocols just as reliably: did the program account for value correctly?
+
+Blockchain programs do not hold real numbers. They hold integers. A token may display 6 decimals, 8 decimals, 9 decimals, 18 decimals, or none. A price feed may return an integer scaled by a feed-specific precision. A vault may represent claims as shares. A lending market may compound interest through an index. A staking module may distribute rewards through accumulated reward-per-share. None of these representations is neutral. Each one chooses a unit, a scale, a rounding direction, and a rule for residual value.
+
+The weak review says, "The formula looks standard." The useful review asks:
+
+\begin{codeblock}
+accounting_review:
+    what unit is each variable in?
+    what scale is each variable using?
+    where is multiplication performed before division?
+    which operation rounds, and in whose favor?
+    can a positive input produce zero output?
+    can repeated small operations accumulate value leakage?
+    can an attacker change the denominator, numerator, or index?
+    can raw balances diverge from internal accounting?
+    what invariant conserves value?
+\end{codeblock}
+
+This chapter is not a DeFi-only chapter. AMMs, lending markets, vaults, staking systems, fee modules, liquidation engines, bridges, appchain modules, and reward distributors all rely on accounting. The syntax differs across EVM contracts, Solana programs, CosmWasm contracts, and Move modules, but the review method is portable: write the unit map, identify the conversion, choose the rounding rule, and test conservation under adversarial inputs.
+
+\section{Money as Integer State}
+
+The first accounting mistake is treating displayed values as stored values. Humans see "1.5 USDC." The program sees an integer amount, usually \texttt{1500000} for a 6-decimal token. Humans see "one share." The program sees a share unit with its own precision. Humans see "\$2,000." The program sees a signed or unsigned oracle answer with feed-specific decimals.
+
+\subsection{Units, Decimals, and Display Values}
+
+Decimals are metadata and convention. They are not a magical arithmetic type. ERC-20 defines \texttt{decimals()} as an optional metadata function used to describe how token amounts should be displayed.\footnote{\href{https://eips.ethereum.org/EIPS/eip-20}{EIP-20, ``Token Standard''}.} A protocol that assumes every ERC-20 has 18 decimals will misprice assets such as 6-decimal stablecoins or 8-decimal wrapped Bitcoin. A protocol that assumes metadata is always present may fail on tokens that omit it. A protocol that caches decimals from the wrong token may convert the right asset using the wrong scale.
+
+Solana makes the same lesson explicit in a different representation. A token mint account stores the token's supply, decimal precision, mint authority, and freeze authority; token accounts store integer amounts for a particular mint.\footnote{\href{https://solana.com/docs/tokens}{Solana documentation, ``Tokens on Solana''}.} The display precision belongs to the mint, not to an arbitrary program variable. CosmWasm contracts avoid floating-point arithmetic in Wasm contracts and use integer and fixed-point helper types such as \texttt{Decimal} and \texttt{Decimal256}.\footnote{\href{https://book.cosmwasm.com/basics/fp-types.html}{CosmWasm Book, ``Floating point types''}.} A reviewer should read these as variations of the same rule: on-chain money is integer state plus an interpretation.
+
+\begin{artifactbox}[Unit map]
+A unit map is the first artifact for any accounting review. It should be created before judging formulas.
+\end{artifactbox}
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.18\textwidth}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.20\textwidth}X@{}}
+\toprule
+Quantity & Stored unit & Scale source & Review question \\
+\midrule
+Underlying token amount & Smallest token unit & Token metadata or mint state & Is the token identity pinned before using its decimals? \\
+Vault share amount & Smallest share unit & Vault share precision & Is the share scale independent from the asset scale? \\
+Price answer & Feed integer & Feed \texttt{decimals()} or oracle config & Is the feed scale read and applied correctly? \\
+Reward index & Fixed-point accumulator & Protocol-defined scale & Can small users lose rewards to truncation? \\
+Fee rate & Basis points, ppm, or custom scale & Protocol config & Do all fee paths use the same denominator? \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The most dangerous unit bugs are not hidden in long formulas. They are usually visible once units are written next to variables:
+
+\begin{codeblock}
+collateral_value = collateral_amount * oracle_price / 1e18
+\end{codeblock}
+
+This expression is not reviewable until the units are known. Is \texttt{collateral\_amount} scaled by 6, 8, 9, or 18 decimals? Is \texttt{oracle\_price} scaled by 8 decimals or 18? Is the output expected in dollars, wei-like units, or an internal accounting unit? Chainlink's data feed interface exposes a \texttt{decimals()} function precisely because feed answers have an explicit response precision.\footnote{\href{https://docs.chain.link/data-feeds/api-reference}{Chainlink documentation, ``Data Feeds API Reference''}.}
+
+A good review rewrites the formula with units:
+
+\begin{codeblock}
+collateral_units     = token smallest units
+token_decimals       = d_token
+price_units          = quote units scaled by 10^d_feed
+target_value_units   = internal USD value scaled by 10^d_value
+
+value =
+    collateral_units
+    * price_units
+    * 10^d_value
+    / 10^d_token
+    / 10^d_feed
+\end{codeblock}
+
+This does not prove the formula is safe. It makes it falsifiable. A reviewer can now ask whether the multiplication can overflow, whether division happens too early, whether the output rounds in the intended direction, and whether the same unit convention is used across deposit, withdrawal, liquidation, fee, and accounting paths.
+
+\subsection{Fixed-Point Arithmetic Without Floating Point}
+
+Solidity integer division rounds toward zero, and Solidity's fixed-point number types are not fully supported as ordinary usable arithmetic types.\footnote{\href{https://docs.soliditylang.org/en/latest/types.html\#division}{Solidity documentation, ``Types: Division''}; \href{https://docs.soliditylang.org/en/latest/types.html\#fixed-point-numbers}{Solidity documentation, ``Types: Fixed Point Numbers''}.} That is why EVM programs usually implement fixed-point arithmetic manually:
+
+\begin{codeblock}
+scale = 1e18
+
+fixed_mul(a, b):
+    return a * b / scale
+
+fixed_div(a, b):
+    return a * scale / b
+\end{codeblock}
+
+This pattern is simple, but it hides three review questions. First, can \texttt{a * b} overflow before the division? Solidity 0.8 checked arithmetic will revert on overflow, but a revert can still be a denial-of-service or broken market path. Second, is the rounding direction correct? Third, is precision lost before a later multiplication could have preserved it?
+
+Full-precision multiplication-and-division helpers exist because this is a real security surface. OpenZeppelin's \texttt{Math.mulDiv} computes \texttt{x * y / denominator} with full precision, and the overloaded form accepts a rounding direction.\footnote{\href{https://docs.openzeppelin.com/contracts/5.x/api/utils}{OpenZeppelin Contracts documentation, ``Utils: Math''}.} The reviewer should not require every formula to use a particular library, but should require every formula to make overflow behavior, precision, and rounding direction explicit.
+
+\begin{failuremodebox}[Divide early]
+The expression \texttt{a / b * c} often loses value before multiplication. The expression \texttt{a * c / b} preserves more precision but may overflow if implemented naively. The correct design is not a slogan. It depends on bounds, units, and rounding direction.
+\end{failuremodebox}
+
+The same issue appears outside Solidity. CosmWasm exposes explicit conversion helpers such as \texttt{to\_uint\_floor} and \texttt{to\_uint\_ceil} on \texttt{Decimal}, which makes rounding visible at the type boundary.\footnote{\href{https://docs.rs/cosmwasm-std/latest/cosmwasm_std/struct.Decimal.html}{\texttt{cosmwasm\_std} documentation, ``Decimal''}.} That is the right mental model everywhere: when a fractional economic claim becomes an integer amount, someone receives the remainder. The code should say who.
+
+\section{Rounding as Value Transfer}
+
+Rounding is not a harmless approximation in adversarial finance. It is a transfer rule. If exact math says a user should receive 10.7 shares and the program mints 10, the missing 0.7 share-equivalent value stays somewhere. It may stay in the vault, benefit existing share holders, benefit the protocol, or be captured later by an attacker. The answer depends on the accounting design.
+
+\subsection{Rounding Direction Is a Security Decision}
+
+Every conversion should have an explicit beneficiary for residual value. In a vault, four operations usually pull in different directions:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.16\textwidth}>{\RaggedRight\arraybackslash}p{0.27\textwidth}>{\RaggedRight\arraybackslash}p{0.22\textwidth}X@{}}
+\toprule
+Operation & Exact quantity & Conservative rounding & Why it matters \\
+\midrule
+Deposit assets for shares & Shares owed to depositor & Round shares down or reject if zero & The vault should not over-mint claims against existing users. \\
+Mint exact shares & Assets required from minter & Round assets up & The minter should not receive shares without paying enough assets. \\
+Withdraw exact assets & Shares burned from owner & Round shares up & The owner should not remove assets while burning too few shares. \\
+Redeem shares for assets & Assets paid to redeemer & Round assets down & The vault should not overpay assets for a fixed share burn. \\
+Fee charged & Fee owed by payer or protocol & Direction must match fee policy & Repeated rounding must not erase or overstate fees. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+ERC-4626 makes rounding part of interface behavior. Its conversion functions must round down, while preview functions impose conservative inequalities relative to the transaction that would execute in the same block.\footnote{\href{https://eips.ethereum.org/EIPS/eip-4626}{EIP-4626, ``Tokenized Vaults''}.} The important lesson is not only the ERC. It is that a financial interface should specify rounding as behavior, not leave it as an implementation accident.
+
+Here is a reviewable version of a share conversion:
+
+\begin{codeblock}
+shares_for_deposit(assets):
+    if total_supply == 0:
+        return assets * initial_share_scale
+
+    shares = floor(assets * total_supply / total_assets)
+
+    if shares == 0:
+        reject
+
+    return shares
+\end{codeblock}
+
+This is still incomplete, but it exposes the policy. Deposits round down, but zero-share deposits are rejected. The formula uses \texttt{total\_assets}, which must be defined carefully. If it is raw token balance, donations may manipulate it. If it is internal accounting, then direct token transfers may not count until harvested or synchronized. Neither choice is automatically safe. The design must state which assets are managed and why.
+
+\begin{artifactbox}[Rounding table]
+For each operation, record the exact mathematical quantity, the integer formula, the rounding direction, the residual beneficiary, and whether zero output is accepted or rejected.
+\end{artifactbox}
+
+\subsection{Dust, Zero Outputs, and Threshold Effects}
+
+Dust is not just small value. It is value below the resolution of an accounting path. A protocol can be safe with dust if it has a deliberate policy. It is unsafe when dust can be repeatedly generated, captured, or used to bypass a state transition.
+
+The simplest bug is a positive input that produces zero output:
+
+\begin{codeblock}
+shares = assets * total_supply / total_assets
+
+if assets > 0 and shares == 0:
+    user loses assets and receives no claim
+\end{codeblock}
+
+This can happen when the denominator is large relative to the numerator. It can also happen when division occurs before multiplication:
+
+\begin{codeblock}
+reward = user_balance / total_balance * reward_pool
+\end{codeblock}
+
+If \texttt{user\_balance < total\_balance}, the division truncates to zero before multiplying by the reward pool. The correct shape usually multiplies first or uses an accumulated index:
+
+\begin{codeblock}
+reward = user_balance * reward_pool / total_balance
+\end{codeblock}
+
+Even then, residual value remains. A reward distribution to many users cannot always allocate every last unit exactly. The protocol must decide whether residuals remain in the pool, roll into the next distribution, accrue to the protocol, or are distributed by some deterministic rule. The wrong answer is not "rounding exists." The wrong answer is "nobody knows where the rounding went."
+
+Threshold effects also create attack surfaces. If a liquidation penalty, fee, or reward is rounded down to zero below a certain amount, attackers may split one operation into many small operations. If a withdrawal fee rounds up with no cap, small users may be overcharged. If a borrow index truncates growth for tiny positions, accounts may become economically inconsistent with protocol-wide accounting.
+
+\begin{failuremodebox}[Rounding amplification]
+If rounding loss per operation is bounded but the attacker can choose the number of operations, the total loss may not be bounded. Always review whether an operation can be split, looped, batched, or routed through many accounts.
+\end{failuremodebox}
+
+\section{Share, Index, and Exchange-Rate Accounting}
+
+Most serious accounting bugs are not in one multiplication. They are in a relationship among claims. A vault share is a claim on assets. A lending cToken, a staking receipt, a liquid staking token, a reward index, and a bridge voucher are all accounting claims. The security question is whether the claim ratio changes only for intended reasons.
+
+\subsection{Shares, Assets, and Claim Ratios}
+
+A share system separates ownership from custody. Users hold shares. The protocol holds or manages assets. The exchange rate tells how much asset value each share claims:
+
+\[
+\text{price per share} = \frac{\text{managed assets}}{\text{share supply}}
+\]
+
+The formula looks harmless. Its security depends on the definitions. What counts as managed assets? Is it raw token balance, strategy debt, oracle value, accrued interest, pending withdrawal assets, claimable rewards, or something else? What counts as share supply? Does it include pending burns, reserved shares, protocol-owned shares, locked shares, or unminted virtual shares?
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=12mm and 18mm]
+\node[security node, text width=30mm] (assets) {Managed assets};
+\node[security node, right=of assets, text width=34mm] (rate) {Exchange rate};
+\node[security node, right=of rate, text width=30mm] (shares) {User shares};
+\node[security node, below=of rate, text width=36mm] (claim) {Redeemable claim};
+
+\draw[security arrow] (assets) -- node[above]{numerator} (rate);
+\draw[security arrow] (shares) -- node[above]{denominator} (rate);
+\draw[security arrow] (rate) -- (claim);
+\draw[security arrow] (shares) -- (claim);
+\end{tikzpicture}
+\caption{Share accounting is a claim system. Both numerator and denominator are security-critical.}
+\end{figure}
+
+The obvious invariant is:
+
+\begin{codeblock}
+conservation:
+    total_claim_value <= managed_assets
+\end{codeblock}
+
+But that invariant is too vague to test. A stronger review writes the conversions:
+
+\begin{codeblock}
+assets_to_shares(assets):
+    return round_down(assets * share_supply / managed_assets)
+
+shares_to_assets(shares):
+    return round_down(shares * managed_assets / share_supply)
+\end{codeblock}
+
+Then it checks monotonicity and round-trip behavior:
+
+\begin{codeblock}
+monotonicity:
+    if assets_a <= assets_b:
+        assets_to_shares(assets_a) <= assets_to_shares(assets_b)
+
+round_trip_tolerance:
+    shares_to_assets(assets_to_shares(assets)) <= assets
+    assets - shares_to_assets(assets_to_shares(assets)) <= max_loss(assets)
+\end{codeblock}
+
+The tolerance should not be hand-waved. It should be small, explicit, and tested near boundaries: empty supply, one-share supply, very large supply, very small deposit, maximum asset amount, and rates just above an integer threshold.
+
+\subsection{Accrual Indices and Cumulative Precision Loss}
+
+Indices are a way to avoid updating every user on every block, epoch, trade, or reward event. Instead of distributing value directly, the protocol updates a global accumulator. Each user stores a snapshot and later receives the difference.
+
+\begin{codeblock}
+global_index += reward * scale / total_shares
+
+user_reward(user):
+    delta = global_index - user.index_snapshot
+    return user.shares * delta / scale
+\end{codeblock}
+
+This shape is common and often correct. Its failure modes are also common:
+
+\begin{itemize}
+\item The global index update rounds down so much that small rewards disappear.
+\item The user reward calculation rounds down, and repeated claims burn residuals.
+\item The scale is too small for the asset and reward frequency.
+\item The index can be updated when \texttt{total\_shares == 0}, causing division by zero or orphaned rewards.
+\item The snapshot is updated before the reward is transferred, causing lost claims on failure.
+\item The index is not updated before minting or burning shares, letting users enter or exit at stale rates.
+\end{itemize}
+
+This is not a reason to avoid indices. It is a reason to review them as state machines. An index update is a transition. A deposit before index update has different economics than a deposit after index update. A withdrawal that burns shares before settling rewards has different economics than one that settles first.
+
+\begin{artifactbox}[Index review]
+For each index, record the scale, update trigger, zero-supply behavior, rounding direction, residual handling, user snapshot timing, and whether deposits, withdrawals, transfers, and liquidations settle pending index effects first.
+\end{artifactbox}
+
+\section{Donation and Inflation Attacks}
+
+Donation attacks exploit a mismatch between custody and accounting. The attacker sends value to a protocol in a way that changes a ratio without minting the corresponding claims, then uses the manipulated ratio against later users. Inflation attacks are a common share-accounting instance: the attacker inflates the asset-per-share rate so a victim's deposit rounds to too few shares or zero shares.
+
+This is why "more assets in the contract" is not always good. Unexpected assets can be an adversarial input.
+
+\subsection{Balance-Derived Accounting}
+
+The dangerous pattern is using raw balance as the numerator of a claim ratio without controlling how that balance can change:
+
+\begin{codeblock}
+managed_assets():
+    return token.balanceOf(address(this))
+\end{codeblock}
+
+This may be acceptable for some designs, but it is not automatically correct. A raw token balance can increase through ordinary deposits, yield, accidental transfers, attacker donations, fee-on-transfer behavior, rebases, strategy returns, cross-chain messages, or recovery operations. The accounting system must decide which of these are managed assets and when they affect share price.
+
+An internal-accounting design may avoid direct donation manipulation:
+
+\begin{codeblock}
+managed_assets:
+    accounted_idle_assets
+    + strategy_debt
+    + settled_yield
+    - reserved_withdrawals
+\end{codeblock}
+
+But internal accounting has its own risks. It can drift from actual custody. It may fail to notice lost assets. It may count strategy debt at face value when recovery is impossible. It may let unsupported token behavior break assumptions. The point is not "raw balances bad, internal accounting good." The point is that the numerator must be part of the security model.
+
+\subsection{Empty-Vault and First-Depositor Manipulation}
+
+The classic empty-vault attack is compact enough to do numerically. Suppose a vault mints shares as:
+
+\begin{codeblock}
+shares = floor(assets * total_shares / total_assets)
+\end{codeblock}
+
+At initialization, the first depositor receives one share for one asset:
+
+\begin{center}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+State & Assets & Shares & Assets per share \\
+\midrule
+After attacker deposit & 1 & 1 & 1 \\
+After attacker donation & 101 & 1 & 101 \\
+Victim deposits 50 & 151 & 1 & 151 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The victim's share calculation is:
+
+\[
+\left\lfloor \frac{50 \cdot 1}{101} \right\rfloor = 0
+\]
+
+If the vault accepts the deposit and mints zero shares, the victim donated 50 assets. The attacker owns the only share and can redeem the vault's assets, subject to the exact implementation. OpenZeppelin's ERC-4626 documentation describes this family of inflation attacks and explains virtual assets, virtual shares, and increased share precision as mitigations that make manipulation unprofitable or much more expensive.\footnote{\href{https://docs.openzeppelin.com/contracts/5.x/erc4626}{OpenZeppelin Contracts documentation, ``ERC-4626''}.}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=8mm]
+\node[security node, text width=35mm] (a) {Attacker deposits tiny amount};
+\node[security node, below=of a, text width=35mm] (b) {Attacker donates assets directly};
+\node[security node, below=of b, text width=35mm] (c) {Share price inflates};
+\node[security node, below=of c, text width=35mm] (d) {Victim deposit rounds to zero or too few shares};
+\node[security node, below=of d, text width=35mm] (e) {Attacker redeems inflated claim};
+
+\draw[security arrow] (a) -- (b);
+\draw[security arrow] (b) -- (c);
+\draw[security arrow] (c) -- (d);
+\draw[security arrow] (d) -- (e);
+\end{tikzpicture}
+\caption{A donation attack manipulates the numerator of a share-price formula before a victim conversion.}
+\end{figure}
+
+Mitigations should be evaluated by the invariant they restore:
+
+\begin{itemize}
+\item Reject zero-share mints and zero-asset redemptions unless the protocol explicitly treats them as donations.
+\item Seed the vault with initial liquidity or dead shares when appropriate.
+\item Use virtual assets and virtual shares to define the empty-vault exchange rate.
+\item Increase share precision so small deposits receive representable claims.
+\item Use internal accounting for managed assets when direct token donations should not affect share price.
+\item Require minimum received shares or maximum paid assets on user-facing paths.
+\end{itemize}
+
+None of these is universal. Dead shares can be mis-sized. Virtual offsets can be misunderstood. Internal accounting can drift. Slippage checks can be omitted by integrators. The review should test the actual chosen defense under adversarial ordering: attacker first deposit, direct donation, victim deposit, withdrawal, fee path, and recovery path.
+
+\section{Review Method: Accounting Invariants}
+
+Accounting review should produce artifacts, not only opinions. The minimum useful package is a unit map, rounding table, conversion graph, invariant catalogue, and reference model. The goal is to make the protocol's economics executable enough that the implementation can be compared against it.
+
+\subsection{Unit Maps and Rounding Tables}
+
+The unit map answers "what is this number?" The rounding table answers "who gets the remainder?" Together they prevent most shallow reviews.
+
+\begin{codeblock}
+unit_map_entry:
+    variable: totalAssets
+    meaning: assets managed by vault
+    unit: underlying token smallest unit
+    scale source: asset token decimals
+    update paths: deposit, withdraw, strategy report, loss report
+    excluded from value: direct unsupported donations
+    invariant role: numerator of share price
+\end{codeblock}
+
+\begin{codeblock}
+rounding_entry:
+    operation: previewWithdraw
+    exact value: assets * totalShares / totalAssets
+    implementation: mulDiv(assets, totalShares, totalAssets, RoundUp)
+    residual beneficiary: vault and remaining shareholders
+    zero behavior: reject positive assets if required shares are zero
+    test cases: 1 wei, rate just above 1, max assets, empty vault
+\end{codeblock}
+
+The review should also identify all paths that change either side of a ratio:
+
+\begin{codeblock}
+ratio_surface:
+    numerator changes:
+        deposit
+        direct donation
+        fee collection
+        strategy gain
+        strategy loss
+        rebase
+        rescue operation
+
+    denominator changes:
+        mint
+        burn
+        transfer if rewards are settled on transfer
+        migration
+        slashing
+        dead-share initialization
+\end{codeblock}
+
+This surface often reveals missing tests. Teams test deposit and withdraw. They forget direct donations, loss reports, fee-on-transfer tokens, share transfers with pending rewards, partial liquidations, or a zero-supply state after all users exit.
+
+\subsection{Reference Models and Differential Tests}
+
+A reference model should use clearer arithmetic than the production implementation. It can use rational numbers, high-precision integers, or a language with arbitrary-precision arithmetic. Its job is not to mimic the implementation line for line. Its job is to express the intended economics.
+
+\begin{codeblock}
+reference_deposit(model, user, assets):
+    exact_shares = assets * model.share_supply / model.managed_assets
+    shares = floor(exact_shares)
+
+    if assets > 0 and shares == 0:
+        reject
+
+    model.managed_assets += assets
+    model.share_supply += shares
+    model.user_shares[user] += shares
+\end{codeblock}
+
+Then compare implementation traces against the reference model:
+
+\begin{codeblock}
+for each adversarial trace:
+    run implementation
+    run reference model
+    compare:
+        user shares
+        managed assets
+        share supply
+        claim value
+        residual value
+        event amounts
+        revert behavior
+\end{codeblock}
+
+Useful traces are not random noise. They should target boundaries:
+
+\begin{itemize}
+\item first deposit into an empty vault;
+\item direct donation before a victim deposit;
+\item smallest positive deposit, withdrawal, reward, and fee;
+\item repeated tiny operations;
+\item maximum amount near multiplication overflow;
+\item token with 6 decimals, 8 decimals, 18 decimals, and unexpected metadata behavior;
+\item index update with zero supply;
+\item loss event followed by deposit and withdrawal;
+\item share transfer before reward settlement;
+\item round trip from assets to shares and back.
+\end{itemize}
+
+The most important invariant is not "the formula matches the code." The invariant is that accounting changes conserve economic claims within the declared rounding policy.
+
+\begin{codeblock}
+accounting_invariants:
+    conversions are monotonic
+    positive economic inputs do not silently mint zero claims
+    total claims do not exceed conservatively valued managed assets
+    residual value has a declared beneficiary
+    direct donations cannot steal later deposits
+    repeated small operations cannot extract unbounded value
+    preview functions and state-changing functions agree within spec
+    events describe the state transition that actually occurred
+\end{codeblock}
+
+\section{Worked Example: A Vault With Leaky Accounting}
+
+Consider a simple vault:
+
+\begin{codeblock}
+deposit(assets):
+    token.transferFrom(msg.sender, vault, assets)
+
+    if totalSupply == 0:
+        shares = assets
+    else:
+        shares = assets * totalSupply / token.balanceOf(vault)
+
+    mint(msg.sender, shares)
+\end{codeblock}
+
+At a glance, this resembles many share formulas. It is wrong in several ways.
+
+First, the denominator is measured after the transfer. If the vault had 100 assets and 100 shares, a user depositing 100 assets receives:
+
+\[
+\left\lfloor \frac{100 \cdot 100}{200} \right\rfloor = 50
+\]
+
+The user doubled vault assets but received only one third of the new share supply. The denominator should use the pre-deposit asset amount, or the transfer should occur after the share calculation with appropriate checks.
+
+Second, the vault accepts zero-share mints. If a prior donation inflates the denominator, a positive deposit can mint zero shares. Third, the vault uses raw balance as managed assets. A direct transfer to the vault changes the exchange rate without passing through accounting. Fourth, the formula does not state a rounding policy or reject dust. Fifth, it assumes the token transfer delivers exactly \texttt{assets}, which Chapter~22 already warned is not true for every token behavior.
+
+A safer shape is not much longer, but it is more explicit:
+
+\begin{codeblock}
+deposit(assets, min_shares):
+    if assets == 0:
+        reject
+
+    managed_before = accounted_assets
+    supply_before = totalSupply
+
+    received = transfer_in_and_measure_delta(asset, msg.sender, assets)
+
+    if supply_before == 0:
+        shares = received * initial_share_scale
+    else:
+        shares = floor(received * supply_before / managed_before)
+
+    if shares == 0 or shares < min_shares:
+        reject
+
+    accounted_assets = managed_before + received
+    mint(msg.sender, shares)
+\end{codeblock}
+
+This pseudocode is still not a universal implementation. It deliberately leaves design questions visible. What is \texttt{initial\_share\_scale}? Are direct donations ignored, swept, or incorporated through a controlled sync? Does \texttt{managed\_before} include strategy debt? What happens if \texttt{managed\_before == 0} but \texttt{supply\_before > 0} after a loss? Should the transfer occur before or after share calculation when token behavior is complex? How are fees applied?
+
+The finding should not say "rounding bug." It should name the violated conservation rule:
+
+\begin{codeblock}
+finding:
+    deposit share calculation uses post-transfer raw balance as the
+    denominator and accepts zero-share mints.
+
+invariant violated:
+    a depositor's minted claim should be proportional to the assets
+    contributed against pre-deposit managed assets, within the declared
+    rounding policy.
+
+exploit sketch:
+    attacker donates assets or waits for denominator inflation;
+    victim deposits a positive amount;
+    vault computes too few or zero shares;
+    residual value accrues to existing shareholders, including attacker.
+
+recommendation:
+    compute shares against pre-deposit managed assets;
+    reject zero-share mints for positive deposits;
+    define managed assets explicitly;
+    add min-share protection;
+    test first-deposit, donation, dust, and repeated-small-operation traces.
+\end{codeblock}
+
+This is the right level of accounting review. It does not merely point at arithmetic. It connects units, rounding, state ordering, asset semantics, and exploitability.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why is rounding better understood as value transfer than as harmless approximation?
+\item What belongs in a unit map for a protocol that uses tokens, oracle prices, shares, and fees?
+\item Why is \texttt{decimals()} not enough to prove that an accounting formula is correct?
+\item In a vault, why do deposit, mint, withdraw, and redeem paths usually need different conservative rounding directions?
+\item How can a positive input producing zero output become exploitable?
+\item Why can raw token balance be an unsafe definition of managed assets?
+\item What makes an index-based reward or interest system vulnerable to cumulative precision loss?
+\item What should a reference model test that ordinary example-based unit tests often miss?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Build a unit map for a lending, vault, staking, or reward function. Include token units, oracle units, internal accounting units, fee units, and event units. Identify at least two places where a decimals mismatch could change economic meaning.
+
+\item Given a vault with \texttt{totalAssets = 101}, \texttt{totalSupply = 1}, and a user deposit of \texttt{50}, compute the minted shares under floor rounding. Then propose two mitigations and explain which invariant each mitigation restores.
+
+\item Choose one conversion path from an existing protocol or toy design. Write its rounding table: exact quantity, integer formula, rounding direction, residual beneficiary, zero-output behavior, and boundary test cases.
+
+\item Write a small reference model for one accounting transition using rational or high-precision arithmetic. Compare it against an integer implementation for first deposit, direct donation, smallest positive input, repeated tiny inputs, and maximum-size input.
+\end{enumerate}

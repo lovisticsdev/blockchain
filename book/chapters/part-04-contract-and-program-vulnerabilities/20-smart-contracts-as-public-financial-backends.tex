@@ -1,0 +1,408 @@
+\chapter{Contracts and Programs as Public Financial Backends}
+
+\section{Purpose}
+
+\begin{principlebox}
+A blockchain contract or program is a public financial backend. Its entry points are exposed directly to adversarial users, its state changes can move value, and its safety depends on enforceable transition rules rather than ordinary application intent.
+\end{principlebox}
+
+Part~III taught that execution models are not interchangeable. Ethereum contracts, Solana programs, Move modules, Sui objects, CosmWasm contracts, and appchain modules represent state, authority, assets, control flow, failure, and evidence differently. Part~IV now turns that execution knowledge into vulnerability analysis.
+
+The shift is important. A vulnerability is not merely a strange line of code. It is a reachable transition that violates an invariant under adversarial use. The attacker may call a function directly, supply unusual accounts, route through another contract, trigger a callback, reuse delegated authority, wait for a stale configuration, exploit rounding, or make a valid action unavailable when users need it. The reviewer must see the program as a state machine exposed to hostile inputs.
+
+Solidity's own security guidance states the core problem plainly: it is usually easy to build software that works as expected, and much harder to check that nobody can use it in an unanticipated way; this matters more when contracts handle tokens or other valuable things, and every execution is public.\footnote{\href{https://docs.soliditylang.org/en/latest/security-considerations.html}{Solidity documentation, ``Security Considerations''}.} That statement is not Ethereum-specific. It is the security posture of programmable blockchains.
+
+This chapter is the bridge from execution model to bug class. It does not deeply teach authorization, token semantics, reentrancy, accounting, upgrades, randomness, liveness, or smart accounts. Those are Chapters~21--27. It teaches the review lens that makes those later chapters more than a list of exploit names.
+
+\section{The Public Backend Threat Model}
+
+The first move in Part~IV is to replace the product story with the actual exposed system: public entry points, adversarial callers, observable state, and evidence that must prove more than a happy-path transaction.
+
+\subsection{The Public Financial Backend Model}
+
+In ordinary web systems, a backend usually sits behind an application boundary. Users interact through a frontend, API gateway, authentication layer, rate limiter, session system, request validator, database transaction, operator process, and incident-response channel. Those layers can still fail, but the backend is not normally meant to let every stranger on the internet call every internal state transition directly.
+
+Blockchain programs invert that comfort. A smart contract is code plus state at an address, and users interact by submitting transactions that execute its functions.\footnote{\href{https://ethereum.org/developers/docs/smart-contracts/}{ethereum.org, ``Introduction to smart contracts''}.} Solidity describes a contract as code and data residing at a specific address.\footnote{\href{https://docs.soliditylang.org/en/latest/introduction-to-smart-contracts.html}{Solidity documentation, ``Introduction to Smart Contracts''}.} CosmWasm contracts are transparent chain actors with addresses that can communicate with other contracts, modules, and IBC.\footnote{\href{https://cosmwasm.github.io/}{CosmWasm documentation, ``Welcome to CosmWasm''}.} Solana programs execute over caller-supplied accounts whose owner, signer, writable, and data properties must be validated by the program.\footnote{\href{https://solana.com/docs/core/accounts}{Solana documentation, ``Accounts''}.}
+
+The frontend is helpful. It is not the security boundary. Users can bypass it. Bots can call the program directly. Other programs can compose with it. Searchers can simulate pending transactions. Indexers can misunderstand it. Wallets can display incomplete intent. Admins can submit payloads through governance. Relayers can delay messages. A safe program assumes the public entry point is the real interface.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.28\textwidth}>{\RaggedRight\arraybackslash}p{0.30\textwidth}X@{}}
+\toprule
+Ordinary backend habit & Public financial backend reality & Review consequence \\
+\midrule
+The frontend constrains user behavior. & Users and programs can call public entry points directly. & Validate every assumption in the contract or program, not in the interface. \\
+The server can hide internal state. & State, transactions, events, account lists, and often code are observable. & Treat observability as part of the threat model. \\
+The operator can patch quickly. & Deployed code, state, governance, and upgrade delays may make repair slow or impossible. & Review deployment and recovery paths before value is at risk. \\
+The database transaction is private infrastructure. & State transitions occur in a public consensus system with ordering, fees, resource limits, and reorg or incident assumptions. & Include chain-layer and execution-layer assumptions in the finding. \\
+Abuse can be rate-limited or manually reversed. & Permissionless calls, atomic composition, and irreversible settlement can turn one transaction into final loss. & Model exploit traces, not only invalid inputs. \\
+\bottomrule
+\end{tabularx}
+\caption{Contracts and programs should be reviewed as public financial backends, not as ordinary services with a blockchain-flavored database.}
+\end{table}
+
+This model prevents a common weak review: reading a protocol as if honest users will follow the intended screen flow. Good review begins from the opposite premise. The attacker can choose the entry point, timing, order, route, parameters, surrounding state, gas or compute budget, account list, callback target, and sometimes the state of dependent protocols.
+
+\subsection{Public Entry Points and Adversarial Callers}
+
+Every externally reachable function, instruction, message handler, callback, migration hook, initialization path, or governance executor is an input surface. The fact that a path is inconvenient does not make it unreachable. The fact that a path is undocumented does not make it private.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=10mm and 14mm]
+\node[security node, text width=30mm] (users) {Users\\wallets};
+\node[security node, below=of users, text width=30mm] (bots) {Bots\\searchers};
+\node[security node, below=of bots, text width=30mm] (contracts) {Other contracts\\programs};
+\node[security node, right=30mm of bots, text width=38mm] (backend) {Public financial backend\\entry points\\state transitions};
+\node[security node, right=of backend, yshift=15mm, text width=32mm] (assets) {Assets\\balances\\shares};
+\node[security node, right=of backend, yshift=-15mm, text width=32mm] (authority) {Authority\\roles\\signatures};
+\node[security node, below=of backend, text width=34mm] (evidence) {Evidence\\receipts\\logs\\traces\\effects};
+
+\draw[security arrow] (users) -- (backend);
+\draw[security arrow] (bots) -- (backend);
+\draw[security arrow] (contracts) -- (backend);
+\draw[security arrow] (backend) -- (assets);
+\draw[security arrow] (backend) -- (authority);
+\draw[security arrow] (backend) -- (evidence);
+\end{tikzpicture}
+\caption{The true interface is the public transition surface, not the frontend path honest users normally take.}
+\end{figure}
+
+The first artifact for Part~IV review is therefore an entry-point map:
+
+\begin{codeblock}
+entry_point:
+    name
+    caller or sender assumptions
+    required authority
+    supplied accounts, objects, signatures, proofs, or messages
+    state read
+    state written
+    assets moved
+    external calls or messages emitted
+    failure behavior
+    invariant at risk
+\end{codeblock}
+
+This map should include more than obvious user functions. Constructors, initializers, migration functions, receive hooks, token callbacks, fallback handlers, governance payloads, keeper functions, oracle update paths, pause and unpause functions, rescue functions, bridge message handlers, and reply callbacks are all entry points when they can change security-relevant state.
+
+The caller should also be described precisely. In Ethereum, the transaction origin, direct caller, spender, signature signer, contract wallet, proxy admin, and implementation code path may differ. In Solana, the transaction signer, writable account, token-account owner, PDA authority, program owner, and CPI callee may differ. In Move and Sui, a signer, object owner, shared object, module, and capability are different authority facts. In CosmWasm, the message sender, contract admin, governance module, reply handler, and IBC counterparty are separate review subjects.
+
+Adversarial callers do not need to break syntax. Most serious exploit paths use valid inputs. The problem is that the program accepts a valid input in a state where the intended invariant no longer holds.
+
+\subsection{State, Evidence, and Observable Intent}
+
+Blockchain execution is unusually observable. Transaction calldata, account lists, event logs, receipts, traces, storage proofs, object effects, and module events can expose both state and intent. Some systems also publish source code or verified builds; others expose bytecode, account data, package metadata, or WASM artifacts. Even when source is not verified, the behavior of public execution is not a private server secret.
+
+Observability helps reviewers and users. It also helps attackers.
+
+\begin{itemize}
+\item A pending transaction can reveal a profitable trade, liquidation, governance action, rescue operation, oracle update, or withdrawal.
+\item Public state can reveal stale prices, unsafe collateral, unclaimed rewards, pending queues, weak liquidity, or an upcoming execution window.
+\item Logs and events can train bots to react to protocol activity.
+\item Open-source code and verified bytecode can make simulation easier.
+\item A ``private'' state variable or local variable is not secret once execution and storage are observable; Solidity explicitly warns that even local variables and state variables marked \texttt{private} are publicly visible.\footnote{\href{https://docs.soliditylang.org/en/latest/security-considerations.html\#private-information-and-randomness}{Solidity documentation, ``Private Information and Randomness''}.}
+\end{itemize}
+
+The mistake is to treat transparency as only a user benefit. Public state means the attacker can search state space. Public intent means the attacker can choose timing. Public code means the attacker can compute edge cases. Public logs mean the attacker can automate reaction. Public ordering markets mean the attacker may be able to insert, delay, replace, or bundle transactions around a victim.
+
+Evidence still matters, but evidence must match the security claim. Chapter~19 already warned against reusing one runtime's evidence model everywhere. Part~IV makes that warning operational. A receipt does not prove intended economic safety. An event is not necessarily state. A trace may show writes that later reverted. A Solana account list does not prove each account had the expected semantic role. A Move object does not prove the right capability was required. A CosmWasm reply ID does not prove the reply belongs to the intended pending action unless the contract binds it.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.23\textwidth}>{\RaggedRight\arraybackslash}p{0.34\textwidth}X@{}}
+\toprule
+Evidence artifact & Useful for & Not enough to prove \\
+\midrule
+Transaction hash & A transaction object exists and can be looked up & Successful or safe application effect \\
+Receipt or transaction status & Top-level execution outcome under that runtime & Correct economics or invariant preservation \\
+Event or log & Emitted evidence from committed execution, depending on runtime & Complete state or honest interpretation \\
+Trace or inner instruction list & Internal call flow and attempted effects & Finality, user intent, or future safety \\
+Account, object, or storage query & Current state at a chosen point & That the transition path was authorized correctly \\
+Verified source or build & A stronger link between code and human-readable logic & That deployment parameters, upgrades, and dependencies are safe \\
+\bottomrule
+\end{tabularx}
+\caption{Evidence is necessary, but each artifact proves only a narrow claim.}
+\end{table}
+
+The reviewer should write claims in a form the evidence can actually support:
+
+\begin{codeblock}
+weak:
+    The deposit succeeded because the Deposit event exists.
+
+better:
+    The transaction receipt shows top-level success.
+    The trace shows token transfer and share mint paths committed.
+    Post-state confirms vault asset balance increased and user shares increased.
+    The invariant still needs rounding and token-semantics review.
+\end{codeblock}
+
+That difference is not pedantry. It is how a finding survives contact with code, traces, and engineers.
+
+\section{Execution Boundaries}
+
+The second move is to name the boundary a transition crosses. Atomicity, composability, and failure semantics decide which effects survive and which assumptions become external dependencies.
+
+\subsection{Atomicity and Failure Semantics}
+
+Atomic execution is one of the most powerful blockchain programming features. It is also one of the most commonly misunderstood.
+
+Atomicity does not mean every relevant system effect happens or reverts together. It means the runtime has specific rules about which effects commit, which effects roll back, and which effects were never part of the same atomic boundary. A transaction may consume gas or fees while reverting application state. An earlier approval may survive a later failed swap. A Solana CPI may share compute budget and account privileges with the caller. CosmWasm messages and submessages can create reply-driven control flow. IBC packets and acknowledgements stretch state changes across chains and time.
+
+\subsection{Composability as a Dependency Boundary}
+
+Composability adds the other half of the problem. A protocol can call another protocol, accept another protocol's token, rely on another protocol's oracle, trigger another protocol's callback, or be called by an aggregator, router, solver, keeper, bridge, or smart account. That is the point of public programmable systems. It is also why a local code review that ignores external state is incomplete.
+
+Solana's CPI documentation, for example, says signer and writable privileges extend from caller to callee but cannot be escalated beyond what the caller passed, and the callee consumes from the caller's remaining compute budget.\footnote{\href{https://solana.com/docs/core/cpi}{Solana documentation, ``Cross Program Invocation''}.} That is not the same risk shape as EVM reentrancy. It is still external control flow. The review question is which authority, state, and resource budget cross the boundary.
+
+CosmWasm submessages show another version of the same pattern. A contract can send a submessage with an ID and specify whether a reply should run on success, failure, or both; the reply handler receives the ID and result.\footnote{\href{https://book.cosmwasm.com/actor-model/contract-as-actor.html}{CosmWasm Book, ``Contract as an actor''}.} The bug class is not simply ``callback bad.'' The risk is failing to bind the reply to the correct pending state, accepting success for the wrong operation, or finalizing state before the external effect has the intended meaning.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.18\textwidth}>{\RaggedRight\arraybackslash}p{0.30\textwidth}>{\RaggedRight\arraybackslash}X@{}}
+\toprule
+Runtime surface & Boundary question & Failure to inspect \\
+\midrule
+EVM call & What caller, value, gas, calldata, returndata, and storage context cross? & Treating all external calls as only reentrancy, or ignoring failed call handling. \\
+Solana CPI & Which accounts, signer flags, writable flags, PDA seeds, and compute budget cross? & Validating the signer but not the account role, owner, mint, or writable state. \\
+Move or Sui call & Which typed values, references, objects, and capabilities are passed? & Assuming the type system proves the economic invariant. \\
+CosmWasm message or SubMsg & Which message is emitted, which reply ID returns, and what state waits for it? & Treating a reply as proof of the intended pending action. \\
+IBC packet & Which channel, sequence, timeout, proof, acknowledgement, and denom path matter? & Treating packet delivery as proof of application-level asset safety. \\
+\bottomrule
+\end{tabularx}
+\caption{Composability should be reviewed by boundary semantics, not by importing one runtime's bug label.}
+\end{table}
+
+Good Part~IV review therefore names the atomic boundary. It asks what happens if an inner call fails, succeeds unexpectedly, returns malicious data, consumes too much gas, mutates shared state, emits misleading evidence, or causes a later callback. It asks what survives if the outer operation reverts. It asks which earlier or later state remains dangerous even though the immediate action failed.
+
+\section{From Defect to Finding}
+
+The third move is to turn a suspected defect into a precise finding. A bug-class name is not enough; the reviewer must connect reachability, invariant violation, exploit sequence, impact, and evidence.
+
+\subsection{From Code Mistake to Exploit Path}
+
+Not every code defect is a security vulnerability. Not every vulnerability is exploitable under realistic conditions. Not every exploitable weakness deserves the same severity. Chapter~7 introduced exploitability as the bridge from weakness to attack. Part~IV applies that discipline to program bugs.
+
+Use this pipeline:
+
+\begin{codeblock}
+program defect:
+    the code, configuration, or interface behaves incorrectly
+
+reachable transition:
+    an attacker can drive execution to the defective path
+
+invariant violation:
+    the path can break a safety, authority, asset, accounting,
+    liveness, or evidence property
+
+exploit sequence:
+    the attacker can arrange the required state, inputs, ordering,
+    capital, timing, and external dependencies
+
+impact:
+    value moves, authority expands, accounting corrupts, funds freeze,
+    users are misled, or recovery assumptions fail
+
+finding:
+    evidence, severity, recommendation, and residual risk
+\end{codeblock}
+
+This pipeline is intentionally stricter than ``I found a bug.'' It forces the reviewer to connect code to state transition, state transition to invariant, invariant to attacker action, and attacker action to impact.
+
+\begin{failuremodebox}[Bug-class labels are not findings]
+``Reentrancy,'' ``missing signer check,'' ``rounding,'' ``unsafe randomness,'' and ``uninitialized proxy'' are starting labels. A finding must say which entry point is reachable, which state changes, which invariant fails, what the exploit trace looks like, and what evidence supports the claim.
+\end{failuremodebox}
+
+This also prevents overclaiming. A missing check in an unreachable function may be a dead-code cleanup issue. A rounding direction that loses one wei to dust may be acceptable if bounded and documented. A paused withdrawal path may be safe if an exit path remains available. A reentrant callback may be harmless if the relevant state is already finalized and no cross-function invariant is exposed. The review should be strict, but strictness includes refusing vague severity.
+
+Severity depends on more than technical elegance. Ask:
+
+\begin{codeblock}
+exploitability questions:
+    can the attacker reach the path without privileged access?
+    what initial state is required?
+    what capital, liquidity, signatures, accounts, or timing are required?
+    can the attacker repeat the sequence?
+    does the transaction fail safely or leave dangerous residue?
+    can monitoring or pause controls stop it before impact?
+    is user loss direct, delayed, socialized, or only theoretical?
+    what assumptions make the finding non-exploitable?
+\end{codeblock}
+
+The best findings are narrow and hard to dismiss. They do not merely name danger. They reconstruct how danger becomes a state transition.
+
+\subsection{Review Method: Entry Point to Invariant}
+
+The practical review unit for Part~IV is an entry point. Start with one callable surface and drive it toward the invariant it can break.
+
+\begin{codeblock}
+entry_point_to_invariant:
+    identify entry point
+    identify caller or authority fact
+    list inputs and supplied state objects
+    list state read before checks
+    list checks performed
+    list state written
+    list assets moved
+    list external calls, messages, callbacks, or CPIs
+    list failure and rollback behavior
+    name invariant threatened
+    construct attacker-controlled variations
+    identify evidence needed for a finding
+\end{codeblock}
+
+This method works across the later chapters:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.35\textwidth}X@{}}
+\toprule
+Later chapter & Entry-point question & Invariant pressure \\
+\midrule
+Authorization & Who is allowed to call or cause this transition? & No unauthorized actor gains control or moves protected value. \\
+Token semantics & What asset behavior is assumed? & The program accounts for the token that actually exists, not an ideal token. \\
+External control flow & Where can execution leave and return? & External behavior cannot violate local state assumptions. \\
+Accounting & How are amounts, shares, indexes, and rates updated? & Value conservation, solvency, and fair exchange rates hold under edge cases. \\
+Lifecycle and upgrades & Who can change code, config, or state layout? & Deployment and upgrade transitions preserve authority and storage meaning. \\
+Randomness, time, DoS, griefing & What environment or liveness assumption is required? & Valid user actions remain safe and available under adversarial conditions. \\
+Delegated authority & Who can act for whom, under which scope and domain? & Delegation cannot exceed intended authority or survive beyond its scope. \\
+\bottomrule
+\end{tabularx}
+\caption{Part~IV bug classes are different pressures on the same state-transition review method.}
+\end{table}
+
+The method should produce artifacts, not only impressions. A serious review creates an entry-point map, authority map, state-diff sketch, call-flow graph, invariant list, edge-case table, exploit trace, and evidence plan. Not every small review needs every artifact in polished form, but the reviewer should know what is missing.
+
+\section{Worked Example: Public Function Review}
+
+Consider a simplified reward distributor. Users stake a token, earn rewards, and withdraw rewards later.
+
+\begin{codeblock}
+state:
+    staking_token
+    reward_token
+    total_staked
+    stake_balance[user]
+    reward_index
+    user_index[user]
+    accrued_reward[user]
+    admin
+
+entry points:
+    stake(amount)
+    withdraw(amount)
+    claim()
+    notify_reward(amount)
+    set_reward_rate(rate)
+\end{codeblock}
+
+An honest user story says:
+
+\begin{quote}
+Users stake tokens, rewards accrue over time, and users claim the rewards they earned.
+\end{quote}
+
+That is not a security review. Rewrite the system as exposed transitions:
+
+\begin{codeblock}
+stake(amount):
+    caller chooses amount
+    program transfers staking_token from caller
+    program updates global and user accounting
+    invariant: total_staked equals tracked user stake and actual custody
+
+claim():
+    caller triggers reward accounting
+    program computes owed reward from index difference
+    program transfers reward_token to caller
+    invariant: rewards paid do not exceed funded rewards
+
+notify_reward(amount):
+    caller funds or announces rewards
+    program updates reward distribution state
+    invariant: reward_index reflects real funded reward capacity
+\end{codeblock}
+
+Now ask adversarial questions.
+
+For \texttt{stake(amount)}, what happens if the staking token charges a transfer fee, rebases, returns false, calls back, or transfers less than requested? What if another contract stakes on behalf of a user? What if amount is zero? What if the token balance increases by donation rather than through \texttt{stake}? What if the transaction reverts after approval but before stake succeeds?
+
+For \texttt{claim()}, what happens if reward accounting rounds in the user's favor each time? Can the user split claims across many accounts? Can a callback reenter before accrued rewards are cleared? Does the transfer failure revert or silently continue? Does the emitted event prove the transfer happened?
+
+For \texttt{notify\_reward(amount)}, who is allowed to call it? Does amount correspond to actual received tokens? Can the admin set a rate that promises more rewards than the contract holds? Does a late notification change rewards owed to earlier stakers? Can a stale reward token address or upgrade change the accounting meaning?
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.18\textwidth}>{\RaggedRight\arraybackslash}p{0.30\textwidth}>{\RaggedRight\arraybackslash}X@{}}
+\toprule
+Entry point & Weak review & Strong review \\
+\midrule
+\texttt{stake} & User deposits tokens. & Which token behavior is assumed, what balance delta is checked, and can accounting diverge from custody? \\
+\texttt{claim} & User receives earned rewards. & Which state proves earned rewards, when is debt cleared, what external transfer occurs, and what happens on failure or callback? \\
+\texttt{notify\_reward} & Admin funds rewards. & Who can change reward supply assumptions, does funded balance match promised rewards, and can the rate create insolvency? \\
+\bottomrule
+\end{tabularx}
+\caption{A public function review replaces user stories with transition, authority, asset, failure, and invariant questions.}
+\end{table}
+
+A plausible finding might be:
+
+\begin{codeblock}
+finding:
+    stake(amount) credits amount rather than actual token balance delta.
+    A fee-on-transfer staking token causes total_staked to exceed custody.
+    Later withdrawals can make the final users insolvent.
+
+evidence:
+    stake() increments total_staked by amount.
+    no pre/post token balance delta check exists.
+    integration allows arbitrary ERC-20 staking tokens.
+    proof-of-concept token transfers only 99% of amount.
+
+invariant violated:
+    total user stake <= actual staking token balance controlled by distributor.
+
+recommendation:
+    credit the actual received amount or restrict supported tokens
+    with explicit token-semantic validation and tests.
+\end{codeblock}
+
+Notice what made the finding useful. It did not merely say ``bad token integration.'' It named the entry point, state variable, token behavior, invariant, exploit consequence, evidence, and fix direction. That is the Part~IV standard.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why is a blockchain contract or program better treated as a public financial backend than as a normal backend service?
+\item Why is a frontend not a sufficient security boundary for a public contract or program?
+\item What belongs in an entry-point map?
+\item Why can public state and public intent help attackers as well as reviewers?
+\item What is the difference between atomic execution and application-level safety?
+\item Why is a bug-class label not enough to be a security finding?
+\item What questions turn a code mistake into an exploitability analysis?
+\item How does the entry-point-to-invariant method prepare the reader for the rest of Part~IV?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Choose one public function, instruction, or message handler from a protocol you know. Build an entry-point map that names caller assumptions, inputs, state read, state written, assets moved, external calls, failure behavior, and invariant at risk.
+
+\item Take a user story such as ``users deposit tokens and receive shares.'' Rewrite it as state transitions. Identify at least three adversarial variations that bypass the intended frontend flow.
+
+\item Find a historical vulnerability report or postmortem. Separate the bug-class label from the actual finding: entry point, required state, exploit sequence, invariant violated, evidence, impact, and mitigation.
+
+\item Review a simple reward, vault, or staking contract design. Write one narrow finding that includes evidence and one issue you intentionally do not classify as exploitable because the required path or impact is missing.
+\end{enumerate}

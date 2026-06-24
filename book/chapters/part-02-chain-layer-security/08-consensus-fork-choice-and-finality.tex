@@ -1,0 +1,453 @@
+\chapter{Consensus, Fork Choice, and Finality}
+
+\section{Purpose}
+
+\begin{principlebox}
+Consensus security is not the promise that every valid transaction becomes permanent. It is the set of assumptions under which a network selects one ordered history, and under which applications decide that acting on that history is safe enough.
+\end{principlebox}
+
+Part I treated a blockchain as an adversarial state machine. Part II begins with the chain-layer question beneath that model: which history does the state machine execute?
+
+A blockchain does not merely validate transactions. It must cause many machines, receiving messages at different times, to converge on one ordered history. That history decides which transactions happened, which state roots matter, which receipts and proofs are meaningful, which deposits can be credited, which oracle updates can be consumed, and which cross-domain messages can be honored.
+
+Security reviews often collapse this entire problem into one word: finality. That is not good enough. Finality in Bitcoin-style proof of work, Ethereum proof of stake, CometBFT-style chains, Solana commitment levels, optimistic rollups, validity rollups, bridge committees, and centralized exchange accounting does not mean the same thing. A reviewer who treats ``confirmed'' or ``final'' as a portable label will write bad risk analysis.
+
+This chapter gives the practical model. It is not a consensus research survey. It teaches the distinctions an application reviewer needs before designing deposit policies, bridge release rules, oracle consumption rules, governance execution rules, and incident response around chain-layer uncertainty.
+
+\section{History Selection}
+
+\subsection{Five Different Questions}
+
+The word consensus is often used too broadly. Separate these five questions:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.33\textwidth}X@{}}
+\toprule
+Question & What it decides & Review failure \\
+\midrule
+Sybil resistance & Who gets weight in history selection & Treating stake, hashpower, or committee membership as security without checking concentration or control \\
+Consensus & How participants agree on an ordered log & Assuming agreement continues during partitions, bugs, or unavailable validators \\
+Fork choice & Which valid branch a node prefers now & Mistaking a valid block for the canonical block \\
+Finality & Which history should not revert unless assumptions fail & Treating every finality label as equivalent \\
+Settlement policy & When an application acts on observed history & Crediting, minting, liquidating, or executing before the evidence is strong enough \\
+\bottomrule
+\end{tabularx}
+\caption{Chain-layer review begins by separating mechanisms that are often hidden inside one word.}
+\end{table}
+
+Sybil resistance determines whose messages count. Proof of work ties influence to expended work. Proof of stake ties influence to bonded or slashable stake. BFT validator sets tie influence to configured voting power. Proof-of-authority systems tie influence to membership. Rollups and appchains may have sequencers, committees, auctions, governance-selected operators, or hybrid mechanisms.
+
+Consensus uses that weight to agree on a log or chain. Fork choice decides which valid branch a node should build on or report as head when alternatives exist. Finality defines a reversion boundary under the protocol's assumptions. Settlement policy is the application's own decision about when to act.
+
+The last item is where many security bugs live. A chain can expose a correct finality signal and an application can still use the wrong one for the value at risk.
+
+\subsection{Validity Does Not Select History}
+
+Two blocks can both be valid and still compete. Two branches can contain only valid transactions and still disagree about which deposits, oracle updates, liquidations, or votes happened. Validity means a block satisfies the rules. Canonicality means the block belongs to the history the network currently accepts.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=9mm and 10mm,
+  block/.style={security node, text width=20mm, minimum height=8mm},
+  chosen/.style={security node, draw=securitygreen, text width=20mm, minimum height=8mm}
+]
+\node[block] (g) {B0};
+\node[block, right=of g] (b1) {B1};
+\node[block, above right=of b1] (a2) {B2a};
+\node[chosen, below right=of b1] (b2) {B2b};
+\node[chosen, right=of b2] (b3) {B3b};
+\node[chosen, right=of b3] (b4) {B4b};
+
+\draw[security arrow] (g) -- (b1);
+\draw[security arrow] (b1) -- (a2);
+\draw[security arrow] (b1) -- (b2);
+\draw[security arrow] (b2) -- (b3);
+\draw[security arrow] (b3) -- (b4);
+\end{tikzpicture}
+\caption{Fork choice selects among valid branches. A block can be valid and still disappear from canonical history.}
+\end{figure}
+
+The distinction matters for evidence. A transaction hash identifies transaction bytes. A receipt shows execution under some block. An event communicates that code emitted a log. None of those facts alone proves that the event remains in the canonical history at the settlement strength required by the application.
+
+The review prompt is:
+
+\begin{codeblock}
+Observed event:
+Observed through which node or provider:
+Block or slot:
+Current canonical status:
+Required settlement signal:
+Action triggered by the event:
+Rollback handling if the event disappears:
+\end{codeblock}
+
+If that prompt cannot be answered, the application has not yet stated its chain-layer security model.
+
+\subsection{Settlement Is an Application Rule}
+
+Settlement is when an application acts as if a transaction, block, checkpoint, message, or root will not be reverted in a way that matters to the application.
+
+Examples:
+
+\begin{itemize}
+\item An exchange credits a deposit after a chain-specific confirmation threshold.
+\item A bridge releases wrapped assets after source-domain settlement.
+\item An oracle consumer accepts an update only after a required commitment level.
+\item A governance executor starts a timelock only after a vote reaches the required settlement signal.
+\item A lending market accepts imported collateral only after both source finality and bridge finality conditions hold.
+\end{itemize}
+
+There is no universal settlement depth. The right rule depends on value at risk, adversary economics, chain behavior, monitoring, response capacity, and reversibility of the application action.
+
+\section{Nakamoto-Style Settlement}
+
+\subsection{Accumulated Work and Probabilistic Reversion}
+
+Bitcoin's design combines proof of work, blocks that commit to prior blocks, and a rule that nodes extend the valid chain with the most accumulated work.\footnote{Satoshi Nakamoto, \href{https://bitcoin.org/bitcoin.pdf}{``Bitcoin: A Peer-to-Peer Electronic Cash System''}.} The common phrase ``longest chain'' is historical shorthand. The security idea is accumulated work: replacing a block requires producing an alternative branch that catches up and overtakes the honest branch.
+
+In a Nakamoto-style system, recent history is provisional. A block found at about the same time as another valid block may lose the race. The network converges when later blocks make one branch heavier. A reorg is the process by which nodes switch from one valid branch to another.
+
+Confirmations measure depth. A transaction in a block has one confirmation under common terminology. Each later block built on top increases the cost and difficulty of replacing the transaction's history. The Bitcoin whitepaper models the attacker's probability of catching up from a deficit, assuming honest hashpower exceeds attacker hashpower.\footnote{Satoshi Nakamoto, \href{https://bitcoin.org/bitcoin.pdf}{``Bitcoin: A Peer-to-Peer Electronic Cash System''}.}
+
+The point is not that six confirmations is magic. The point is that confirmation depth is a probabilistic economic signal.
+
+\subsection{Confirmation Counts Are Not Portable}
+
+A confirmation count is meaningful only inside a specific chain's security context. Six confirmations on a high-security proof-of-work chain do not equal six confirmations on a chain with lower hashpower, faster blocks, weaker propagation, concentrated mining, or rentable attack capacity. Thirty blocks on a fast chain may represent less wall-clock time and less attack cost than six blocks elsewhere.
+
+A settlement threshold should account for:
+
+\begin{codeblock}
+consensus mechanism
+block time
+security budget
+miner or validator concentration
+historical reorg behavior
+available attack liquidity
+value at risk
+latency tolerance
+monitoring and response capacity
+\end{codeblock}
+
+The same transaction may be safe for a wallet display after inclusion, tradable inside an exchange after a moderate threshold, and withdrawable only after stronger settlement. The settlement policy should separate those actions.
+
+\subsection{Reorg Risk Becomes Application Risk}
+
+An exchange double-spend against a weak deposit policy needs no smart-contract bug:
+
+\begin{codeblock}
+1. Attacker deposits to an exchange.
+2. The deposit appears in a valid block.
+3. The exchange credits after a weak threshold.
+4. The attacker withdraws another asset.
+5. A heavier branch removes the deposit block.
+6. The exchange has released value against a deposit that no longer exists.
+\end{codeblock}
+
+A bridge can fail the same way:
+
+\begin{codeblock}
+1. Source-chain deposit appears included.
+2. Destination bridge mints wrapped assets.
+3. Source-chain deposit is reorged out.
+4. Destination wrapped assets remain unless the bridge can contain the loss.
+\end{codeblock}
+
+The bridge's conservation invariant now depends on the source-chain settlement assumption. The local destination contract may have executed perfectly. The application-level settlement rule was still unsafe.
+
+\section{BFT and Checkpoint Finality}
+
+\subsection{Quorum Finality}
+
+BFT-style protocols usually work with a known validator set and weighted votes. A block becomes committed or finalized when enough voting power signs the required messages for that block under the protocol's rules. CometBFT describes a Byzantine Fault Tolerant state-machine replication model where safety and liveness depend on fewer than one-third of total voting power being Byzantine, under the protocol's network assumptions.\footnote{CometBFT, \href{https://docs.cometbft.com/}{``CometBFT Documentation''}.}
+
+The quorum-overlap intuition is the core idea. If total voting power is \(N\), and two conflicting quorums each require more than \(2N/3\), then the two quorums overlap by more than \(N/3\):
+
+\[
+|Q_1| > \frac{2N}{3}, \quad |Q_2| > \frac{2N}{3}
+\]
+
+\[
+|Q_1 \cap Q_2| > \frac{N}{3}
+\]
+
+If less than one-third of voting power is Byzantine, two conflicting commits cannot both be produced without honest validators violating the protocol. That is why the one-third threshold appears so often in BFT systems.
+
+\subsection{Finality Does Not Guarantee Liveness}
+
+Fast finality is valuable. It is not free. A BFT chain can preserve safety by refusing to finalize when too much voting power is offline, partitioned, censored, or unable to communicate. From the application's perspective, this is still a security event.
+
+Halts and finality delays can cause:
+
+\begin{itemize}
+\item stuck withdrawals;
+\item stale oracle prices;
+\item frozen bridge messages;
+\item missed liquidation windows;
+\item ambiguous governance deadlines;
+\item broken keeper operations; and
+\item liquidity mismatches across domains.
+\end{itemize}
+
+Do not treat liveness failures as merely operational. In financial systems, liveness often protects solvency. If users cannot exit during stress, or if liquidations cannot execute while prices move elsewhere, accounting can become unsafe without any invalid local transaction.
+
+\subsection{Deterministic and Accountable Finality}
+
+Deterministic finality means that, under the protocol assumptions, a committed block should not be replaced by a conflicting block. Accountable finality adds that conflicting finality should produce evidence of misbehavior by a threshold of participants. Ethereum's finality gadget has this accountable-finality flavor: finality violations should imply slashable behavior by significant stake, under the protocol's rules.\footnote{Vitalik Buterin and Virgil Griffith, \href{https://arxiv.org/abs/1710.09437}{``Casper the Friendly Finality Gadget''}.}
+
+Accountability is not recovery. If a catastrophic finality failure occurs, slashing evidence may punish validators, but bridges may already have minted assets, exchanges may have credited deposits, or governance actions may have executed. Application designs still need containment rules for the event that was supposed not to happen.
+
+\section{Proof-of-Stake Assumptions}
+
+\subsection{Validator Sets and Slashing}
+
+Proof of stake uses bonded stake or validator voting power as a security resource. Validators may propose blocks, attest to heads, vote on checkpoints, or participate in committees. Ethereum combines LMD-GHOST fork choice with Casper FFG-style checkpoint finality in the Gasper design.\footnote{\href{https://ethereum.org/developers/docs/consensus-mechanisms/pos/gasper/}{ethereum.org, ``Gasper''}.}
+
+Stake is not a spell. A proof-of-stake security review should ask how much voting power can be controlled, delegated, bribed, borrowed, coordinated, censored, or made unavailable during the attack window.
+
+Slashing is narrower than misbehavior. Protocols usually slash specific provable actions such as double-signing, double-voting, surround voting, or conflicting proposals, depending on the protocol. They may not slash every harmful action: slow voting, censorship that is hard to prove, correlated client failure, infrastructure centralization, poor block-building choices, or refusal to include particular transactions.
+
+The review question is not ``is there slashing?'' It is:
+
+\begin{codeblock}
+Which behavior is slashable?
+Who can produce evidence?
+When is evidence accepted?
+How long does punishment take?
+What harmful behavior is not slashable?
+Can the application survive until punishment or recovery?
+\end{codeblock}
+
+\subsection{Weak Subjectivity}
+
+Proof-of-stake systems face long-range attack risk because old validator keys may no longer have economic exposure after withdrawal. A long-offline or newly syncing node may be shown a plausible alternative history signed by keys that were valid in the past.
+
+Ethereum's weak-subjectivity model requires a recent trusted checkpoint for safe syncing under defined assumptions.\footnote{Ethereum Consensus Specs, \href{https://ethereum.github.io/consensus-specs/specs/phase0/weak-subjectivity/}{``Weak Subjectivity''}.} That checkpoint is not a failure of cryptography. It is an explicit trust assumption.
+
+Applications that run watchers need to operationalize it:
+
+\begin{codeblock}
+New observers require a recent trusted or cross-checked checkpoint.
+Long-offline observers must not blindly accept arbitrary historical forks.
+Bridge, oracle, and exchange watchers must know whether they are inside
+the weak-subjectivity window.
+Actions should pause when observer freshness cannot be established.
+\end{codeblock}
+
+A stale bridge watcher is not merely behind. It may be unable to distinguish the canonical chain from a plausible long-range fork without trusted recent information.
+
+\subsection{Validator-Set Changes Are State Transitions}
+
+Validator-set changes alter who can influence future history. They are not background administration. They are state transitions over the authority of the chain itself.
+
+Changes can occur through stake deposits, exits, delegation changes, slashing, governance, rotating committees, sequencer-set updates, bridge signer-set updates, or restaking mechanisms.
+
+For any validator-set transition, ask:
+
+\begin{codeblock}
+When does the change take effect?
+Which old set authorizes the new set?
+Can a removed set still sign messages accepted elsewhere?
+Does the unbonding period cover challenge or bridge windows?
+Can voting power shift faster than applications update assumptions?
+Do light clients and bridges verify validator-set updates correctly?
+\end{codeblock}
+
+This is why finality and bridge security are connected. A cross-domain verifier is not only verifying a block. It is verifying continuity of authority across validator-set changes.
+
+\section{Reorgs, Halts, and Finality Failure}
+
+\subsection{Different Incident Classes}
+
+Use precise labels. They drive different controls.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.17\textwidth}>{\RaggedRight\arraybackslash}p{0.30\textwidth}X@{}}
+\toprule
+Incident & Meaning & Application response \\
+\midrule
+Shallow reorg & Recent non-final history is replaced & Update displays, recheck events, and delay irreversible actions \\
+Deep reorg & History beyond ordinary expectation is replaced & Freeze affected credits, bridges, oracle outputs, and downstream claims \\
+Long-range attack & Observer is shown an alternative old history & Require recent checkpoint or trusted/cross-checked sync source \\
+Halt or delayed finality & Chain stops producing or finalizing blocks as expected & Pause actions that need fresh state; extend deadlines; communicate degraded mode \\
+Finality failure & Conflicting finalized histories or catastrophic finality break & Incident process, social coordination, accounting freeze, manual recovery policy \\
+\bottomrule
+\end{tabularx}
+\caption{Reorgs, halts, long-range attacks, and finality failures are different security events.}
+\end{table}
+
+A shallow reorg may be normal in some systems. A deep reorg is a security event. A halt may preserve safety by sacrificing progress. A finality failure may require social coordination, client updates, slashing, governance, or manual application recovery.
+
+\subsection{Application Blast Radius}
+
+Describe chain incidents in application terms, not only chain terms.
+
+Weak:
+
+\begin{codeblock}
+There was a 20-block reorg.
+\end{codeblock}
+
+Useful:
+
+\begin{codeblock}
+The 20-block reorg removed deposits already credited by the exchange,
+invalidated oracle updates consumed by liquidations, and removed the
+source-chain event used to mint wrapped assets on another chain.
+\end{codeblock}
+
+The second version connects history selection to assets, authority, and invariants.
+
+\section{Application Settlement Policy}
+
+\subsection{A Settlement Timeline}
+
+Applications should separate observation from irreversible action.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=8mm and 7mm,
+  stage/.style={security node, text width=23mm, minimum height=8mm}
+]
+\node[stage] (pending) {Pending or\\observed};
+\node[stage, right=of pending] (included) {Included};
+\node[stage, right=of included] (confirmed) {Confirmed or\\voted};
+\node[stage, below=of confirmed] (finalized) {Finalized};
+\node[stage, left=of finalized] (settled) {Application\\settled};
+\node[stage, left=of settled] (irreversible) {Irreversible\\action};
+
+\draw[security arrow] (pending) -- (included);
+\draw[security arrow] (included) -- (confirmed);
+\draw[security arrow] (confirmed) -- (finalized);
+\draw[security arrow] (finalized) -- (settled);
+\draw[security arrow] (settled) -- (irreversible);
+\end{tikzpicture}
+\caption{Applications should define which actions are allowed at each settlement stage.}
+\end{figure}
+
+A wallet may display pending data. An exchange may allow internal trading before external withdrawal. A bridge should usually wait for stronger source settlement before minting freely transferable destination assets. A governance executor should use strong settlement because the action may upgrade contracts or move funds.
+
+\subsection{Policy by Action}
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.32\textwidth}X@{}}
+\toprule
+Action & Needed settlement reasoning & Failure if too weak \\
+\midrule
+Wallet display & Can show low-confidence pending or included data if labeled honestly & User mistakes provisional state for durable state \\
+Exchange deposit credit & Value-tiered confirmation or finality rule before withdrawal & Deposit removed after user withdraws other assets \\
+Bridge mint or release & Source event must be settled enough for destination solvency & Wrapped supply becomes unbacked \\
+Oracle consumption & Price update must be settled enough for liquidations and debt changes & Reorged or stale price causes bad debt or unfair liquidation \\
+Governance execution & Vote and payload should have strong settlement before execution & Irreversible action based on unstable history \\
+\bottomrule
+\end{tabularx}
+\caption{Settlement requirements should match the irreversibility and value at risk of the application action.}
+\end{table}
+
+The policy should also define halt behavior, finality-delay behavior, weak-subjectivity sources, manual override authority, monitoring signals, and residual risk.
+
+\subsection{Settlement Assumption Register}
+
+The practical output of this chapter is a settlement assumption register:
+
+\begin{codeblock}
+System:
+Observed chain or domain:
+Observed event:
+Observer implementation:
+Node or data provider:
+Required commitment or confirmation threshold:
+Value limit at this threshold:
+Action triggered:
+Is the action reversible?
+Rollback handling:
+Halt or delayed-finality handling:
+Finality-failure handling:
+Weak-subjectivity or checkpoint source:
+Monitoring signals:
+Manual override authority:
+Residual risk:
+\end{codeblock}
+
+Security review should reject a policy that says only ``we wait for confirmations.'' That is not a policy. It is a hint that a policy may exist somewhere else.
+
+\section{Worked Example: Deposit Crediting Across Finality Models}
+
+A trading venue supports deposits from three chains:
+
+\begin{codeblock}
+Chain A: proof of work with probabilistic settlement.
+Chain B: proof of stake with finalized checkpoints.
+Chain C: BFT validator-set chain with immediate commit finality.
+\end{codeblock}
+
+The venue wants one rule: credit deposits after they are ``confirmed.'' That rule is unsafe because the label means different things across the three systems.
+
+The better design separates states:
+
+\begin{codeblock}
+seen:
+    deposit observed but not usable
+
+tradable:
+    internal trading allowed within value limits
+
+withdrawable:
+    user may withdraw external assets
+
+final:
+    rollback handling remains only as a disaster process
+\end{codeblock}
+
+For Chain A, the settlement signal is depth under accumulated work. The venue might display after inclusion, allow limited internal use after a moderate depth, and permit external withdrawal only after a stronger value-tiered threshold.
+
+For Chain B, the venue should distinguish latest head, justified or safe head, finalized checkpoint, and weak-subjectivity freshness. High-value withdrawal should depend on finalized checkpoint status and observer freshness, not merely latest head.
+
+For Chain C, the venue should verify commit signatures and validator-set continuity. The risk shifts from ordinary reorg depth to quorum compromise, validator-set verification failure, halt, or client disagreement.
+
+The venue's invariant is:
+
+\begin{codeblock}
+The venue must not allow external withdrawal of value credited from
+a deposit unless that deposit has reached the settlement threshold
+required for its chain, asset, and value tier, or unless the venue has
+explicitly accepted and collateralized the rollback risk.
+\end{codeblock}
+
+That invariant connects chain consensus to accounting. It also exposes what must be monitored: reorgs, finality delay, chain halt, observer freshness, provider disagreement, and value released before strongest settlement.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item What is the difference between Sybil resistance, consensus, fork choice, finality, and settlement policy?
+\item Why can two valid blocks compete for canonical status?
+\item What does a confirmation measure in a Nakamoto-style system, and why are confirmation counts not portable across chains?
+\item What is the quorum-overlap intuition behind the one-third Byzantine threshold in many BFT systems?
+\item Why can a BFT chain halt while preserving safety, and why is that still an application-level security event?
+\item What is weak subjectivity, and why does it matter for new or long-offline observers?
+\item How can a bridge turn source-chain reorg risk into destination-chain insolvency?
+\item Why should settlement policy separate observation, crediting, withdrawal, and finality?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Classify each signal as pending observation, inclusion, probabilistic settlement, deterministic finality, accountable finality, social finality, or application settlement: a transaction appears in a public mempool; a transaction appears in one RPC endpoint's latest block; a proof-of-work transaction has six confirmations; an Ethereum checkpoint is finalized; a BFT block has a commit from more than two-thirds voting power; a bridge mints after observing a source event; a community coordinates around one branch after a catastrophic split. For each, state what can still go wrong.
+
+\item Design a deposit-crediting policy for an exchange that supports one proof-of-work chain, one proof-of-stake chain with finalized checkpoints, and one BFT chain with one-block commit finality. Define when deposits are displayed, tradable, withdrawable, and considered final. Include value tiers, reorg handling, halt handling, and finality-failure handling.
+
+\item A bridge observes deposits on a source chain with probabilistic settlement and mints assets on a destination chain with deterministic finality. Write the conservation invariant, settlement assumption, one reorg attack path, one delayed-mint mitigation, one exposure-cap mitigation, and the residual risk after both mitigations.
+
+\item A bridge watcher for a proof-of-stake chain has been offline longer than the weak-subjectivity period and syncs from random peers. Explain what it may be unable to verify objectively, what trusted or cross-checked information it needs, which bridge actions should pause, and how the issue should appear in the settlement assumption register.
+\end{enumerate}

@@ -1,0 +1,420 @@
+\chapter{Clients, Forks, Upgrades, and Chain Incidents}
+
+\section{Purpose}
+
+\begin{principlebox}
+Chain security is not provided by a protocol description alone. It is provided by implemented software, compatible configuration, coordinated upgrades, and incident behavior that preserves the assumptions applications rely on.
+\end{principlebox}
+
+Chapters 8 through 11 treated the chain layer as a set of assumptions about consensus, network view, ordering, and incentives. This chapter closes that layer with a less romantic fact: every one of those assumptions is mediated by software.
+
+A blockchain is operated through clients, validator software, sequencers, node configurations, state databases, networking stacks, cryptographic libraries, release processes, and emergency procedures. When those pieces agree, users experience one canonical history. When they disagree, the application above them may see incompatible worlds.
+
+The first-principles question is therefore not only:
+
+\begin{codeblock}
+What are the consensus rules?
+\end{codeblock}
+
+It is also:
+
+\begin{codeblock}
+Which software implements those rules, who runs it, how is it upgraded,
+and what does the application do when implementation or operation fails?
+\end{codeblock}
+
+This matters even when the smart contract or application logic is correct. An exchange can credit deposits on a branch that later loses social support. A bridge can accept a proof derived from a buggy client view. A lending market can remain open while finality has stopped. A wallet can show balances from an RPC provider on a minority branch. An oracle can publish an update on one side of a split while dependent applications observe another.
+
+The chapter's job is to make implementation and incident assumptions explicit. It does not re-teach fork choice, network propagation, MEV, or economic security. Those were handled earlier in Part II. Here the concern is what happens when the chain's software, upgrade process, or recovery process becomes part of the attack surface.
+
+\section{Clients Are Consensus Machinery}
+
+A client is not merely a convenience interface to a blockchain. A fully validating client participates in deciding whether blocks are valid, which history is canonical, what state follows from that history, and which data is safe to serve to applications. In many systems, that responsibility is split across components. Ethereum after the Merge, for example, separates execution clients and consensus clients; both are required for a complete node view.\footnote{\href{https://ethereum.org/developers/docs/nodes-and-clients/}{Ethereum.org, ``Nodes and clients''} and \href{https://ethereum.org/developers/docs/nodes-and-clients/node-architecture/}{``Node architecture''}.}
+
+The names vary by ecosystem, but the security boundary is similar. Execution logic validates transactions and computes state transitions. Consensus logic chooses and finalizes history. Validator or miner software proposes, attests, signs, or mines. Sequencer software orders transactions in many rollup designs. Runtime interpreters execute virtual-machine or program code. Databases store state and historical data. Networking code decides which messages the node sees and relays.
+
+The implemented chain is a stack:
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=6mm]
+\node[security node, text width=35mm] (spec) {Protocol specification};
+\node[security node, text width=35mm, below=of spec] (impl) {Client implementations};
+\node[security node, text width=35mm, below=of impl] (config) {Operator configuration};
+\node[security node, text width=35mm, below=of config] (view) {Network view};
+\node[security node, text width=35mm, below=of view] (choice) {Validity and fork choice};
+\node[security node, text width=35mm, below=of choice] (history) {Canonical history};
+\node[security node, text width=35mm, below=of history] (app) {Application action};
+
+\draw[security arrow] (spec) -- (impl);
+\draw[security arrow] (impl) -- (config);
+\draw[security arrow] (config) -- (view);
+\draw[security arrow] (view) -- (choice);
+\draw[security arrow] (choice) -- (history);
+\draw[security arrow] (history) -- (app);
+\end{tikzpicture}
+\caption{Applications inherit consensus through implemented and operated software, not directly from a specification.}
+\end{figure}
+
+A reviewer should read this stack from top to bottom. A specification can be sound while one implementation is wrong. Implementations can be correct while operators run incompatible configurations. Operators can be up to date while their network view is partitioned. A node can follow the correct branch while an application reads from a stale provider. The application sees only the result.
+
+\subsection{Client Diversity and Compatibility}
+
+Client diversity reduces correlated implementation failure. If one client contains a consensus bug but enough economic weight runs compatible alternative clients, the ecosystem has a chance to detect the problem, avoid finalizing the wrong branch, and coordinate recovery.\footnote{\href{https://ethereum.org/developers/docs/nodes-and-clients/client-diversity/}{Ethereum.org, ``Client diversity''}.}
+
+That statement has two important limits.
+
+First, diversity helps only if the alternative clients are actually used by meaningful economic weight. A chain with five clients on paper but one dominant client in production still has a large correlated-failure surface.
+
+Second, diversity creates a compatibility obligation. Independent implementations must agree on consensus-critical behavior for every valid block, invalid block, edge case, gas rule, serialization rule, signature check, timestamp rule, fork activation point, precompile, and state transition. Diversity without differential testing and release discipline becomes another way to split the network.
+
+The threshold that matters depends on the consensus design. In many proof-of-stake BFT-style systems, a client bug affecting more than one third of voting power can threaten liveness, and a bug affecting more than two thirds can threaten finalization safety if the faulty majority finalizes an invalid or incompatible view. Nakamoto-style systems have different thresholds and recovery dynamics, but the review habit is the same: measure implementation concentration against the property at risk, not against a vague desire for decentralization.
+
+The correct security claim is not ``many clients means safe.'' The correct claim is narrower:
+
+\begin{codeblock}
+For consensus-critical behavior,
+independent implementations agree on valid and invalid inputs,
+production economic weight is not dangerously concentrated in one implementation,
+and operators can coordinate upgrades before known incompatibilities become exploitable.
+\end{codeblock}
+
+\section{How Chains Disagree}
+
+Chains can disagree in several different ways. Treating all disagreement as a generic ``fork'' loses the security question. The reviewer needs to identify what kind of disagreement occurred, what evidence distinguishes the branches, and what dependent systems should do before they resume normal operation.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.18\textwidth}>{\RaggedRight\arraybackslash}p{0.28\textwidth}X@{}}
+\toprule
+Disagreement & What differs & Application risk \\
+\midrule
+Validity disagreement & One client accepts a block or transaction that another rejects & Applications may credit assets, accept proofs, or execute state-dependent actions on a branch that other clients consider invalid \\
+Fork-choice disagreement & Clients agree blocks are valid but choose different heads & Confirmations, settlement, and oracle observations can diverge until the head choice converges \\
+State disagreement & Nodes agree on history but compute or serve different state & Balances, receipts, proofs, and application reads may be inconsistent even without an obvious chain split \\
+Operational disagreement & Nodes run different versions, fork heights, genesis files, chain IDs, or configuration & Honest operators can accidentally create incompatible networks or expose replay and misrouting failures \\
+\bottomrule
+\end{tabularx}
+\caption{Different chain disagreements require different evidence and different application responses.}
+\end{table}
+
+Validity disagreement is the most dangerous because it can make two sets of honest participants believe the other side is invalid. A parser bug, arithmetic bug, signature-verification bug, serialization discrepancy, gas-accounting bug, or runtime difference can all create this outcome.
+
+Fork-choice disagreement is different. The branches may both be valid, but clients disagree about which valid branch should be preferred. Chapter 8 covered fork choice and finality in detail. In this chapter, the key point is operational: an application must not treat a local head as settled merely because one provider says it is canonical.
+
+State disagreement can be quieter. A node may have database corruption, a faulty snapshot, an incomplete index, or a bug in serving historical state. The application may receive a wrong answer even if the broader network has one canonical history. This is where independent reads, proof verification, and provider disagreement policies matter.
+
+Operational disagreement is often self-inflicted. Wrong genesis files, wrong fork heights, stale binaries, nonstandard patches, bad chain IDs, incompatible feature flags, or mistaken network selection can place honest operators on different rules. Mechanisms such as fork identifiers exist because peers need to detect whether they are following compatible rule sets.\footnote{\href{https://eips.ethereum.org/EIPS/eip-2124}{EIP-2124, ``Fork identifier for chain compatibility checks''}.}
+
+Disagreement should be measured with concrete evidence. A useful comparison includes the chain ID, genesis hash, fork identifier or fork digest, client name and version, latest finalized checkpoint where the chain has finality, current head hash, parent hash, state root, receipt root, and the exact block height or slot under discussion. ``Provider A looks fine'' is not evidence. Matching hashes at the relevant height are evidence.
+
+\subsection{Proof Verifiers and Light Clients}
+
+Some applications do not rely on a single full node response. They verify proofs: Merkle proofs, receipt proofs, light-client headers, validator signatures, committee attestations, or cross-chain messages. This improves the security model only if the proof is tied to the right consensus and incident assumptions.
+
+A bridge light client, for example, may verify that a message was included under a valid source-chain header. That does not by itself answer every incident question. Was the header finalized or merely plausible? Which fork did the light client follow after an upgrade? Did the verifier understand the source chain's new header format? Did the trusted checkpoint or validator set update cross a disputed boundary? Could a stale source-chain client feed the destination contract a proof from a branch the ecosystem later rejects?
+
+The point is not that proof verification is weak. It is that proof verification shifts the question from ``which RPC response did we trust?'' to ``which consensus view and update path does this verifier accept?'' That is a better question, but it still needs an answer.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=10mm and 8mm]
+\node[security node, text width=30mm] (a) {Client A validators};
+\node[security node, text width=30mm, right=of a] (b) {Client B validators};
+\node[security node, text width=30mm, below=of a] (x) {Head X};
+\node[security node, text width=30mm, below=of b] (y) {Head Y};
+\node[security node, text width=66mm, below=of $(x)!0.5!(y)$] (providers) {RPC providers and indexers report mixed views};
+\node[security node, text width=66mm, below=of providers] (apps) {Applications enter incident mode or risk inconsistent settlement};
+
+\draw[security arrow] (a) -- (x);
+\draw[security arrow] (b) -- (y);
+\draw[security arrow] (x) -- (providers);
+\draw[security arrow] (y) -- (providers);
+\draw[security arrow] (providers) -- (apps);
+\end{tikzpicture}
+\caption{A client split becomes an application problem when providers and indexers expose incompatible views.}
+\end{figure}
+
+The reviewer should avoid two mistakes. Do not assume disagreement is harmless because it is temporary. Temporary disagreement can still create irreversible application actions. Also do not assume every disagreement should be resolved by the application choosing a winner. Many applications should pause until the chain's social and economic majority has made the outcome clear.
+
+\section{Implementation Attack Surfaces}
+
+Consensus bugs are not exotic. They usually enter through ordinary software surfaces that become consensus-critical because clients must agree exactly.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.18\textwidth}>{\RaggedRight\arraybackslash}p{0.32\textwidth}X@{}}
+\toprule
+Surface & Security question & Typical failure \\
+\midrule
+Parsing and serialization & Do all clients interpret the same bytes the same way? & Malformed data accepted by one implementation and rejected by another \\
+Validity logic & Do edge cases produce identical valid/invalid decisions? & Arithmetic, signature, gas, timestamp, or opcode discrepancies \\
+Resource limits & Can a valid input exhaust memory, CPU, disk, or peer capacity? & Nodes fall behind, crash, or refuse blocks that other nodes process \\
+State database & Is committed state durable, correct, and recoverable? & Corruption, bad pruning, snapshot inconsistency, or historical lookup errors \\
+Sync mode & Does fast, light, or snapshot sync preserve the security property the operator assumes? & Node serves data before it has enough verified context \\
+Runtime implementation & Does execution behave identically across platforms and versions? & Virtual-machine or host-environment differences become consensus differences \\
+\bottomrule
+\end{tabularx}
+\caption{Consensus-critical attack surfaces are often ordinary implementation surfaces with unusual consequences.}
+\end{table}
+
+Bitcoin's March 2013 chain split is a useful warning. A software upgrade exposed an incompatibility related to database lock limits, causing newer and older nodes to diverge on a large block. The recovery required miners to coordinate around the older chain while the ecosystem stabilized.\footnote{\href{https://bips.dev/50/}{BIP-50, ``March 2013 Chain Fork Post-Mortem''}.} The important lesson is not that one database was bad. The lesson is that a local implementation detail can become an effective consensus limit if enough economic weight depends on it.
+
+Bitcoin Core's 2018 CVE-2018-17144 disclosure gives a second kind of warning. A validation bug created both denial-of-service and inflation risk; patched releases were coordinated urgently because the bug affected the rules that protect monetary supply.\footnote{\href{https://bitcoincore.org/en/2018/09/20/notice/}{Bitcoin Core, ``CVE-2018-17144 Full Disclosure''}.} Incidents like this should make a reviewer ask how the ecosystem handles disclosure, patch adoption, monitoring, and applications that depend on unpatched infrastructure.
+
+Resource exhaustion also deserves special attention. Some attacks do not need to convince honest nodes to accept an invalid block. It may be enough to make a valid block expensive to process, make nodes fall behind, or push weaker operators out of sync during a critical window. When only well-resourced operators remain healthy, decentralization and censorship assumptions can degrade even if consensus rules are technically unchanged.
+
+The review method is simple:
+
+\begin{codeblock}
+For each consensus-critical implementation path:
+    identify the input format
+    identify the parser and validator
+    identify resource bounds
+    identify state written or read
+    identify client-version differences
+    identify how disagreement is detected
+\end{codeblock}
+
+This is not only client-developer work. Application teams need a smaller version of the same analysis for the infrastructure they rely on. A bridge, exchange, oracle, or rollup cannot safely say ``the chain handled it'' if its own node stack, RPC provider, indexer, or proof verifier was following the wrong view.
+
+\section{Forks, Upgrades, and Release Coordination}
+
+Upgrades are security events. They change the rules, code, or operational assumptions under which value moves. A planned upgrade can be routine. It is still a moment when stale clients, bad configuration, malicious binaries, confused activation logic, or incompatible assumptions can create loss.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.21\textwidth}>{\RaggedRight\arraybackslash}p{0.34\textwidth}X@{}}
+\toprule
+Change type & What changes & Main security concern \\
+\midrule
+Ordinary release & Non-consensus behavior, performance, networking, tooling, or bug fixes & Operators may still inherit bugs, unsafe defaults, or supply-chain risk \\
+Soft fork & Rules become more restrictive for blocks or transactions & Activation coordination and minority behavior matter because old nodes may not fully validate the new restrictions \\
+Hard fork & Rules become incompatible with old clients & Stale operators can remain on an incompatible branch \\
+Emergency patch & A vulnerability fix is released under time pressure & Disclosure timing, patch adoption, and attacker monitoring become part of security \\
+Irregular state change & The ledger state is changed by social coordination rather than ordinary execution & Applications must decide how to treat history, accounting, and affected user claims \\
+\bottomrule
+\end{tabularx}
+\caption{Different upgrade and recovery mechanisms carry different risks.}
+\end{table}
+
+Activation mechanisms are themselves security mechanisms. Version bits, fork heights, epochs, validator signaling, governance proposals, sequencer upgrades, and on-chain upgrade modules decide when rule changes become live. Bitcoin's BIP-9 version-bits mechanism is one example of miner signaling for soft-fork deployment.\footnote{\href{https://bips.dev/9/}{BIP-9, ``Version bits with timeout and delay''}.} Ethereum's proof-of-stake transition is an example of a major protocol change specified through coordinated upgrades rather than an ordinary client release.\footnote{\href{https://eips.ethereum.org/EIPS/eip-3675}{EIP-3675, ``Upgrade consensus to Proof-of-Stake''}.} The DAO fork is a canonical example of an irregular state change adopted by social coordination and specified as a hard fork.\footnote{\href{https://eips.ethereum.org/EIPS/eip-779}{EIP-779, ``Hardfork Meta: DAO Fork''}.}
+
+The upgrade path should be reviewed as a state machine:
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=8mm]
+\node[security node, text width=31mm] (planned) {Upgrade planned};
+\node[security node, text width=31mm, right=of planned] (released) {Client release};
+\node[security node, text width=31mm, right=of released] (activated) {Activation};
+\node[security node, text width=31mm, below=of activated] (failed) {Failed activation or split};
+\node[security node, text width=31mm, left=of failed] (patch) {Emergency patch};
+\node[security node, text width=31mm, left=of patch] (social) {Social resolution};
+\node[security node, text width=31mm, below=of released] (resume) {Application resume};
+
+\draw[security arrow] (planned) -- (released);
+\draw[security arrow] (released) -- (activated);
+\draw[security arrow] (activated) -- (resume);
+\draw[security arrow] (activated) -- (failed);
+\draw[security arrow] (failed) -- (patch);
+\draw[security arrow] (patch) -- (social);
+\draw[security arrow] (social) -- (resume);
+\end{tikzpicture}
+\caption{Applications should have rules for both successful activation and failed activation.}
+\end{figure}
+
+The release supply chain belongs in the review. Who signs binaries? How are releases reproduced or verified? Which operators build from source? Which container images or package repositories are used? How are fork parameters distributed? Who can modify genesis files, chain configuration, snapshots, validator keys, or sequencer binaries? Which monitoring tells operators that they are on the wrong version before value is affected?
+
+Do not treat these questions as DevOps trivia. A wrong binary, malicious dependency, stale snapshot, compromised signing key, or incorrect fork height can produce a security failure that is indistinguishable to applications from a chain incident.
+
+For application teams, upgrade readiness should be concrete. Before an upgrade, the team should know whether its own nodes have upgraded, whether providers and indexers have announced support, whether testnet or shadow-fork behavior has been checked, whether deposit and withdrawal thresholds need temporary adjustment, whether bridge and oracle dependencies understand the new rules, and who has authority to pause workflows if activation is abnormal. The review target is not a ceremonial checklist. It is the set of assumptions that would become false if activation fails.
+
+\section{Chain Incidents and Social Recovery}
+
+An incident begins when the chain no longer provides the assumptions applications require for ordinary operation. That may happen without a total halt. Blocks can continue while finality fails. Finality can continue while an important RPC provider serves stale state. A rollup sequencer can halt while the L1 remains healthy. A chain can continue on two branches while different communities claim different legitimacy.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.34\textwidth}X@{}}
+\toprule
+Incident mode & Observable symptom & Immediate application question \\
+\midrule
+No blocks & Chain stops producing blocks or slots & Which actions must pause because inclusion is unavailable? \\
+Blocks without finality & New blocks appear but finality does not advance & Which confirmations no longer imply settlement? \\
+Client split & Different client families report incompatible heads or validity results & Which branch, if any, can the application rely on? \\
+Deep reorg & Canonical history changes beyond the expected window & Which credited deposits, oracle reads, or messages must be revalidated? \\
+Rollback or restart & Operators coordinate a return to earlier state or height & Which off-chain accounting and user actions were based on discarded history? \\
+Irregular state change & State is modified outside ordinary transaction execution & Which application invariants or user balances need reconciliation? \\
+Sequencer halt & A rollup or app-chain ordering service stops while base layers may remain live & Which escape, force-inclusion, or delayed-withdrawal path becomes relevant? \\
+\bottomrule
+\end{tabularx}
+\caption{Incident classification should drive application behavior, not generic alarm severity.}
+\end{table}
+
+A reorg is a protocol-level change in canonical branch according to the chain's rules. A rollback is coordinated recovery to a previous point, usually through operator or social action. An irregular state change modifies state by special agreement rather than by ordinary user transactions. These are not the same event. They create different obligations for accounting, evidence, user communication, and legal or governance review.
+
+Social recovery is real, but it is not a normal consensus algorithm with a clean timer and quorum threshold. It depends on developers, validators, miners, operators, exchanges, bridges, wallets, users, governance participants, and social legitimacy. That makes it powerful and dangerous. A security review should not pretend social consensus does not exist. It should identify where the application depends on it and what the application does while the social outcome is unsettled.
+
+During an incident, evidence quality matters. Applications should preserve block hashes, transaction hashes, receipts, proofs, client versions, provider responses, timestamps, signed announcements, upgrade notices, and internal decisions. The goal is not to turn this chapter into an incident-response manual. The goal is simpler: application teams must be able to explain why they paused, continued, credited, reversed, or resumed.
+
+\section{Application Behavior During Incidents}
+
+Most application failures during chain incidents are not caused by a lack of cleverness. They are caused by missing policies. The team has a deposit rule for normal days, but no rule for client disagreement. It has a bridge relay, but no branch policy. It has oracle updates, but no degraded mode when finality stops. It has an upgrade calendar, but no owner for pausing dependent workflows.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.35\textwidth}X@{}}
+\toprule
+Application & Degraded behavior & Resume evidence \\
+\midrule
+Exchange or custodian & Pause affected deposits and withdrawals; record branch-specific evidence for credited history & Accounting review after providers agree on the settled branch \\
+Bridge & Pause message relay or require higher confirmation and manual review for source-chain proofs & Source finality, branch policy, proof regeneration if needed \\
+Oracle-dependent lending & Freeze sensitive actions or use conservative modes when oracle updates are stale or branch-specific & Fresh oracle round on settled branch and liquidation review \\
+Governance or admin system & Delay non-emergency execution during splits, halts, or upgrade boundaries & Governance confirmation plus chain-status confirmation \\
+Wallet or frontend & Warn users, disable risky sends, and query multiple providers where practical & Consistent chain ID, head, and provider state \\
+\bottomrule
+\end{tabularx}
+\caption{Applications should define degraded behavior before the chain enters degraded operation.}
+\end{table}
+
+A useful application policy names three things.
+
+\begin{codeblock}
+Normal rule:
+    what the application does when chain assumptions hold
+
+Degraded rule:
+    what pauses, slows, or requires manual review when assumptions fail
+
+Resume rule:
+    what evidence is required before normal operation returns
+\end{codeblock}
+
+The policy should be specific enough to execute under pressure. ``Monitor the situation'' is not a control. ``Pause deposits from chain X if two independent validating nodes disagree on finalized checkpoint for more than N minutes'' is a control. ``Resume when the core team says it is safe'' may be acceptable only if the application explicitly names whose statement counts, how it is authenticated, and what residual risk remains.
+
+Branch policy is especially important for systems that move assets across contexts. A bridge should know whether it follows the economically dominant branch, the branch finalized by a particular consensus client set, the branch recognized by a governance process, the branch recognized by exchanges, or a branch chosen manually by an emergency committee. Each choice is a trust assumption. Leaving it implicit merely hides the trust assumption until an incident forces a hurried decision.
+
+\section{Worked Example: Exchange Deposits During a Client Split}
+
+Consider an exchange that accepts deposits from Chain Z. Its normal policy is simple:
+
+\begin{codeblock}
+Credit a deposit after 20 confirmations reported by the hosted RPC provider.
+Permit withdrawal after ordinary AML and risk checks.
+\end{codeblock}
+
+This policy may be adequate for normal fork-choice variance on a chain where 20 confirmations has a clear meaning. It fails during a client split.
+
+Suppose a scheduled hard fork activates. Client A accepts a block at the activation boundary. Client B rejects the same block because of a consensus bug or configuration mismatch. Both sides continue producing blocks for a period of time. Some RPC providers report head X. Others report head Y. Explorers disagree. Users submit deposits on both branches. The exchange's hosted provider reports 20 confirmations on head X.
+
+The old rule asks the wrong question. The security question is not:
+
+\begin{codeblock}
+Does the deposit have 20 confirmations on the provider's current head?
+\end{codeblock}
+
+The security question is:
+
+\begin{codeblock}
+Is the provider's current head part of the branch that the exchange is willing
+to treat as settled for accounting and withdrawal purposes?
+\end{codeblock}
+
+The exchange should enter a degraded mode. Deposits from Chain Z are recorded but not credited as withdrawable balance. Withdrawals that depend on Chain Z deposits are paused. The exchange collects evidence from its own validating nodes, independent providers, client-team announcements, validator or miner distribution, finalized checkpoints if applicable, and major ecosystem infrastructure. It preserves deposit transaction hashes and the branch on which each appeared.
+
+A concise incident note might look like this:
+
+\begin{codeblock}
+Incident: Chain Z client split at scheduled upgrade height H.
+
+Observed:
+    Client A reports head X at height H + 34.
+    Client B reports head Y at height H + 31.
+    Hosted RPC follows X.
+    Internal validating node B follows Y.
+    Explorers and indexers disagree.
+
+Action:
+    Stop automatic deposit crediting from Chain Z.
+    Stop withdrawals funded by uncredited Chain Z deposits.
+    Record deposits with branch-specific evidence.
+    Resume only after branch policy is satisfied and accounting review is complete.
+\end{codeblock}
+
+The controls are not exotic. The exchange needs more than one provider, at least one independent validating node for important chains, an upgrade calendar, a branch policy, a degraded deposit mode, and a resume rule. The point is not to eliminate chain incidents. The point is to prevent local business logic from converting a chain incident into an avoidable solvency or accounting failure.
+
+\section{Chain Incident and Upgrade Register}
+
+For serious applications, chain assumptions should live in a register rather than in scattered memory. The register does not need to be ornate. It needs to be specific enough that engineers, security reviewers, operations staff, and decision makers can use it during stress.
+
+\begin{artifactbox}[Chain Incident and Upgrade Register]
+\begin{codeblock}
+Chain or domain:
+Application role:
+Value or action at risk:
+
+Normal settlement rule:
+Finality or confirmation source:
+Nodes, clients, RPC providers, and indexers used:
+
+Upgrade monitoring:
+    release channels:
+    activation mechanism:
+    internal owner:
+    required operator action:
+
+Incident signals:
+    client disagreement:
+    finality halt:
+    deep reorg:
+    provider disagreement:
+    sequencer or validator halt:
+
+Degraded behavior:
+    deposits:
+    withdrawals:
+    oracle reads:
+    bridge messages:
+    governance or admin actions:
+
+Branch policy:
+Resume evidence:
+Evidence retained:
+Residual risk accepted:
+\end{codeblock}
+\end{artifactbox}
+
+This register is not a substitute for judgment. It is a way to make judgment possible before the worst moment. A team that writes its incident assumptions only after a chain split has already lost the cheapest chance to think clearly.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why are client implementations part of the consensus security boundary rather than merely infrastructure?
+\item Distinguish validity disagreement, fork-choice disagreement, state disagreement, and operational disagreement.
+\item Why does client diversity reduce some risks while creating a need for compatibility testing and coordinated releases?
+\item Give two examples of ordinary implementation details that can become consensus-critical.
+\item Why should upgrade activation mechanisms be reviewed as security mechanisms?
+\item Distinguish a reorg, a rollback, and an irregular state change.
+\item Why is ``20 confirmations from one RPC provider'' insufficient during a client split?
+\item What evidence should an application require before resuming normal operation after a chain incident?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Choose a chain used by a bridge, exchange, or oracle. Produce a one-page chain incident and upgrade register for that dependency.
+\item Write a branch policy for a bridge that receives messages from a chain that can experience client splits. State who chooses the branch, what evidence is required, and what actions pause during uncertainty.
+\item Given a scheduled hard fork, design an application upgrade-readiness checklist covering client versions, fork height, provider behavior, indexer behavior, and resume criteria.
+\item Analyze a historical client or chain incident. Classify the disagreement type, affected assumptions, application risks, evidence available during the event, and controls that would have reduced downstream damage.
+\end{enumerate}

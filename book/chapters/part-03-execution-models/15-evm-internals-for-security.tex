@@ -1,0 +1,461 @@
+\chapter{EVM Internals for Security}
+
+\section{Purpose}
+
+\begin{principlebox}
+The EVM is a deterministic stack machine. Security review requires reconstructing what execution actually did, not merely reading the Solidity source or the transaction receipt.
+\end{principlebox}
+
+Chapter~14 taught Ethereum as an account-state machine. This chapter opens the account and looks at the execution engine inside it. When a transaction calls a contract, the EVM executes bytecode in a frame with stack, memory, calldata, returndata, gas, context variables, persistent storage, transient storage, and rules for creating nested frames.
+
+The goal is not to memorize opcodes. A reviewer who can recite opcode numbers but cannot reconstruct a failing call has learned the wrong thing. The useful skill is to connect low-level execution facts to security questions:
+
+\begin{codeblock}
+Which account's storage changed?
+Which caller did the contract see?
+Which bytes were decoded as input?
+Which call frame reverted?
+Which writes survived?
+Which gas assumption failed?
+Which trace artifact proves the claim?
+\end{codeblock}
+
+This chapter is also not the full vulnerability catalogue. Reentrancy, delegatecall misuse, storage collisions, initialization bugs, gas griefing, and unsafe external calls will receive deeper treatment in Part~IV. Here they appear only as consequences of EVM semantics. The pedagogical aim is to give the reader the machinery needed to understand those later bug classes without treating them as folklore.
+
+\section{Execution Frames and Data Areas}
+
+\subsection{The EVM Execution Frame}
+
+Ethereum documentation describes the EVM as the environment that executes smart-contract code consistently across nodes, using gas to meter computation.\footnote{\href{https://ethereum.org/developers/docs/evm/}{ethereum.org, ``Ethereum Virtual Machine (EVM)''}.} During execution, the EVM behaves like a stack machine. Each instruction reads from and writes to a small set of execution surfaces.
+
+For review, an execution frame can be modeled as:
+
+\begin{codeblock}
+frame:
+    code
+    program_counter
+    stack
+    memory
+    calldata
+    returndata
+    gas_remaining
+    address
+    caller
+    callvalue
+    static_flag
+    persistent_storage_owner
+    transient_storage_owner
+\end{codeblock}
+
+Those last two owner fields are where many mistakes hide. Under an ordinary call, the callee's storage is used. Under \texttt{DELEGATECALL}, the caller's storage is used while code from another account executes. Transient storage follows a similar ownership rule: in a delegatecall context, the caller owns the transient store, not the implementation contract.\footnote{Alexey Akhunov and Moody Salem, \href{https://eips.ethereum.org/EIPS/eip-1153}{EIP-1153, ``Transient storage opcodes''}.}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=9mm and 13mm]
+\node[security node, text width=31mm] (code) {Code\\bytecode};
+\node[security node, right=of code, text width=31mm] (pc) {Program\\counter};
+\node[security node, right=of pc, text width=31mm] (stack) {Stack\\1024 items};
+\node[security node, below=of code, text width=31mm] (calldata) {Calldata\\read-only input};
+\node[security node, right=of calldata, text width=31mm] (memory) {Memory\\temporary bytes};
+\node[security node, right=of memory, text width=31mm] (returndata) {Returndata\\last call output};
+\node[security node, below=of calldata, text width=31mm] (storage) {Persistent\\storage};
+\node[security node, right=of storage, text width=31mm] (transient) {Transient\\storage};
+\node[security node, right=of transient, text width=31mm] (gas) {Gas\\remaining};
+
+\draw[security arrow] (code) -- (pc);
+\draw[security arrow] (pc) -- (stack);
+\draw[security arrow] (calldata) -- (stack);
+\draw[security arrow] (stack) -- (memory);
+\draw[security arrow] (memory) -- (returndata);
+\draw[security arrow] (stack) -- (storage);
+\draw[security arrow] (stack) -- (transient);
+\draw[security arrow] (gas) -- (pc);
+\end{tikzpicture}
+\caption{An EVM execution frame combines code, stack, memory, input bytes, output bytes, storage access, context, and gas.}
+\end{figure}
+
+The frame is not the same thing as the account. A transaction may create many frames as contracts call each other. A failure may occur in an inner frame while the outer frame catches the result and continues. A trace may show storage writes that later revert. A receipt may show top-level success while an inner call failed. Chapter~14 introduced those evidence problems. Chapter~15 explains why they occur.
+
+\subsection{Stack, Memory, Calldata, and Returndata}
+
+The EVM stack holds 256-bit words and has a maximum depth of 1024 items.\footnote{\href{https://ethereum.org/developers/docs/evm/}{ethereum.org, ``Ethereum Virtual Machine (EVM)''}.} Most opcodes take arguments from the top of the stack and push results back. This makes bytecode compact, but it makes traces hard to read unless the reviewer tracks stack order.
+
+The convention in this chapter is that the leftmost stack item is the top:
+
+\begin{codeblock}
+PUSH1 0x02    stack = [0x02]
+PUSH1 0x03    stack = [0x03, 0x02]
+ADD           stack = [0x05]
+PUSH1 0x00    stack = [0x00, 0x05]
+MSTORE        memory[0x00:0x20] = 0x05
+PUSH1 0x20    stack = [0x20]
+PUSH1 0x00    stack = [0x00, 0x20]
+RETURN        return memory[0x00:0x20]
+\end{codeblock}
+
+Even this toy trace shows the important separation. The stack held computation. Memory held temporary bytes used for output. The returned value came from memory. No persistent state changed.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}X@{}}
+\toprule
+Surface & Security meaning \\
+\midrule
+Stack & Immediate operands and results. Wrong stack assumptions lead to wrong trace reconstruction. \\
+Memory & Temporary byte array for ABI encoding, return data, hashing inputs, and call arguments. Cleared between frames. \\
+Calldata & Read-only external input to the frame. It is cheap to read, not trusted, and not self-describing. \\
+Returndata & Bytes returned by the most recent external call. It may encode success data, error data, or maliciously shaped bytes. \\
+Persistent storage & Durable per-account key-value state. This is where roles, balances, allowances, upgrades, and accounting usually live. \\
+Transient storage & Transaction-scoped storage-like state. It persists across frames for the owning contract during one transaction and is cleared afterward. \\
+\bottomrule
+\end{tabularx}
+\caption{EVM execution surfaces differ in lifetime, authority, and evidence value.}
+\end{table}
+
+Memory is not storage. Calldata is not memory. Returndata is not proof. A surprising amount of smart-contract confusion reduces to mixing these surfaces.
+
+For example, a router can receive calldata from a user, decode a route, construct different calldata in memory, call a pool, receive returndata, and then update storage only after checking the result. A trace that shows bytes in memory is not evidence that state changed. A trace that shows returndata is not evidence that the callee was honest. A trace that shows a later \texttt{SSTORE} is evidence that durable state was attempted, but that write may still be rolled back if the frame or an outer frame reverts.
+
+\subsection{Persistent Storage and Transient Storage}
+
+Persistent storage is the durable per-contract key-value store committed through the account's storage root. At the EVM level, storage is addressed by 32-byte slot keys and stores 32-byte values. \texttt{SLOAD} reads a slot. \texttt{SSTORE} writes a slot.
+
+That simple model is enough to expose the security surface:
+
+\begin{codeblock}
+persistent_storage[slot] -> 32-byte word
+
+SLOAD(slot):
+    push persistent_storage[slot]
+
+SSTORE(slot, value):
+    persistent_storage[slot] = value
+    charge gas according to slot history and access warmth
+\end{codeblock}
+
+Every persistent variable that matters to a protocol eventually becomes storage words: owner addresses, implementation addresses, role bitmaps, balances, allowances, oracle prices, pending withdrawals, share supplies, pause flags, timelocks, and accounting indexes. Security review must therefore be able to move between source-level names and storage slots.
+
+Transient storage, introduced by EIP-1153, uses \texttt{TLOAD} and \texttt{TSTORE}. It behaves like storage inside a transaction but is discarded at the end of the transaction. Writes revert when the frame reverts. \texttt{TSTORE} is forbidden under \texttt{STATICCALL}, while \texttt{TLOAD} is allowed.\footnote{\href{https://eips.ethereum.org/EIPS/eip-1153}{EIP-1153, ``Transient storage opcodes''}.}
+
+\begin{codeblock}
+transaction begins:
+    transient_storage = empty
+
+TSTORE(slot, value):
+    transient_storage[owner][slot] = value
+
+TLOAD(slot):
+    push transient_storage[owner][slot]
+
+frame reverts:
+    undo transient writes from that frame
+
+transaction ends:
+    discard all transient storage
+\end{codeblock}
+
+Transient storage is not a magic reentrancy cure. It can implement cheaper transaction-scoped locks or temporary approvals, but the security question remains: who owns the transient store, which frames can read it, which frames can write it, and what happens on revert? A reviewer should treat it as a new state surface with a short lifetime, not as memory with a nicer syntax.
+
+\section{Opcodes by Security Meaning}
+
+The ethereum.org opcode reference lists EVM opcodes and their stack behavior.\footnote{\href{https://ethereum.org/developers/docs/evm/opcodes/}{ethereum.org, ``Opcodes for the EVM''}.} A chapter cannot usefully teach every opcode one by one. Reviewers need a security grouping.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.26\textwidth}X@{}}
+\toprule
+Group & Review concern \\
+\midrule
+Arithmetic and bit operations & \texttt{ADD}, \texttt{MUL}, \texttt{DIV}, \texttt{SHL}, and \texttt{AND} shape rounding, overflow assumptions, bit packing, and flag extraction. \\
+Environment reads & \texttt{CALLER}, \texttt{CALLVALUE}, \texttt{ADDRESS}, \texttt{CHAINID}, and \texttt{TIMESTAMP} expose authority, domain, time, and caller assumptions. \\
+Memory and calldata & \texttt{MLOAD}, \texttt{MSTORE}, \texttt{CALLDATALOAD}, and \texttt{CALLDATACOPY} explain ABI decoding, input bounds, and constructed call payloads. \\
+Storage & \texttt{SLOAD}, \texttt{SSTORE}, \texttt{TLOAD}, and \texttt{TSTORE} explain durable state, temporary locks, rollback, and slot ownership. \\
+Calls and creation & \texttt{CALL}, \texttt{STATICCALL}, \texttt{DELEGATECALL}, \texttt{CREATE}, and \texttt{CREATE2} control external flow, context, value movement, and address determinism. \\
+Logging and halting & \texttt{LOG0}--\texttt{LOG4}, \texttt{RETURN}, \texttt{REVERT}, and \texttt{STOP} shape evidence, error handling, committed logs, and rollback boundaries. \\
+\bottomrule
+\end{tabularx}
+\caption{Opcode review is more useful when grouped by security effect than by numeric order.}
+\end{table}
+
+This grouping also prevents a common beginner mistake: treating bytecode as obscure assembly and therefore giving up. Bytecode is not friendly, but most security review does not require full decompilation. It requires identifying the few instructions that explain authority, state, calls, value, gas, or evidence.
+
+\section{Gas and Resource Semantics}
+
+Gas is both a meter and a failure mode. Chapter~14 treated gas as a security boundary. Here the question is why seemingly valid execution becomes unavailable, expensive, or misleading.
+
+Several gas facts matter repeatedly:
+
+\begin{itemize}
+\item memory expansion has a cost that grows with the highest memory offset touched;
+\item storage reads and writes are much more expensive than stack and memory operations;
+\item first access to an account or storage slot in a transaction may be cold, while later access is warm under access-list era rules;
+\item \texttt{SSTORE} cost depends on original value, current value, new value, and refund rules;
+\item calls do not forward arbitrary gas without limits;
+\item out-of-gas failure reverts the executing frame; and
+\item refunds and \texttt{SELFDESTRUCT} behavior have changed across forks.
+\end{itemize}
+
+EIP-2929 introduced higher gas costs for cold account and storage access and tracks accessed addresses and storage keys during a transaction.\footnote{Vitalik Buterin and Martin Swende, \href{https://eips.ethereum.org/EIPS/eip-2929}{EIP-2929, ``Gas cost increases for state access opcodes''}.} EIP-2200 defines structured net gas metering for \texttt{SSTORE}.\footnote{Wei Tang, \href{https://eips.ethereum.org/EIPS/eip-2200}{EIP-2200, ``Structured Definitions for Net Gas Metering''}.} These rules make exact gas accounting fork-specific, but the review lesson is stable: gas cost depends on access history and state history, not only on source-code shape.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.28\textwidth}X@{}}
+\toprule
+Gas surface & Review correction \\
+\midrule
+Gas estimate & An estimate is state-dependent and path-dependent. It can become stale before inclusion. \\
+Cold access & First access to an account or storage key can cost more than later access. Stress tests should include cold paths. \\
+\texttt{SSTORE} & Cost depends on slot history. A write pattern that is cheap in one state may be expensive in another. \\
+Memory expansion & Large ABI arrays, copying, hashing, or return data can make cost grow unexpectedly. \\
+Call forwarding & A callee may receive less gas than the caller assumes. Gas griefing can change downstream behavior. \\
+Refunds & Refund-based assumptions are brittle after refund reductions and fork changes. \\
+\bottomrule
+\end{tabularx}
+\caption{Gas review should focus on state-dependent execution reachability, not only average transaction cost.}
+\end{table}
+
+The old 2,300-gas transfer-stipend intuition is especially dangerous as a design rule. It was once used as a rough anti-reentrancy comfort blanket. Gas costs changed, contracts became more complex, and the right control is explicit state and call design, not hoping a stipend makes the callee harmless. If a security argument begins with ``this cannot reenter because gas,'' treat that argument as suspect until the exact execution path and fork assumptions are proved.
+
+\section{Calls, Context, and Code Lifecycle}
+
+\subsection{Call Frames and Context}
+
+External control flow is the EVM feature that makes Ethereum composable and dangerous. A call creates a new execution frame. The caller chooses target, value, input memory range, output memory range, and gas subject to protocol rules. The callee executes and returns success or failure plus returndata.
+
+The core call-like instructions differ by context:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.21\textwidth}X@{}}
+\toprule
+Instruction & Security meaning \\
+\midrule
+\texttt{CALL} & Executes callee code in the callee's account context. The callee sees the caller as \texttt{CALLER}; value may be transferred. Callee storage is used. \\
+\texttt{STATICCALL} & Executes a read-only frame. State-modifying operations fail. Useful for view-like calls, but the callee can still consume gas or return malicious bytes. \\
+\texttt{DELEGATECALL} & Executes target code while preserving caller context for storage owner, address, caller, and value. This is the basis of many proxies and a major storage-collision risk. \\
+\texttt{CALLCODE} & Historical predecessor to \texttt{DELEGATECALL}. Rare in modern code, but old bytecode may still contain it. \\
+\bottomrule
+\end{tabularx}
+\caption{Call instructions differ mainly in storage owner, apparent address, caller context, value handling, and state mutability.}
+\end{table}
+
+EIP-214 introduced \texttt{STATICCALL} to permit non-state-changing calls enforced by the EVM rather than by compiler convention.\footnote{Christian Reitwiessner, \href{https://eips.ethereum.org/EIPS/eip-214}{EIP-214, ``New opcode STATICCALL''}.} \texttt{STATICCALL} is not a truth oracle. It only constrains state modification in that call tree. The callee can still read stale state, depend on block context, consume gas, revert, return confusing data, or call other contracts in static mode.
+
+\texttt{DELEGATECALL} is the one reviewers must learn slowly. It does not mean ``call the implementation and let it update itself.'' It means ``run the implementation's code as if it were the caller's code for storage and context purposes.'' If a proxy delegatecalls an implementation, the implementation's \texttt{SSTORE} writes to proxy storage.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=11mm and 16mm]
+\node[security node, text width=31mm] (user) {User\\transaction};
+\node[security node, right=of user, text width=32mm] (proxy) {Proxy\\storage owner};
+\node[security node, right=of proxy, text width=35mm] (impl) {Implementation\\code source};
+\node[security node, below=of proxy, text width=35mm] (slots) {Proxy storage\\slots written};
+
+\draw[security arrow] (user) -- node[above]{call} (proxy);
+\draw[security arrow] (proxy) -- node[above]{delegatecall} (impl);
+\draw[security arrow] (impl) -- node[right]{SSTORE via frame} (slots);
+\end{tikzpicture}
+\caption{\texttt{DELEGATECALL} executes foreign code against the caller's storage and context.}
+\end{figure}
+
+That is not automatically bad. It is how many upgradeable contracts work. The danger is that source-code ownership and storage ownership diverge. A reviewer must inspect which code is executing and which account's storage the writes target.
+
+\subsection{Creation, Initcode, Runtime Code, and SELFDESTRUCT}
+
+Contract creation has two code phases. Initcode is the code executed during deployment. Runtime code is the code returned by initcode and stored as the contract's executable code. Constructor logic lives in initcode. The deployed contract later runs runtime code.
+
+\begin{codeblock}
+contract creation:
+    execute initcode
+    initcode may read calldata-like constructor args
+    initcode may initialize storage
+    initcode returns runtime bytecode
+    runtime bytecode becomes account code
+\end{codeblock}
+
+This matters because a verified source file is not enough. Reviewers should ask:
+
+\begin{codeblock}
+What initcode ran?
+What constructor arguments were used?
+What runtime code was actually deployed?
+Was initialization completed?
+Can the implementation be initialized later by an attacker?
+Can the same address be precomputed or reused under the relevant rules?
+\end{codeblock}
+
+\texttt{CREATE} derives the new address from the creator and its nonce. \texttt{CREATE2}, specified in EIP-1014, derives the address from a fixed prefix, creator address, salt, and initcode hash.\footnote{Vitalik Buterin, \href{https://eips.ethereum.org/EIPS/eip-1014}{EIP-1014, ``Skinny CREATE2''}.} This enables counterfactual addresses and deterministic deployments. It also creates review duties: the salt, factory, initcode hash, constructor arguments, and pre-funding assumptions all matter.
+
+\begin{codeblock}
+CREATE2 address depends on:
+    deployer address
+    salt
+    keccak256(initcode)
+\end{codeblock}
+
+Deterministic address does not mean deterministic safety. If a protocol accepts assets at an address before deployment, the safety argument depends on who can deploy which initcode at that address. If a factory lets users choose salts, the namespace may be griefed or preempted. If constructor arguments are not part of the initcode hash the reviewer checked, the address calculation may not represent the assumed runtime behavior.
+
+\texttt{SELFDESTRUCT} is another place where old Ethereum knowledge can be actively harmful. EIP-6780 changed \texttt{SELFDESTRUCT} so that, except when used in the same transaction as contract creation, it does not delete code and storage as older designs assumed.\footnote{Vitalik Buterin, \href{https://eips.ethereum.org/EIPS/eip-6780}{EIP-6780, ``SELFDESTRUCT only in same transaction''}.} A modern review should reject designs that depend on destroying a contract to erase code, clear storage, reset a system, or make an address safely reusable unless the exact fork semantics support that conclusion.
+
+\section{Storage Layout and Collision Risk}
+
+Solidity maps source-level variables to storage slots using documented layout rules. The documentation also warns that storage layout is part of Solidity's external interface because libraries can receive storage pointers.\footnote{\href{https://docs.soliditylang.org/en/latest/internals/layout_in_storage.html}{Solidity documentation, ``Layout of State Variables in Storage and Transient Storage''}.}
+
+At a high level:
+
+\begin{itemize}
+\item statically sized variables are laid out contiguously from slot~0;
+\item smaller value types can be packed into the same 32-byte slot;
+\item structs and arrays begin new slots;
+\item mappings and dynamic arrays reserve a slot but store contents at hashes derived from that slot; and
+\item inheritance order affects layout.
+\end{itemize}
+
+For mappings, the slot for a key is derived by hashing the encoded key with the mapping's declared slot:
+
+\begin{codeblock}
+mapping(address => uint256) balances at slot p
+
+slot_for_balances[user] =
+    keccak256(encode(user) || encode(p))
+\end{codeblock}
+
+For nested mappings, the derivation repeats:
+
+\begin{codeblock}
+mapping(address => mapping(address => uint256)) allowance at slot p
+
+outer = keccak256(encode(owner) || encode(p))
+slot_for_allowance[owner][spender] =
+    keccak256(encode(spender) || encode(outer))
+\end{codeblock}
+
+Packing creates another class of review errors. Two source variables can share one storage slot. A write that appears to update one variable may require reading, masking, and rewriting the whole word. An assembly write to the raw slot can corrupt neighbors if it does not preserve packed bits.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=8mm and 10mm]
+\node[security node, text width=28mm] (slot0) {slot 0\\packed values};
+\node[security node, right=of slot0, text width=28mm] (slot1) {slot 1\\address owner};
+\node[security node, right=of slot1, text width=30mm] (slot2) {slot 2\\mapping root};
+\node[security node, below=of slot2, text width=35mm] (hash) {keccak(key, slot 2)\\mapping entry};
+
+\draw[security arrow] (slot2) -- (hash);
+\end{tikzpicture}
+\caption{Storage layout turns source-level variables into slots, packed words, and hash-derived locations.}
+\end{figure}
+
+Upgradeability makes storage layout a security boundary. A proxy uses its own storage while delegating to implementation code. If version~2 of an implementation changes variable order, inserts a variable before existing variables, or writes a slot reserved for proxy administration, the new code can reinterpret old storage. The bug is not in the call instruction alone. It is in the mismatch between storage layout and execution context.
+
+Namespaced storage, unstructured storage slots, storage gaps, and standards such as EIP-1967 exist because upgradeable contracts need explicit slot discipline.\footnote{Michael Sproul, Fabio Berger, Austin Williams, and others, \href{https://eips.ethereum.org/EIPS/eip-1967}{EIP-1967, ``Standard Proxy Storage Slots''}.} A reviewer should treat storage layout as part of the contract's public security interface.
+
+\section{Trace Reconstruction}
+
+Execution traces expose internal behavior that receipts and logs do not. Geth, for example, exposes \texttt{debug\_traceTransaction} for tracing transaction execution through the debug namespace.\footnote{\href{https://geth.ethereum.org/docs/interacting-with-geth/rpc/ns-debug}{Go Ethereum documentation, ``debug Namespace''}.} Tooling differs, but the review method is stable.
+
+A trace review should reconstruct:
+
+\begin{codeblock}
+call tree:
+    who called whom
+    with what value
+    with what input
+    under which call instruction
+
+frame result:
+    success or revert
+    returndata or revert data
+    gas used
+
+state evidence:
+    SLOAD slots read
+    SSTORE slots written
+    logs emitted
+    writes reverted or committed
+
+context:
+    caller
+    address
+    storage owner
+    static flag
+\end{codeblock}
+
+Do not confuse a raw opcode trace with a finding. A trace is evidence. The finding is the security consequence supported by that evidence. A good trace memo says, for example, ``the implementation wrote slot~0 while executing under the proxy's storage context, and slot~0 is the proxy admin slot in this deployment,'' not merely ``there was a delegatecall.''
+
+\section{Worked Example: Delegatecall Storage Failure}
+
+Consider a minimal proxy that stores its admin and implementation in early slots, then delegatecalls implementation code:
+
+\begin{codeblock}
+Proxy storage:
+    slot 0 = admin
+    slot 1 = implementation
+
+Implementation V1 storage expectation:
+    slot 0 = initialized
+    slot 1 = owner
+\end{codeblock}
+
+The proxy receives a call to \texttt{initialize(owner)} and delegates it to the implementation. The implementation code believes \texttt{SSTORE(0, true)} sets its own \texttt{initialized} flag. Under \texttt{DELEGATECALL}, it writes to the proxy's slot~0 instead.
+
+\begin{codeblock}
+trace:
+    CALL Proxy.initialize(owner)
+        DELEGATECALL ImplementationV1.initialize(owner)
+            SSTORE slot 0, 0x01
+            SSTORE slot 1, owner
+        RETURN success
+    RETURN success
+
+actual effect:
+    Proxy.slot0 admin = 0x01
+    Proxy.slot1 implementation = owner
+\end{codeblock}
+
+This example is intentionally blunt. Real proxy standards avoid this exact layout by using reserved slots, but the review lesson is the same. Under \texttt{DELEGATECALL}, the implementation's storage layout is applied to the proxy's storage. The trace must be interpreted in the caller's storage context.
+
+A weak review says, ``the implementation initializes its variables.'' A correct review asks:
+
+\begin{codeblock}
+Which account owns storage during the write?
+Which slot was written?
+What does that slot mean in the proxy layout?
+Is the implementation layout compatible with prior versions?
+Is initialization protected and already completed?
+Can an attacker choose the implementation or call initialization directly?
+\end{codeblock}
+
+Once a reviewer can answer those questions from code and trace evidence, later chapters on upgrade risk, access control, and external control flow become much less mysterious.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item What belongs to an EVM execution frame, and why is a frame different from an account?
+\item How do stack, memory, calldata, returndata, persistent storage, and transient storage differ in lifetime and security meaning?
+\item Why is transient storage not the same thing as memory?
+\item Why is opcode review more useful when grouped by security effect than by numeric opcode order?
+\item How can gas rules make a valid function unreachable or unsafe under stress?
+\item What is the security difference between \texttt{CALL}, \texttt{STATICCALL}, and \texttt{DELEGATECALL}?
+\item Why are initcode, runtime code, constructor arguments, and \texttt{CREATE2} salts all relevant to deployment review?
+\item Why does storage layout become a security boundary in upgradeable contracts?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Read a short opcode trace from local tooling or a debugger. Identify stack operations, memory writes, calldata reads, returndata use, storage reads, storage writes, gas consumption, and the frame result.
+
+\item Given a Solidity contract with two packed small integers, an address, a mapping from address to balance, and a nested allowance mapping, compute the likely storage slots and identify which values can share a slot.
+
+\item Analyze a proxy transaction trace that contains a \texttt{DELEGATECALL}. Identify the code account, the storage-owning account, every \texttt{SSTORE} slot, and what those slots mean in the proxy's layout.
+
+\item Reconstruct a failed transaction from receipt plus trace. Write a memo that separates top-level status, inner-call failures, logs committed by successful frames, logs visible only in reverted-frame trace evidence, writes that reverted, gas consumed, and the evidence needed to prove the final state.
+\end{enumerate}

@@ -1,0 +1,464 @@
+\chapter{Authorization and Privilege Boundaries}
+
+\section{Purpose}
+
+\begin{principlebox}
+Authorization is the enforceable permission for a specific actor to cause a specific transition over a specific asset, account, object, role, or control surface in a specific state. A signer, owner, role name, or admin label is only one fact inside that decision.
+\end{principlebox}
+
+Chapter~4 separated signature verification from authorization. A valid signature proves something narrow about a message and a verification rule. It does not prove that the signer was allowed to perform the requested action. Chapter~20 then reframed contracts and programs as public financial backends whose entry points are exposed to adversarial callers.
+
+This chapter joins those two ideas at the contract and program layer. The question is no longer only ``who signed?'' It is:
+
+\begin{codeblock}
+Who is allowed to cause this transition,
+over this target,
+through this entry point,
+in this state,
+under these execution-model rules?
+\end{codeblock}
+
+Authorization bugs are severe because they often turn directly into control over value. An attacker who can call an admin function can change an oracle, pause withdrawals, upgrade an implementation, grant roles, mint tokens, sweep assets, drain a vault, or disable recovery. An attacker who can substitute an account, object, program, capability, module, spender, executor, or callback target may not look like an admin at all, but the result can be the same: a protected transition becomes reachable by the wrong party.
+
+This chapter is not a full governance chapter, not a wallet-security chapter, not a smart-account chapter, and not the lifecycle chapter. Those come later. The focus here is narrower and more practical: how to review privilege boundaries inside public programs. A reviewer should leave this chapter able to build an authority matrix, test negative cases, identify wrong-check failures, and write precise findings about who can do what.
+
+\section{The Authorization Predicate}
+
+Authorization is not a name attached to a caller. It is a predicate over a transition. The predicate must bind actor, action, target, state, scope, and evidence.
+
+\subsection{Actor, Action, Target, and State}
+
+Weak authorization review asks whether the caller is an owner, signer, role holder, admin, or trusted contract. Strong authorization review asks whether the complete transition predicate is true.
+
+\begin{codeblock}
+is_authorized(actor, action, target, state):
+    actor has the required authority source
+    action is inside that authority's scope
+    target belongs to the expected domain
+    current state satisfies the authority's conditions
+    authority has not expired, been revoked, or been paused
+    using the authority consumes or records the right evidence
+\end{codeblock}
+
+This model matters because the dangerous bugs are often not pure missing checks. Many systems do check something. They check the wrong actor, the wrong target, the wrong role, the wrong domain, the wrong state, or the right fact at the wrong time.
+
+Consider an oracle setter:
+
+\begin{codeblock}
+setPrice(asset, price):
+    require(msg.sender == oracle)
+    prices[asset] = price
+\end{codeblock}
+
+The function checks a caller. It still may be wrong. Is \texttt{oracle} allowed to set prices for every asset, or only one feed? Can it update during a market halt? Is the price signed by a quorum, a single backend, or a governance-controlled account? Is there a freshness rule? Can the same authority update both collateral and debt prices? Can a paused market still accept price changes? Does a role revocation take effect immediately?
+
+The review target is the whole predicate:
+
+\begin{codeblock}
+actor:
+    oracle signer, oracle contract, keeper, governance executor,
+    multisig, module, PDA, capability holder, or sender
+
+action:
+    set price, grant role, pause market, mint, sweep, upgrade,
+    change fee, change dependency, withdraw, execute payload
+
+target:
+    asset, market, vault, account, object, token mint, feed,
+    implementation, route, parameter, or pending operation
+
+state:
+    paused or unpaused, initialized or uninitialized, expired or fresh,
+    timelocked or immediate, revoked or active, healthy or insolvent
+\end{codeblock}
+
+A protected transition is safe only when all four pieces align. Checking \texttt{actor} while ignoring \texttt{target} allows overbroad authority. Checking \texttt{action} while ignoring \texttt{state} allows stale authority. Checking \texttt{state} while ignoring \texttt{domain} allows replay or account substitution. Checking an address while ignoring execution-model semantics allows caller confusion.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=9mm and 8mm,
+  compact node/.style={security node, text width=28mm, minimum height=8mm}
+]
+\node[compact node] (entry) {Entry point};
+\node[compact node, right=of entry] (actor) {Actor fact};
+\node[compact node, right=of actor] (scope) {Action scope};
+\node[compact node, below=of scope] (target) {Target/domain};
+\node[compact node, left=of target] (state) {State condition};
+\node[compact node, left=of state] (transition) {Transition};
+\node[security decision, below=of state, text width=22mm] (allowed) {Allowed?};
+
+\draw[security arrow] (entry) -- (actor);
+\draw[security arrow] (actor) -- (scope);
+\draw[security arrow] (scope) -- (target);
+\draw[security arrow] (target) -- (state);
+\draw[security arrow] (state) -- (transition);
+\draw[security arrow] (state) -- (allowed);
+\end{tikzpicture}
+\caption{Authorization review should follow the transition, not stop at the identity check.}
+\end{figure}
+
+\subsection{Explicit, Scoped, and Testable Checks}
+
+The best authorization checks are boring in a useful way. They are explicit, scoped, revocable, testable, and written close to the transition they protect. The worst authorization checks hide inside naming conventions, frontend assumptions, inherited modifiers, default admin roles, account order, unchecked capabilities, or comments that say ``only trusted caller'' while the runtime enforces something else.
+
+\section{Authority Primitives Across Execution Models}
+
+Execution models do not express authority in the same way. Chapter~19 warned against flattening virtual machines into one mental model. Authorization review is where that warning becomes concrete.
+
+\subsection{Ethereum and EVM-Like Authority}
+
+On Ethereum and EVM-like systems, \texttt{msg.sender} identifies the immediate caller of the current execution frame. It is not necessarily the user who initiated the transaction, the signer of an off-chain message, the economic beneficiary, or the account that will ultimately receive assets. Solidity's security guidance warns against using \texttt{tx.origin} for authorization because it refers to the transaction origin rather than the immediate caller and can be abused through intermediate contracts.\footnote{\href{https://docs.soliditylang.org/en/latest/security-considerations.html\#tx-origin}{Solidity documentation, ``Security Considerations: tx.origin''}.} A contract can be an owner. A multisig can call through modules. A proxy can execute implementation code while preserving proxy storage. A governance timelock can be the direct caller even though voters are the social authority behind it.
+
+OpenZeppelin's access-control documentation distinguishes ownership from role-based access control and emphasizes that roles should be explicit and separately administered.\footnote{\href{https://docs.openzeppelin.com/contracts/5.x/access-control}{OpenZeppelin Contracts documentation, ``Access Control''}.} That is a good engineering direction, but it is not a proof of safety. A role name such as \texttt{PAUSER\_ROLE}, \texttt{MINTER\_ROLE}, or \texttt{DEFAULT\_ADMIN\_ROLE} is only useful if the scope, admin relationship, revocation path, and protected transitions are correct.
+
+\subsection{Solana Account and Program Authority}
+
+On Solana, the relevant facts include signer status, writable status, account ownership, account data layout, token mint, token-account authority, program identity, and program-derived addresses. Solana accounts carry an owner field that determines which program may modify their data, and programs receive account lists chosen by the transaction.\footnote{\href{https://solana.com/docs/core/accounts}{Solana documentation, ``Accounts''}.} A signer flag alone does not mean the signed account is the right vault authority. A writable flag alone does not mean the account should be writable for this instruction. A PDA has no private key; a program can sign for it only through the correct seeds and program identity.\footnote{\href{https://solana.com/docs/core/pda}{Solana documentation, ``Program Derived Address''}.}
+
+Cross-program invocation adds another Solana-specific boundary. The CPI documentation explains that signer and writable privileges are extended from caller to callee, but cannot be escalated beyond the privileges originally supplied to the caller.\footnote{\href{https://solana.com/docs/core/cpi}{Solana documentation, ``Cross Program Invocation''}.} The absence of privilege escalation does not make a CPI safe. The calling program must still ensure that every account passed into the callee has the expected semantic role.
+
+\subsection{Move and CosmWasm Authority}
+
+Move-family systems express authority through signers, modules, resources, abilities, objects, and capabilities. A resource cannot simply be copied or dropped unless its abilities allow it. A capability object can represent privileged authority without making every call depend on a global admin address. Sui's capability pattern, for example, uses a capability object to authorize privileged actions by requiring the caller to present that object.\footnote{\href{https://docs.sui.io/concepts/sui-move-concepts/patterns/capability}{Sui documentation, ``Capability'' pattern}.} The review question is whether possession of the capability is correctly scoped to the protected action and target, not whether the word ``capability'' appears in the design.
+
+CosmWasm contracts expose entry points such as instantiate, execute, query, migrate, reply, and sudo, and execute messages receive sender information through the message context.\footnote{\href{https://book.cosmwasm.com/basics/entry-points.html}{CosmWasm Book, ``Contract entry points''}.} Contract admin authority matters for migrations, but application-level authority still depends on the contract's own state and message handling. A governance module, wasm admin, sender, IBC counterparty, and reply handler are different authority facts.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.31\textwidth}X@{}}
+\toprule
+Primitive & What it can prove & Common review trap \\
+\midrule
+\texttt{msg.sender} & Immediate EVM caller & Treating it as user intent or ultimate authority \\
+Role or owner & Stored permission relation & Ignoring scope, admin role, revocation, or target \\
+Multisig or timelock & Execution path through a policy contract & Treating the contract label as proof that payloads are safe \\
+Solana signer & Account signed the transaction & Not checking owner, mint, PDA seeds, account type, or target role \\
+Solana PDA & Program-derived authority under seeds and program ID & Accepting an address without proving derivation and domain \\
+Move capability & Possession of a privileged resource or object & Capability is transferable, stale, too broad, or unrelated to target \\
+CosmWasm sender/admin & Message sender or migration authority & Confusing chain-level admin with application-level permission \\
+\bottomrule
+\end{tabularx}
+\caption{Authority primitives must be interpreted through the execution model that enforces them.}
+\end{table}
+
+The portable habit is not to memorize every runtime primitive. It is to ask what fact the primitive actually proves and what it does not prove.
+
+\section{Authority Failure Modes}
+
+Authorization failures are easier to review when separated by the kind of predicate error. Missing checks, wrong checks, confused authority, and stale authority require different evidence and different fixes.
+
+\subsection{Missing and Wrong Authority}
+
+The simplest authorization bug is a missing check:
+
+\begin{codeblock}
+setFee(newFee):
+    fee = newFee
+\end{codeblock}
+
+If anyone can call this function, anyone controls protocol economics. The finding is straightforward only if the function is reachable and the fee change has meaningful impact. A deployment script may never expose an internal helper. A public setter may be harmless if it writes unused state. The reviewer still connects reachability, transition, invariant, and impact.
+
+More dangerous in mature code is the wrong check. A function verifies one fact while the protected transition requires another:
+
+\begin{codeblock}
+withdrawFor(user, amount, recipient):
+    require(msg.sender == user)
+    balances[user] -= amount
+    token.transfer(recipient, amount)
+\end{codeblock}
+
+This looks fine until the design also allows smart accounts, delegated execution, account abstraction, relayers, or authorized operators. Maybe the required authority is the account's current validation policy, not \texttt{msg.sender}. Maybe the function name says \texttt{withdrawFor} but the code only allows self-withdrawal. Maybe another path lets a trusted router call this function and turns a self-check into an integration break. The correct finding depends on the intended authority model.
+
+Wrong-target checks are equally common. A role may be valid but not for this asset. A pauser may pause one market but not all markets. A price publisher may update ETH/USD but not every feed. A token-account owner may control a token account but not the vault's accounting state. A PDA may be valid for one market but accepted for another because the seeds omit the market identifier.
+
+\begin{failuremodebox}[The check is real, but the authority is wrong]
+A contract that checks \texttt{onlyRole(ORACLE\_ROLE)} may still be vulnerable if the role holder can update every market, stale markets, disabled markets, or assets outside its mandate. The role proves membership. It does not prove that the action and target are in scope.
+\end{failuremodebox}
+
+\subsection{Confused and Stale Authority}
+
+Confused authority appears when an authorized component causes an unauthorized effect. This is the contract-level version of a confused deputy. The attacker does not need to be admin. The attacker convinces something with authority to act outside the intended scope.
+
+Examples are varied:
+
+\begin{itemize}
+\item A trusted router can call \texttt{withdraw()} but the vault does not bind the withdrawal recipient to the user.
+\item A governance executor can run arbitrary calldata against any target, even though voters approved one parameter change.
+\item A rescue function can sweep the protocol's primary asset, not only stray tokens.
+\item A module can execute from a multisig without the same threshold that would be required for direct execution.
+\item A Solana program accepts a token account owned by the user but does not verify the mint, so the user supplies a worthless token account.
+\item A capability grants access to any pool of a type, but the protocol intended it for one pool instance.
+\end{itemize}
+
+Stale authority is authority that used to be valid. Revoked operators, expired sessions, old governance payloads, former oracle signers, prior owners, deprecated modules, old implementation addresses, and signatures created before a role change can all survive longer than the design assumes. Staleness is not only a cryptographic replay problem. It is a state problem. The program must decide what happens when authority changes while pending operations still exist.
+
+\begin{codeblock}
+authority_change_review:
+    what permissions existed before the change?
+    what pending messages, signatures, orders, or payloads remain usable?
+    does revocation affect them immediately?
+    is there a version, nonce, epoch, domain, or config hash?
+    who can cancel stale authority?
+    what evidence proves cancellation?
+\end{codeblock}
+
+Authorization findings should be written narrowly. ``Access control issue'' is not enough. A strong finding says which entry point is reachable, which actor can call it, which protected state changes, which authority predicate is missing or wrong, and what impact follows.
+
+\section{Privilege Crossing Boundaries}
+
+Authority becomes more dangerous when it crosses a call, program, module, proxy, capability, or governance boundary. The reviewer has to follow the privilege, not only the current function.
+
+\subsection{Executors, Proxies, CPI, and Capabilities}
+
+Authorization does not stop at the current function. A public program often acts through other contracts, programs, modules, or governance executors. Privilege can be forwarded, transformed, amplified, or hidden across that boundary.
+
+EVM systems have a long history of treating proxy and caller relationships too casually. Solidity's security guidance warns that authorized proxies can create risk when a proxy can act with a user's authority while allowing arbitrary calls.\footnote{\href{https://docs.soliditylang.org/en/latest/security-considerations.html\#authorized-proxies}{Solidity documentation, ``Security Considerations: Authorized Proxies''}.} The issue is not merely that a proxy exists. The issue is whether the proxy's authority is scoped to intended actions and targets.
+
+The same pattern appears in multisig modules, account-abstraction plugins, governance executors, routers, delegatecall-based systems, and upgrade beacons. A privileged component may be safe when used through one intended path and unsafe when exposed as a general executor. A call that looks like:
+
+\begin{codeblock}
+execute(target, value, data)
+\end{codeblock}
+
+is not one permission. It is a permission to attempt many possible transitions across many possible targets. Unless the system constrains \texttt{target}, \texttt{value}, \texttt{data}, timing, caller, and state, the function is effectively a broad authority gateway.
+
+On Solana, privilege crossing is shaped by the account list. A caller can pass accounts into a program, and a program can pass accounts onward through CPI. Since signer and writable privileges can be reused by the callee if they were already present, the caller must validate that each privileged account is the intended one before handing it off. The important error is not ``CPI exists.'' It is passing a privileged account into a callee under assumptions the local program has not enforced.
+
+Move and Sui systems can pass capabilities, object references, or shared objects. That can be safer than address-based authority because the privileged object is explicit. It can still fail if the capability is too broad, unintentionally transferable, not bound to a target, or held by a wrapper module that exposes more than intended. Capabilities reduce some classes of ambient authority. They do not remove the need to review scope.
+
+CosmWasm contracts can emit messages and submessages, receive replies, migrate under admin authority, and interact with modules. A reply handler that accepts a reply ID as proof of success without binding it to pending state may finalize the wrong operation. A migration admin that can change code can effectively change every application-level authorization rule unless governance, timelock, and deployment policy constrain it.
+
+\subsection{Admin Surfaces Are Transition Powers}
+
+Administrative surfaces deserve special suspicion. Teams often describe admin functions as operational support: pause, rescue, configure, upgrade, set fee, set oracle, set router, set implementation, set operator, grant role, revoke role. Those names sound like maintenance. In a financial backend, they are transition powers.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.28\textwidth}X@{}}
+\toprule
+Admin surface & Legitimate purpose & Boundary failure \\
+\midrule
+Pause & Stop dangerous actions during an incident & Pause also blocks exits, claims, or recovery without clear limits \\
+Upgrade & Patch code or add features & Upgrade bypasses delay or changes code, storage, or authority meaning \\
+Oracle setter & Replace or configure feeds & Setter can redirect prices for unrelated markets or stale assets \\
+Fee setter & Adjust protocol economics & Fee can be set high enough to confiscate user value \\
+Sweeper/rescue & Recover stray tokens & Function can sweep supported collateral, debt, or share assets \\
+Role admin & Manage permissions & Admin can grant itself or allies every sensitive role immediately \\
+Governance executor & Enact approved proposals & Payload can call unapproved targets or perform arbitrary bundled actions \\
+\bottomrule
+\end{tabularx}
+\caption{Admin functions are privileged transitions and should be reviewed as attack surfaces.}
+\end{table}
+
+Do not collapse these powers. A guardian that can pause should not automatically be able to upgrade. An oracle operator should not automatically be able to sweep funds. A fee setter should not automatically be able to grant roles. A governance executor should not automatically be treated as safe because token holders voted. The payload, delay, target set, cancellation process, and execution scope all matter.
+
+\section{Designing Testable Privilege Boundaries}
+
+\subsection{Privilege Matrices}
+
+Good authorization design is not only a list of modifiers. It is a set of privilege boundaries that can be explained, tested, monitored, and revoked. A reviewer should be able to produce a matrix like this:
+
+\begin{codeblock}
+privilege:
+    actor or role
+    action
+    target
+    condition
+    delay or approval path
+    revocation path
+    failure impact
+\end{codeblock}
+
+The matrix turns vague authority into reviewable claims. It also exposes overbroad roles. If one actor appears in too many rows, the system may have built an owner backdoor under several names. If one action has no actor, the system may be missing an access check. If one target is ``any,'' the reviewer should ask why. If revocation has no path, incident response depends on hope.
+
+\begin{artifactbox}[Privilege-boundary review]
+For each sensitive entry point, identify the actor, action, target, state condition, delay, revocation path, and impact. Then write at least one negative test for each column that could be wrong.
+\end{artifactbox}
+
+\subsection{Negative Tests and Scope Reduction}
+
+Negative tests are the heart of authorization testing. A positive test that proves the owner can call \texttt{setFee()} is almost meaningless by itself. The security claim is that non-owners cannot call it, stale owners cannot call it, role holders cannot exceed scope, wrong targets fail, wrong domains fail, revoked roles fail, and emergency authorities cannot perform non-emergency actions.
+
+\begin{codeblock}
+authorization_test_plan:
+    authorized actor succeeds for intended target
+    unauthorized actor fails
+    authorized actor fails for wrong target
+    authorized actor fails after revocation
+    stale signature or payload fails after config version changes
+    emergency role cannot perform non-emergency action
+    role admin cannot bypass required delay
+    rescue function cannot sweep protected assets
+\end{codeblock}
+
+Design should favor narrow authority. Prefer action-specific roles over one omnipotent owner. Prefer asset-scoped or market-scoped roles over global roles where practical. Prefer capability objects or explicit target binding over ambient authority. Prefer timelocks for irreversible administrative actions. Prefer immediate pause only when the pause scope is narrow and exits remain considered. Prefer separate proposal, delay, execution, and cancellation stages for governance payloads that can move value or change code.
+
+There is a tradeoff. Over-fragmented roles can become unmanageable, causing operational mistakes or slow incident response. The goal is not maximum complexity. The goal is minimum authority sufficient for the transition and credible recovery when authority fails.
+
+The design review should end with clear statements:
+
+\begin{codeblock}
+safe-enough:
+    OraclePublisherA can update only ETH/USD for MarketA.
+    Updates fail if stale, outside deviation bounds, or market paused.
+    Governance can replace OraclePublisherA after a 48-hour timelock.
+
+too broad:
+    Owner can set any oracle, fee, router, implementation, and rescue target
+    immediately, with no delay, no event-specific policy, and no scoped tests.
+\end{codeblock}
+
+When writing findings, avoid moral language about ``trusted admins.'' The issue is not whether a person is honest. The issue is what state transitions become possible if a key is compromised, a role is misconfigured, a governance vote is captured, a module is abused, or an integration passes the wrong account.
+
+\section{Worked Example: Vault Privilege Review}
+
+Consider a simplified yield vault:
+
+\begin{codeblock}
+entry points:
+    deposit(asset, amount, receiver)
+    withdraw(shares, receiver)
+    pause()
+    unpause()
+    setFee(asset, feeBps)
+    setOracle(asset, oracle)
+    sweep(token, recipient)
+    upgradeTo(newImplementation)
+    grantRole(role, account)
+    revokeRole(role, account)
+
+roles:
+    DEFAULT_ADMIN
+    GUARDIAN
+    FEE_MANAGER
+    ORACLE_MANAGER
+    UPGRADER
+\end{codeblock}
+
+The intended story is familiar. Users deposit assets and receive shares. A guardian can pause during incidents. Fee and oracle managers can update parameters. An upgrader can patch the system. Admins can manage roles.
+
+The review should replace that story with a privilege matrix:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.15\textwidth}>{\RaggedRight\arraybackslash}p{0.17\textwidth}>{\RaggedRight\arraybackslash}p{0.18\textwidth}X@{}}
+\toprule
+Actor & Action & Target & Required boundary \\
+\midrule
+User & Deposit or withdraw & Own assets and shares & Asset is supported; receiver is explicit; pause rule is respected \\
+Guardian & Pause & Affected market or vault & Cannot unpause, sweep, upgrade, change fees, or block emergency exits indefinitely \\
+Fee manager & Set fee & Specific asset or market & Fee capped; target scoped; change emits evidence and may require delay \\
+Oracle manager & Set oracle & Specific asset feed & Feed type, freshness, decimals, and market scope validated \\
+Upgrader & Upgrade code & Vault implementation & Delay, review window, storage compatibility, and emergency process defined \\
+Admin & Grant or revoke roles & Role membership & Cannot bypass timelock for sensitive roles; revocation path exists \\
+Sweeper & Rescue stray assets & Unsupported tokens only & Protected assets are excluded from sweep scope \\
+\bottomrule
+\end{tabularx}
+\caption{A privilege matrix makes each authority claim inspectable.}
+\end{table}
+
+Suppose the code has these properties:
+
+\begin{codeblock}
+pause():
+    requireRole(GUARDIAN)
+    paused = true
+
+sweep(token, recipient):
+    requireRole(GUARDIAN)
+    ERC20(token).transfer(recipient, ERC20(token).balanceOf(this))
+
+setOracle(asset, oracle):
+    requireRole(ORACLE_MANAGER)
+    oracles[asset] = oracle
+
+grantRole(role, account):
+    requireRole(DEFAULT_ADMIN)
+    roles[role][account] = true
+\end{codeblock}
+
+The first issue is the guardian boundary. The same role that pauses can sweep. If \texttt{sweep()} can transfer supported collateral or reward tokens, the guardian is not an emergency brake. The guardian is a fund-moving authority.
+
+\begin{codeblock}
+finding:
+    GUARDIAN can sweep vault-held tokens through sweep(token, recipient).
+
+impact:
+    Compromise or misuse of a guardian key can transfer supported collateral,
+    reward tokens, or other protected vault assets, not merely pause the vault.
+
+boundary violated:
+    Emergency pause authority is broader than incident-containment scope.
+
+recommendation:
+    Remove sweep authority from GUARDIAN.
+    Restrict rescue to unsupported tokens.
+    Block vault assets, share tokens, debt assets, and configured rewards.
+    Consider timelock or separate role for non-urgent recovery.
+\end{codeblock}
+
+The second issue is the oracle manager boundary. The role can update any asset. If one operator is responsible for one feed but the code accepts every asset, compromise of one operator can corrupt every market that reads \texttt{oracles[asset]}.
+
+\begin{codeblock}
+finding:
+    ORACLE_MANAGER is global, but oracle authority is intended to be asset-scoped.
+
+impact:
+    A role holder assigned for one feed can redirect unrelated markets to
+    malicious or stale oracles, affecting deposits, withdrawals, liquidations,
+    or share pricing.
+
+recommendation:
+    Store permissions as allowedOracleManager[asset][account].
+    Validate oracle interface, decimals, freshness, and deployment domain.
+    Add tests that a manager for AssetA cannot update AssetB.
+\end{codeblock}
+
+The third issue is role administration. If \texttt{DEFAULT\_ADMIN} can immediately grant \texttt{UPGRADER} to itself or another account, any safety delay on \texttt{upgradeTo()} may be meaningless unless the role grant is also delayed or separately controlled.
+
+\begin{codeblock}
+finding:
+    Sensitive role grants bypass the same delay required for the sensitive action.
+
+impact:
+    An admin can grant UPGRADER and execute an upgrade path faster than the
+    protocol's stated review window.
+
+recommendation:
+    Apply the timelock to grants of UPGRADER, ORACLE_MANAGER, and other
+    sensitive roles, or make the timelock the admin of those roles.
+\end{codeblock}
+
+Notice the difference between these findings and a vague statement that ``admin keys are risky.'' The findings name the role, entry point, transition, target, violated boundary, and remediation. That is the standard for authorization review.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why is authorization better modeled as a predicate over a transition than as a caller check?
+\item What facts should an authorization check bind besides the actor's identity?
+\item Why is \texttt{msg.sender} not the same thing as user intent?
+\item Why can a real role check still be an authorization bug?
+\item What is the difference between missing authority, wrong authority, confused authority, and stale authority?
+\item Why are pause, sweep, upgrade, oracle, fee, and role-admin powers different control surfaces?
+\item How does Solana account validation differ from a simple signer check?
+\item What should a privilege matrix expose during review?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Choose a vault, staking contract, lending market, bridge adapter, or governance executor. Build a privilege matrix with actor, action, target, state condition, delay, revocation path, and failure impact.
+
+\item Review a function that uses an owner or role check. Rewrite the authorization predicate it should enforce. Identify one missing actor check, one wrong-target check, one stale-authority risk, and one negative test.
+
+\item Analyze a Solana-style instruction that receives a vault account, token account, mint, authority PDA, and token program. List every account property that must be checked before the instruction can safely move tokens.
+
+\item Write a short admin-risk memo for a protocol with a pauser, oracle manager, fee manager, upgrader, sweeper, and governance executor. Separate powers that can safely be immediate from powers that require delay, scoped authority, or stronger review.
+\end{enumerate}

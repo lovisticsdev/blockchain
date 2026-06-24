@@ -1,0 +1,549 @@
+\chapter{Economic Security and Incentive Failure}
+
+\section{Purpose}
+
+\begin{principlebox}
+Economic security is not a large number on a dashboard. It is a claim that a specific attack is too costly, too unreliable, too punishable, or too hard to coordinate relative to the profit available during the attack window.
+\end{principlebox}
+
+Chapters 8, 9, and 10 explained how chains choose history, how participants observe messages, and how ordering becomes economic power. This chapter asks the question underneath those mechanisms:
+
+\begin{codeblock}
+Why should the participants who can break the system choose not to break it?
+\end{codeblock}
+
+Blockchain systems often answer with slogans: high market capitalization, high total value locked, many validators, large hash rate, large treasury, high staking yield, famous investors, or a large community. Some of these facts can matter. None is a security proof.
+
+The useful form of an economic-security claim is narrower:
+
+\begin{codeblock}
+For this protected promise,
+against this attacker,
+during this attack window,
+the realistic cost of corruption plus expected penalties and coordination risk
+exceeds the attacker's realistic profit from corruption.
+\end{codeblock}
+
+This chapter is not a finance chapter. It is a security chapter about incentives under adversarial conditions. The reader should leave able to decompose a security budget, compare cost and profit for a concrete attack, identify time-window failures, and write economic assumptions in a form that can be monitored.
+
+\section{Security Budget Is Not Value at Risk}
+
+\subsection{What the Budget Pays For}
+
+A security budget funds honest work and creates pressure against dishonest work. Depending on the system, it may include issuance, transaction fees, priority fees, MEV or ordering revenue, staking rewards, validator commissions, sequencer fees, signer fees, oracle reporter rewards, keeper rewards, bonded collateral, slashing penalties, withdrawal delays, reputation, future business value, and operating investment.
+
+These are not interchangeable.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.18\textwidth}>{\RaggedRight\arraybackslash}p{0.32\textwidth}X@{}}
+\toprule
+Economic force & What it does & Common mistake \\
+\midrule
+Issuance or rewards & Pays participants to perform protocol work & Treating reward size as proof that attacks are unprofitable \\
+Fees & Pays for blockspace, ordering, or service work & Assuming future fees will be stable and sufficient \\
+MEV or ordering revenue & Pays actors with ordering access & Ignoring concentration and reorg incentives created by large opportunities \\
+Collateral or stake & Creates capital at risk & Counting nominal stake that is not slashable for the relevant behavior \\
+Slashing & Punishes provable misbehavior & Treating punishment as automatic victim restitution \\
+Operator revenue & Funds operational security work & Assuming underpaid operators behave reliably under stress \\
+Reputation and future business & Creates off-chain downside & Using vague reputation claims without identifying who is exposed \\
+\bottomrule
+\end{tabularx}
+\caption{Security budgets are made of different economic forces. They should not be collapsed into one number.}
+\end{table}
+
+The budget must be tied to a job. Consensus security pays for proposing, validating, mining, attesting, and propagating blocks. Oracle security pays reporters to publish accurate and timely data. Bridge security pays watchers, relayers, and signers to verify source events and resist false messages. Lending-market security may depend on keepers who liquidate positions when it is costly and stressful to do so.
+
+Do not ask only how large the budget is. Ask what security work the budget funds and which failure it is meant to prevent.
+
+\subsection{TVL, Market Cap, and Total Stake Are Not Enough}
+
+Total value locked is value at risk, not security budget. A protocol with high TVL may be more attractive to attack. It is not automatically harder to attack.
+
+Market capitalization can matter for acquisition cost, price impact, and ecosystem exposure, but attackers rarely need to buy every token. They may need to borrow enough governance power, bribe enough validators, rent enough hash power, compromise enough signers, manipulate enough oracle liquidity, or censor one critical transaction.
+
+Total nominal stake has the same problem. A proof-of-stake system may advertise a large amount of staked value, but the relevant questions are:
+
+\begin{itemize}
+\item how much of that stake must be corrupted for the target property;
+\item how much is controlled by distinct operators;
+\item how much is delegated to the same providers;
+\item how much is liquid through staking derivatives;
+\item how much is slashable for this exact behavior;
+\item how quickly can the attacker exit, hedge, or be punished.
+\end{itemize}
+
+The wrong denominator creates fake comfort. Economic security starts when the reviewer stops comparing big numbers and starts comparing the right numbers.
+
+\subsection{Budgets Decay and Spike}
+
+Economic security changes over time. A chain may launch with high issuance and later depend more heavily on transaction fees. A bridge may start with modest liquidity and later secure a much larger destination asset supply. A lending market may be safe when liquidity is deep and unsafe when oracle markets thin out. A sequencer may be acceptable when activity is low and dangerous when the rollup becomes systemically important.
+
+Proof-of-work security shows the issue clearly. Miner revenue is a flow: block subsidies, fees, and ordering revenue arrive over time. Attack value can be a stock: a one-time double spend, market shock, or bridge fraud. Budish's warning is that a system protecting a large one-off prize with a small recurring expenditure can become economically fragile.\footnote{\href{https://www.nber.org/papers/w24717}{Eric Budish, ``The Economic Limits of Bitcoin and the Blockchain''}.}
+
+Fee-dominated systems add another problem: revenue may be volatile. Carlsten, Kalodner, Weinberg, and Narayanan studied incentive instability in Bitcoin-like systems when block rewards decline and transaction fees dominate, arguing that fee variance can create strategic mining incentives that differ from smoother subsidy revenue.\footnote{Miles Carlsten, Harry Kalodner, S. Matthew Weinberg, and Arvind Narayanan, \href{https://www.cs.princeton.edu/~smattw/CKWN-CCS16.pdf}{``On the Instability of Bitcoin Without the Block Reward''}.}
+
+The lesson is broader than proof of work. A security budget can decay or become badly shaped when:
+
+\begin{itemize}
+\item issuance declines faster than fee revenue becomes stable;
+\item fees arrive in rare spikes rather than steady flow;
+\item MEV becomes concentrated in a few unusually valuable blocks;
+\item value at risk grows faster than signer collateral or operator revenue;
+\item keeper rewards stay fixed while gas costs increase;
+\item governance tokens become borrowable before critical votes;
+\item stake becomes more liquid through derivatives and borrowing;
+\item operators consolidate around the same client, cloud, or custody provider.
+\end{itemize}
+
+This is why economic security cannot be audited once and forgotten. The assumption must be monitored. The right question is not only whether cost exceeds profit today. It is which variable can move until the inequality flips.
+
+\section{A Payoff Model for Review}
+
+\subsection{Expected Attack Payoff}
+
+The point of a payoff model is not precision theater. It is to force the reviewer to name the terms that decide whether an attack is plausible.
+
+A useful starting expression is:
+
+\[
+\mathbb{E}[\text{attack payoff}]
+= p_{\text{success}} \cdot P_{\text{realizable}}
+- C_{\text{attack}}
+- \mathbb{E}[\text{penalty}]
+- C_{\text{coordination}}
+- C_{\text{opportunity}}.
+\]
+
+Where:
+
+\begin{itemize}
+\item \(p_{\text{success}}\) is the attacker's realistic chance of success during the window.
+\item \(P_{\text{realizable}}\) is profit the attacker can actually realize before response.
+\item \(C_{\text{attack}}\) is the cost of capital, infrastructure, bribes, rented resources, or compromise.
+\item \(\mathbb{E}[\text{penalty}]\) is expected punishment, discounted by evidence, enforcement, timing, and collectability.
+\item \(C_{\text{coordination}}\) is the cost and risk of coordinating enough actors.
+\item \(C_{\text{opportunity}}\) is honest revenue or alternative profit forgone by attacking.
+\end{itemize}
+
+An attack is concerning when the expected payoff is positive, or when a Byzantine, coercive, or ideological attacker is willing to absorb a negative payoff to cause damage.
+
+\subsection{Attackers Do Not Need the Whole System}
+
+Attackers need the cheapest path to the protected promise. They do not need to own all stake if they can bribe operators. They do not need to compromise a chain if they can corrupt a bridge committee. They do not need to break an oracle network if they can manipulate a thin reference market for one update. They do not need permanent censorship if five blocks of delay are enough.
+
+The review workflow is:
+
+\begin{codeblock}
+1. State the protected promise.
+2. Identify who can violate it.
+3. Estimate profit realizable during the attack window.
+4. Estimate realistic cost to gain the required influence.
+5. Identify penalties and whether they are provable, timely, and collectible.
+6. Identify coordination and correlation assumptions.
+7. Compare cost and profit under stressed conditions.
+8. Write the residual assumption as something monitorable.
+\end{codeblock}
+
+This method applies to chains, bridges, sequencers, oracles, lending markets, governance systems, keepers, and applications. The inputs differ. The discipline is the same.
+
+\subsection{Adversaries Have Different Payoff Functions}
+
+Do not assume every adversary is a narrow profit maximizer who holds the native token and cares about long-term protocol value. Economic analysis begins with rational incentives, but real attackers can be rational, opportunistic, coercive, ideological, insider, or Byzantine.
+
+A rational validator may attack if an off-chain bribe, hedged short position, or business pressure dominates future staking revenue. A rented proof-of-work attacker may not care about future mining on the target chain. A builder may rationally censor if exclusion revenue exceeds forgone fees. A liquidator may abandon a market if gas cost and competition make the expected reward negative.
+
+Other attackers may not need positive direct profit. A state actor, competitor, extortionist, compromised operator, or politically motivated actor may value disruption itself. That does not make cost analysis irrelevant. It changes the claim. Instead of ``the attack is unprofitable,'' the review may need to show that the attack is too expensive, unreliable, slow, visible, or operationally difficult even for an attacker willing to burn money.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.35\textwidth}X@{}}
+\toprule
+Adversary & Payoff may include & Review implication \\
+\midrule
+Rational economic actor & Direct profit, future revenue, bribes, hedges & Model payoff and opportunity cost \\
+Opportunistic attacker & Temporary mispricing or weak windows & Monitor variables, not only launch assumptions \\
+Cartel & Shared gains and reduced coordination cost & Test independence rather than counting identities \\
+Insider & Privileged keys, data, deployment, or order flow & Compare cryptoeconomic path to operational shortcut \\
+Coercive actor & Legal, political, or physical pressure & Model jurisdiction and provider concentration \\
+Byzantine actor & Harm itself, sabotage, ideology, extortion & Ask whether cost is high enough without relying on profit deterrence \\
+\bottomrule
+\end{tabularx}
+\caption{Economic security depends on the attacker's actual payoff function, not the protocol's preferred model of rationality.}
+\end{table}
+
+The protocol's goal is not automatically the participant's goal. That is why incentive compatibility is a security property, not a decorative economic phrase.
+
+\section{Cost and Profit of Corruption}
+
+\subsection{Cost Is Attack-Specific}
+
+Cost-of-corruption is the realistic cost to acquire, rent, bribe, coerce, compromise, or coordinate enough influence to violate a specific security property for long enough to profit.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.36\textwidth}X@{}}
+\toprule
+Target & Cost inputs & Do not assume \\
+\midrule
+Proof-of-work reorg & Compatible hash power, pool control, rental markets, orphan risk, honest mining revenue forgone & Attacker must buy 51\% of all hardware forever \\
+Proof-of-stake safety attack & Controlled stake, operator concentration, slashable amount, withdrawal timing, evidence rules, hedging & Total staked value equals attack cost \\
+Bridge signer corruption & Threshold keys, signer collateral, custody, jurisdiction, monitoring, message delay, liquidity limits & All signers are independent and fully slashable \\
+Oracle manipulation & Market depth, reporter threshold, update cadence, TWAP window, liquidation value, unwind cost & Oracle attack cost equals all market liquidity \\
+Governance attack & Borrowable voting power, quorum, timelock, delegation, proposal payload, exit routes & Market cap equals governance capture cost \\
+\bottomrule
+\end{tabularx}
+\caption{Cost-of-corruption depends on the mechanism being corrupted.}
+\end{table}
+
+Proof-of-work illustrates the point. Bitcoin's whitepaper frames incentives through block rewards and fees: honest work should be more profitable than undermining the system when honest participants control the majority of CPU power.\footnote{\href{https://bitcoin.org/bitcoin.pdf}{Satoshi Nakamoto, ``Bitcoin: A Peer-to-Peer Electronic Cash System''}.} That intuition is important, but a reviewer still asks how much compatible hash power is liquid, how much is controlled by pools, whether the attack is short-lived, and whether the attacker can hedge price exposure.
+
+Budish's analysis sharpens the concern: recurring security expenditure must be large enough relative to the one-off value available from attack.\footnote{\href{https://www.nber.org/papers/w24717}{Eric Budish, ``The Economic Limits of Bitcoin and the Blockchain''}.} This is a warning for every mechanism that protects a large prize with a small ongoing payment.
+
+\subsection{Profit Is Also Attack-Specific}
+
+Profit-from-corruption is not the protocol's loss in the abstract. It is the attacker's realizable upside.
+
+Direct profit may come from drained liquidity, invalid bridge mints, double-spent deposits, undercollateralized borrowing, liquidation bonuses, AMM extraction, oracle manipulation, auction manipulation, reward theft, or governance control.
+
+Indirect profit may come from short positions, options, perpetual futures, competitor sabotage, market panic, regulatory advantage, reputation damage, order-flow capture, or acquisition leverage.
+
+This distinction matters. A reorg that directly steals little may be profitable if the attacker has a large short. A censorship campaign may earn no protocol revenue but still help an attacker avoid liquidation. A bridge fraud may be profitable even if detected later because destination assets can be sold before response.
+
+For each attack, estimate:
+
+\begin{codeblock}
+direct on-chain profit:
+external market profit:
+maximum amount realizable before response:
+liquidity needed to exit:
+price impact and slippage:
+borrowed or hedged positions:
+losses the attacker can externalize:
+\end{codeblock}
+
+Profit that cannot be realized before detection, pause, freeze, settlement, or market collapse should be discounted. Profit that can be realized quickly should be treated seriously even if later punishment exists.
+
+\section{Windows, Bribes, and Punishment}
+
+\subsection{Time Decides Feasibility}
+
+Economic security is a race between attack execution, detection, response, and punishment.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=7mm and 6mm,
+  stage/.style={security node, text width=24mm, minimum height=8mm}
+]
+\node[stage] (control) {Attacker gains\\control};
+\node[stage, right=of control] (execute) {Attack\\executes};
+\node[stage, right=of execute] (profit) {Profit\\realized};
+\node[stage, below=of profit] (detect) {Detection};
+\node[stage, left=of detect] (response) {Response\\included};
+\node[stage, left=of response] (penalty) {Penalty\\effective};
+
+\draw[security arrow] (control) -- (execute);
+\draw[security arrow] (execute) -- (profit);
+\draw[security arrow] (profit) -- (detect);
+\draw[security arrow] (detect) -- (response);
+\draw[security arrow] (response) -- (penalty);
+\end{tikzpicture}
+\caption{Deterrence is weaker when profit is realized before detection, response, or punishment.}
+\end{figure}
+
+Relevant windows include one block, a confirmation threshold, a BFT finality period, an oracle update interval, a TWAP window, a liquidation window, a bridge message delay, a fraud-proof window, a sequencer forced-inclusion delay, a withdrawal queue, an unbonding period, or a governance timelock.
+
+Write the timing explicitly:
+
+\begin{codeblock}
+control needed for:
+detection expected after:
+response can be included after:
+profit can be realized within:
+penalty becomes effective after:
+\end{codeblock}
+
+If profit is fast and punishment is slow, deterrence must be large and credible. If response is censorable, the response window is longer than the dashboard suggests.
+
+\subsection{Bribery Changes the Capital Model}
+
+Security analysis often assumes the attacker must own the required stake, hash power, votes, or keys. Bribery changes this into a coordination problem.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.30\textwidth}X@{}}
+\toprule
+Question & Why it matters & Example \\
+\midrule
+Can corrupt action be verified? & Conditional bribes need evidence of performance & Vote, signature, block omission, oracle report \\
+How many actors must coordinate? & More actors raise leakage and coordination risk & 7 of 10 bridge signers versus one sequencer \\
+Can penalties be reimbursed? & Bribes may cover expected losses & Slash reimbursement or off-chain side payment \\
+Are actors long-term exposed? & Short-term operators may value future revenue less & Rented hash power or borrowed voting power \\
+Can payment be private? & Public bribes invite response and legal risk & Private deals or business pressure \\
+\bottomrule
+\end{tabularx}
+\caption{Bribery can reduce capital requirements when corrupt actions are observable and participants have weak long-term exposure.}
+\end{table}
+
+Do not assume bribery is always easy. Some attacks require simultaneous action, secrecy, or behavior that cannot be proven to the briber. But do not ignore bribery because it is uncomfortable. Many blockchain actions are observable enough to support conditional payment.
+
+\subsection{Slashing Is Not Restitution}
+
+Proof-of-stake systems use collateral and penalties to shape validator behavior. Ethereum's documentation distinguishes ordinary penalties for missed duties from slashable behavior such as double proposing, double voting, and surround voting, and also describes inactivity leak mechanics for finality recovery.\footnote{\href{https://ethereum.org/developers/docs/consensus-mechanisms/pos/rewards-and-penalties/}{ethereum.org, ``Proof-of-stake rewards and penalties''}.}
+
+The lesson is general:
+
+\begin{itemize}
+\item not every harmful behavior is slashable;
+\item not every slashable behavior is detected quickly;
+\item not every penalty is automatic;
+\item not every penalty falls on the decision-maker;
+\item not every slashed amount compensates victims.
+\end{itemize}
+
+If an oracle attack liquidates users, a bridge releases invalid assets, or a censorship attack blocks exits, slashing may punish some party later. It may not make users whole. A design that relies on slashing should specify who receives slashed value, what evidence is needed, how long enforcement takes, whether governance has discretion, and whether the penalty exceeds profit realized before response.
+
+\section{Centralization and Correlated Failure}
+
+\subsection{Control, Not Count}
+
+Decentralization is often reduced to counts: validators, miners, nodes, signers, token holders, delegates. Counts matter, but control matters more.
+
+A validator set with many keys may be concentrated in a few operators. A proof-of-work network with many hash owners may be pool-concentrated at block-template selection. A bridge with ten signers may share one custody provider. A liquid staking ecosystem may have many depositors but a small operator set. A governance system may have many voters but a few delegates deciding outcomes.
+
+Use a correlation matrix instead of a vanity count:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.34\textwidth}X@{}}
+\toprule
+Dimension & Failure question & Security impact \\
+\midrule
+Operator & Can one company control many authorities? & Lowers coordination cost \\
+Client software & Can one bug affect a threshold? & Converts software bug into economic loss \\
+Cloud or region & Can one outage disable many actors? & Breaks liveness \\
+Custody or signer & Can one key vendor expose many signers? & Lowers compromise cost \\
+Jurisdiction & Can one legal order coordinate behavior? & Creates censorship or halt pressure \\
+Data source & Do oracles/indexers share upstream inputs? & Makes independent reports correlated \\
+Governance & Do delegates or token lenders control many votes? & Lowers capture cost \\
+\bottomrule
+\end{tabularx}
+\caption{Correlation analysis asks whether nominally separate actors fail or coordinate together.}
+\end{table}
+
+Ethereum's client diversity documentation gives a concrete example: a consensus client with more than one-third share can threaten finality if it fails, and a client above two-thirds can create severe chain split and slashing risk if it finalizes an invalid chain.\footnote{\href{https://ethereum.org/developers/docs/nodes-and-clients/client-diversity/}{ethereum.org, ``Client diversity''}.} That is not only software hygiene. It is economic security because correlated software choice can create correlated financial loss.
+
+\subsection{Delegation, Liquid Staking, and Restaking}
+
+Delegation separates economic ownership from operational control. Delegators may choose yield, convenience, wallet defaults, brand, or liquid staking tokens. Operators choose clients, key management, relays, infrastructure, updates, censorship policy, and restaking exposure.
+
+This creates principal-agent risk. Delegators may bear slashing or opportunity cost while operators make the operational decisions that caused it. Operators may have reputation and business downside, but that downside may not match delegator losses.
+
+Liquid staking increases capital efficiency and usability, but it also connects consensus risk to DeFi liquidity, collateral markets, withdrawal queues, peg confidence, and governance. A systematization-of-knowledge paper on liquid staking and restaking surveys how liquid staking tokens make staked positions composable and how restaking extends these dependencies.\footnote{Krzysztof Gogol, Yaron Velner, Benjamin Kraner, and Claudio Tessone, \href{https://arxiv.org/abs/2404.00644}{``SoK: Liquid Staking Tokens (LSTs) and Emerging Trends in Restaking''}.}
+
+Restaking adds another layer. The same stake and operator set may secure several services, each with its own software, rewards, slashing rules, evidence process, and failure modes. Research on elastic restaking networks highlights that reused stake can create coordinated-misbehavior and shared-collateral risk when the same collateral backs multiple services.\footnote{Roi Bar-Zur and Ittay Eyal, \href{https://arxiv.org/abs/2503.00170}{``Elastic Restaking Networks''}.}
+
+The review questions are:
+
+\begin{itemize}
+\item what exact service is secured;
+\item what behavior is slashable;
+\item who detects and enforces slashing;
+\item whether slashing conditions conflict across services;
+\item whether one service's failure reduces security for another;
+\item whether delegators knowingly accepted the added risk;
+\item whether the same collateral is being counted several times.
+\end{itemize}
+
+Restaking can be useful. It can also make a system look more collateralized than it is. Collateral can secure many promises in marketing, but it can absorb losses only once.
+
+\section{Liveness, Griefing, and Censorship Markets}
+
+\subsection{No Theft Required}
+
+A protocol can fail economically without a direct theft transaction. Users may be unable to exit. Liquidations may not run. Oracle prices may not update. Bridge messages may be delayed. Governance may not execute. Emergency pause transactions may be censored. Keepers may abandon a market. A sequencer may stop accepting transactions. Fees may become too high for maintenance.
+
+These are security failures when user safety depends on timely action.
+
+The liveness assumption should name the actor and the reward:
+
+\begin{codeblock}
+At least one honest actor with the required information and authority
+can perform the action within T, and the expected reward or protected
+interest is sufficient under stressed fees, congestion, and censorship.
+\end{codeblock}
+
+If the system cannot say who performs the action under stress, the action is not secured. It is hoped for.
+
+\subsection{Griefing and Censorship Can Be Rational}
+
+Griefing attacks exploit asymmetric cost. The attacker pays little to impose large cost: filling withdrawal queues, forcing keeper failures, triggering expensive verification, blocking small exits, bloating state, or making oracle updates revert. The attacker may profit indirectly through short positions, liquidation opportunities, competitor sabotage, or extortion.
+
+Censorship can also be a market. A party may pay to exclude a liquidation, delay an oracle update, block a bridge pause, filter competitor trades, slow withdrawals, or prevent arbitrage. The censor gives up some ordinary revenue but may receive an external reward larger than the forgone fees.
+
+The review prompt is:
+
+\begin{codeblock}
+Who can profit from delay or exclusion?
+Who can pay for it?
+How long must it last to matter?
+Can users route around it?
+Can the application safely wait?
+What revenue does the censor give up?
+What external payoff could exceed that revenue?
+\end{codeblock}
+
+Temporary censorship is often enough. Blocking a liquidation for five blocks, an oracle update for ten minutes, or a bridge pause for one message window can change solvency.
+
+\section{Worked Example: Bridge Committee Economics}
+
+A bridge moves assets from Chain A to Chain B. Its design:
+
+\begin{itemize}
+\item 10 signers observe Chain A deposits.
+\item 7 of 10 signatures authorize minting on Chain B.
+\item Each signer has \$6 million of slashable collateral.
+\item The bridge has \$400 million of minted assets outstanding on Chain B.
+\item A forged message can mint and move assets within 30 minutes.
+\item Monitoring expects to detect forged messages within 15 minutes.
+\item An emergency pause is controlled by a separate 3 of 5 guardian multisig.
+\item Two signers share a custody provider, four share a cloud provider, and six run the same observer implementation.
+\end{itemize}
+
+The team says the bridge is economically secure because signers are collateralized. That is incomplete.
+
+\subsection{Protected Promise and Threshold Cost}
+
+The protected promise is:
+
+\begin{codeblock}
+Assets minted or released on Chain B correspond to valid locked or burned
+assets on Chain A under the bridge's settlement policy.
+\end{codeblock}
+
+The threshold collateral is:
+
+\[
+7 \times \$6{,}000{,}000 = \$42{,}000{,}000.
+\]
+
+That is not the same as attack cost. It is the maximum directly slashable collateral at the signing threshold if all seven signers are independent, the false message creates objective evidence, enforcement works, and penalties cannot be evaded or reimbursed.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.25\textwidth}>{\RaggedRight\arraybackslash}p{0.22\textwidth}X@{}}
+\toprule
+Quantity & Nominal value & Review interpretation \\
+\midrule
+Outstanding destination claims & \$400 million & Upper bound on gross value at risk, not automatically realizable profit \\
+Threshold signer collateral & \$42 million & Deterrent only if slashable, enforced, and borne by corrupt actors \\
+Detection expectation & 15 minutes & Useful only if alerting, decision, signing, and inclusion all work \\
+Attack movement window & 30 minutes & Profit may be realized before pause or slashing \\
+Correlation risks & custody, cloud, client & May reduce cost below seven independent corruptions \\
+\bottomrule
+\end{tabularx}
+\caption{The bridge's nominal collateral does not settle the economic-security question.}
+\end{table}
+
+\subsection{Profit, Cost, and Response}
+
+If the attacker can realize \$120 million before pause and freezes, then \$42 million of threshold collateral is not enough deterrence by itself. The attacker may bribe signers, reimburse penalties, exploit shared custody, exploit the common observer implementation, or profit externally through short positions.
+
+A useful finding is specific:
+
+\begin{codeblock}
+The bridge secures up to $400 million of destination-chain claims with a
+7 of 10 signer threshold and $42 million of threshold collateral. A forged
+message can mint and move assets within roughly 30 minutes. Collateral
+alone does not deter corruption if realizable profit before response
+exceeds threshold collateral, especially because signer custody, cloud,
+and observer implementation are correlated.
+\end{codeblock}
+
+Controls should target the actual gap:
+
+\begin{itemize}
+\item cap minting and withdrawal exposure per time window;
+\item increase signer collateral or insurance relative to value at risk;
+\item diversify custody, cloud, and observer implementations;
+\item add message delays for large mints;
+\item make false-message evidence objective where possible;
+\item test guardian pause inclusion under congestion and censorship;
+\item monitor signer correlation continuously.
+\end{itemize}
+
+The point is not that the bridge is doomed. The point is that its economic-security claim must compare credible attack cost, realizable profit, and response timing. ``Signers have collateral'' is only a starting input.
+
+\section{Economic Security Worksheet}
+
+Use this shorter worksheet whenever a protocol claims economic security:
+
+\begin{codeblock}
+Protected promise:
+Value directly at risk:
+External profit paths:
+Maximum realizable profit during attack window:
+
+Actors with relevant power:
+Required threshold or authority:
+Independence assumptions:
+Correlation risks:
+
+Cost to corrupt:
+Bribery feasibility:
+Slashable or bondable amount:
+Expected penalty and enforcement delay:
+Opportunity cost and lost future revenue:
+
+Attack window:
+Detection window:
+Response window:
+Exit or withdrawal window:
+
+Liveness dependencies:
+Censorship paths:
+Fallback routes:
+
+Residual assumption:
+Monitoring metric and trigger:
+\end{codeblock}
+
+This worksheet is intentionally concrete. Economic-security failures often hide where one line changes and another does not: value at risk rises while collateral stays fixed; operator count rises while client diversity falls; keepers remain profitable in calm markets but disappear during congestion; slashing exists but evidence is discretionary; censorship is temporary but the protected action is urgent.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why are TVL, market capitalization, and total nominal stake weak standalone measures of security?
+\item What is the difference between a security budget and value at risk?
+\item Why must cost-of-corruption and profit-from-corruption be defined for a specific attack?
+\item How does the attack window change economic feasibility?
+\item Why can bribery reduce the need for an attacker to own the relevant stake, hash power, votes, or keys?
+\item Why is slashing not the same as victim restitution?
+\item How do delegation, liquid staking, and restaking change the relationship between economic ownership and operational control?
+\item Why can liveness failure or temporary censorship be a security failure even without direct theft?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Choose one system: a proof-of-stake chain, proof-of-work chain, bridge, oracle, lending market, sequencer, or governance protocol. Decompose its security budget and state which security job each economic force is meant to fund or deter.
+
+\item A bridge has \$250 million in destination-chain assets, 12 signers, an 8-signature threshold, \$5 million collateral per signer, and a 20-minute monitoring delay. Calculate threshold collateral, then list at least five reasons the real attack cost may be lower or higher than that number.
+
+\item A lending protocol relies on external liquidators. During congestion, profitable liquidations are delayed for five blocks. Analyze keeper incentives, bad-debt risk, oracle freshness, censorship paths, and controls that could bound loss.
+
+\item A staking ecosystem has many delegators, but three operators control 55\% of active stake and most users choose operators through wallet defaults. Write the economic-security finding, including operator incentives, delegator awareness, slashing exposure, governance options, and monitoring metrics.
+\end{enumerate}

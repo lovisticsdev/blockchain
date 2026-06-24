@@ -1,0 +1,337 @@
+\chapter*{Part III Integrated Lab: Execution-Model Security Review}
+\phantomsection
+\addcontentsline{toc}{chapter}{Part III Integrated Lab: Execution-Model Security Review}
+
+\begin{labbox}[Execution-Model Security Review]
+This lab closes Part III by asking the reader to review the same product idea across several execution models without flattening them into one generic smart-contract pattern.
+\end{labbox}
+
+\section*{Scenario}
+
+You are reviewing \texttt{Meridian Vault}, a protocol team building a cross-runtime custody and yield product. The team wants one security model for five deployments:
+
+\begin{itemize}
+\item a Bitcoin escrow path for high-value institutional deposits;
+\item an Ethereum ERC-20 vault behind an upgradeable proxy;
+\item a Solana token vault program;
+\item a Move/Sui object-based vault;
+\item a CosmWasm appchain vault that accepts IBC vouchers.
+\end{itemize}
+
+The product team says:
+
+\begin{quote}
+The vault invariant is the same everywhere: user shares are backed by assets, and only authorized users or admins can move value.
+\end{quote}
+
+That sentence is directionally useful and technically insufficient. Your task is to turn it into an execution-model review package. The central question is:
+
+\begin{codeblock}
+Which state represents the asset, which authority can change it,
+which evidence proves the transition, and which runtime-specific
+failure mode breaks the shared invariant?
+\end{codeblock}
+
+\section*{Evidence Packet}
+
+Use the following packet as the raw material for the review. Do not assume the packet is internally consistent. When evidence conflicts with a product claim, name the conflict.
+
+\subsection*{A. Bitcoin Escrow Path}
+
+Institutional users can deposit BTC into a 2-of-2 escrow between the user and Meridian. The product summary says that users are safe because they receive a presigned refund transaction before funding.
+
+\begin{codeblock}
+Funding transaction:
+    input 0: 1.20000000 BTC
+    output 0: 0.80000000 BTC to 2-of-2 escrow
+    output 1: 0.39900000 BTC change
+    nLockTime: 0
+
+Refund transaction:
+    spends funding output 0
+    pays 0.79950000 BTC to user recovery address
+    relative timeout: 144 blocks
+    sighash on user signature: SIGHASH_SINGLE | ANYONECANPAY
+    CPFP anchor output: none
+    fee-bump strategy: "wallet will use RBF if needed"
+
+Signer note:
+    user signed the refund before the funding transaction was broadcast
+    device displayed escrow output but did not display sighash type
+\end{codeblock}
+
+\subsection*{B. Ethereum Vault}
+
+The Ethereum deployment accepts USDC and mints shares. The vault is an EIP-1967-style proxy. The team says events are enough for indexers to determine deposits.
+
+\begin{codeblock}
+Proxy:
+    address: 0xVaultProxy
+    implementation: 0xImplV1
+    admin: 0xGovTimelock
+
+Transaction E1:
+    sender: Alice
+    to: USDC
+    calldata: permit(Alice, 0xVaultProxy, 500,000 USDC, nonce 18, deadline T)
+    receipt status: success
+    logs committed:
+        Approval(Alice, 0xVaultProxy, 500,000)
+
+Transaction E2:
+    sender: Alice
+    to: 0xVaultProxy
+    calldata: deposit(500,000, Alice)
+    receipt status: failure
+    top-level revert: SlippageTooHigh()
+    trace:
+        Proxy DELEGATECALL ImplV1.deposit(...)
+        ImplV1 CALL USDC.transferFrom(...)
+        inner frame emitted Transfer(Alice, 0xVaultProxy, 500,000)
+        outer frame reverted after share calculation
+
+Post-state query:
+    allowance[Alice][0xVaultProxy] = 500,000
+    vault share balance[Alice] = 0
+\end{codeblock}
+
+\subsection*{C. Solana Vault Program}
+
+The Solana deployment uses a program-controlled token vault. The team says the vault is safe because the vault authority is a PDA.
+
+\begin{codeblock}
+Program:
+    program id: Merid1anVault111111111111111111111111111111
+    loader: BPF Loader Upgradeable
+    ProgramData upgrade authority: 2-of-3 Meridian deployer multisig
+    verifiable build status: not provided
+
+Deposit instruction accounts:
+    user                         signer, writable
+    market                       writable, owner = Meridian program
+    reserve                      writable, owner = Meridian program
+    user_position                writable, owner = Meridian program
+    user_token_account           writable, owner = Token Program
+    vault_token_account          writable, owner = Token Program
+    vault_authority_pda          read-only
+    deposit_mint                 read-only
+    token_program                read-only
+
+PDA derivation in code:
+    vault_authority = PDA(["vault", market], Meridian program id)
+
+Expected design:
+    one vault authority per market and deposit mint
+
+Token account facts:
+    user_token_account.mint = USDC
+    user_token_account.token_owner = user
+    vault_token_account.mint = USDT
+    vault_token_account.token_owner = vault_authority_pda
+
+Compute settings:
+    compute unit limit = 400,000
+    compute unit price = 20,000 micro-lamports
+\end{codeblock}
+
+\subsection*{D. Move and Sui Vault}
+
+The Move/Sui version represents shares as values and vaults as objects. The team says Move prevents asset bugs because shares are resources.
+
+\begin{codeblock}
+public struct Share has copy, drop, store {
+    amount: u64,
+}
+
+public struct Vault has key {
+    id: UID,
+    total_assets: u64,
+    total_shares: u64,
+    fee_bps: u64,
+}
+
+public struct AdminCap has key, store {}
+
+public entry fun update_fee(vault: &mut Vault, new_fee_bps: u64) {
+    vault.fee_bps = new_fee_bps;
+}
+
+public entry fun withdraw(vault: &mut Vault, shares: Share, receiver: address) {
+    // burns shares by letting the value go out of scope
+    // sends assets based on vault.total_assets / vault.total_shares
+}
+
+Ownership note:
+    the Sui deployment uses a shared Vault object
+    AdminCap is minted during initialization and stored under the deployer
+\end{codeblock}
+
+\subsection*{E. CosmWasm Appchain and IBC Vault}
+
+The appchain vault accepts a stablecoin voucher transferred over IBC. The chain has governance, \texttt{x/wasm}, bank, and IBC transfer modules enabled.
+
+\begin{codeblock}
+Accepted denom rule:
+    accept any denom whose display metadata symbol is "USDC"
+
+Observed deposit denom:
+    ibc/8A1F...D9
+    trace path: transfer/channel-17/uusdc
+    source chain: Chain X
+
+Expected canonical denom:
+    ibc/4B22...91
+    trace path: transfer/channel-3/uusdc
+    source chain: Chain Y
+
+Contract:
+    vault address: wasm1vault...
+    admin: chain governance module
+    migration delay: none after proposal execution
+
+Execution note:
+    deposit() records pending shares
+    contract emits SubMsg to bank module
+    reply handler finalizes shares when reply id == 7
+    code does not bind reply id 7 to a unique pending deposit id
+
+Relayer note:
+    one relayer currently services channel-3
+    timeout refund path is documented but untested
+\end{codeblock}
+
+\section*{Required Artifact}
+
+\begin{artifactbox}[Execution-Model Security Review Package]
+Produce one review package. It should be usable by engineers deciding whether these deployments are ready for implementation review, test planning, or redesign.
+\end{artifactbox}
+
+The package must include:
+
+\begin{artifactchecklist}
+\item product-level invariant statement and its model-specific versions;
+\item state representation map for all five deployments;
+\item authority map for signatures, scripts, callers, PDAs, capabilities, governance, admins, and module authority;
+\item model-specific evidence worksheet;
+\item transaction or message-flow reconstruction for each deployment;
+\item runtime-specific failure analysis;
+\item cross-model comparison table;
+\item findings memo with severity, evidence, recommendation, and residual risk;
+\item test and monitoring targets derived from the findings.
+\end{artifactchecklist}
+
+\section*{Required Analysis}
+
+\subsection*{1. Shared Invariant, Rewritten Correctly}
+
+Start with the team's claim:
+
+\begin{codeblock}
+user shares are backed by assets,
+and only authorized users or admins can move value
+\end{codeblock}
+
+Rewrite it once for each execution model. Each version must name the actual state object that represents backing and shares.
+
+For example, the Ethereum version should mention token contract state, proxy storage, share accounting, allowance state, and delegatecall storage context. The Solana version should mention token accounts, mints, PDA authority, program-owned accounts, and program upgrade authority. The CosmWasm version should mention bank module balances, contract storage, denom trace, IBC channel, and contract admin.
+
+\subsection*{2. Evidence Worksheets}
+
+For each deployment, produce an evidence worksheet.
+
+The Bitcoin worksheet must compute the implied funding transaction fee and identify whether the refund transaction has a credible confirmation strategy under congestion. It must discuss the sighash type, the missing CPFP anchor, and whether RBF is a meaningful claim for the presigned refund path.
+
+The Ethereum worksheet must distinguish:
+
+\begin{itemize}
+\item transaction inclusion;
+\item receipt success or failure;
+\item committed logs;
+\item logs visible only inside reverted trace evidence;
+\item state that survived E2;
+\item the remaining allowance after the failed deposit.
+\end{itemize}
+
+The Solana worksheet must resolve each account's role, signer status, writable status, base owner, decoded type, relationship checks, PDA derivation, and failure impact if substituted. It must calculate the prioritization fee from the provided compute settings.
+
+The Move/Sui worksheet must inspect abilities, object ownership, shared-object access, capability lifecycle, and whether the code actually enforces admin authority.
+
+The CosmWasm/IBC worksheet must trace the denom path, contract admin, migration authority, SubMsg/reply flow, relayer liveness, and timeout/refund assumption.
+
+\subsection*{3. Runtime-Specific Findings}
+
+Write at least six findings. At minimum, include one finding for each category:
+
+\begin{itemize}
+\item Bitcoin sighash, refund, or fee-bump failure;
+\item Ethereum evidence or approval-residue failure;
+\item Solana account substitution, PDA seed, mint, or upgrade-authority failure;
+\item Move/Sui ability, shared-object, or capability failure;
+\item CosmWasm/IBC denom, reply, migration, or relayer-liveness failure;
+\item cross-model false abstraction failure.
+\end{itemize}
+
+Each finding must use this form:
+
+\begin{codeblock}
+Title:
+Severity:
+Affected invariant:
+Execution model:
+Evidence:
+Failure path:
+Impact:
+Recommendation:
+Residual risk:
+\end{codeblock}
+
+\subsection*{4. Cross-Model Comparison}
+
+Build a comparison table with these rows:
+
+\begin{codeblock}
+state representation
+asset custody
+share representation
+authorization primitive
+external control flow
+failure rollback semantics
+upgrade or migration authority
+evidence required to prove success
+most dangerous false assumption
+\end{codeblock}
+
+The point is not to make the table symmetrical. The point is to show where the same product claim means different things.
+
+\subsection*{5. Test and Monitoring Targets}
+
+Convert the review into test or monitoring work.
+
+At minimum, propose:
+
+\begin{itemize}
+\item one Bitcoin transaction-construction or PSBT review test;
+\item one Ethereum receipt/trace/state-diff test;
+\item one Solana account-substitution or PDA-seed test;
+\item one Solana program-upgrade monitoring control;
+\item one Move ability or shared-object authorization test;
+\item one CosmWasm reply-id or migration test;
+\item one IBC denom-trace or relayer-liveness monitor.
+\end{itemize}
+
+\section*{Submission Standard}
+
+A strong submission does not say that one model is generally safer than another. It explains which model gives stronger primitives for a particular promise and which new obligations those primitives create.
+
+Unacceptable submissions include:
+
+\begin{itemize}
+\item treating all deployments as ordinary smart contracts;
+\item treating events or logs as state;
+\item treating a Solana PDA as safe without deriving and checking its seeds;
+\item treating Move resources as safe while giving them \texttt{copy} and \texttt{drop};
+\item treating an IBC voucher display symbol as asset identity;
+\item treating a fixed program ID, proxy address, or contract address as proof of immutable code;
+\item writing a comparison table that is symmetrical but does not identify evidence.
+\end{itemize}
+

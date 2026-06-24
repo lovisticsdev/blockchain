@@ -1,0 +1,138 @@
+\newcommand{\booktitle}{Blockchain Security from First Principles}
+
+% Core notation used throughout the book.
+\newcommand{\state}{S}
+\newcommand{\nextstate}{S'}
+\newcommand{\transition}{\delta}
+\newcommand{\inputevent}{I}
+\newcommand{\reachable}{\mathsf{Reachable}}
+\newcommand{\valid}{\mathsf{Valid}}
+\newcommand{\verify}{\mathsf{Verify}}
+\newcommand{\sign}{\mathsf{Sign}}
+\newcommand{\commit}{\mathsf{Commit}}
+\newcommand{\prove}{\mathsf{Prove}}
+\newcommand{\hash}{\mathsf{H}}
+\newcommand{\domain}{\mathsf{Domain}}
+
+\newcommand{\boxheading}[2]{#1\ifstrempty{#2}{}{: #2}}
+
+\tcbset{
+  securitybox/.style={
+    enhanced,
+    breakable,
+    sharp corners,
+    boxrule=0.6pt,
+    left=8pt,
+    right=8pt,
+    top=6pt,
+    bottom=6pt,
+    before skip=0.8\baselineskip,
+    after skip=0.8\baselineskip
+  }
+}
+
+\newtcblisting{codeblock}{
+  listing only,
+  enhanced,
+  breakable,
+  sharp corners,
+  boxrule=0.4pt,
+  colback=securitygray,
+  colframe=securityblue,
+  left=6pt,
+  right=6pt,
+  top=5pt,
+  bottom=5pt,
+  before skip=0.75\baselineskip,
+  after skip=0.75\baselineskip,
+  listing options={
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    columns=fullflexible,
+    keepspaces=true,
+    showstringspaces=false
+  }
+}
+
+\newtcolorbox{definitionbox}[1][]{
+  securitybox,
+  colback=securitygray,
+  colframe=securityblue,
+  title={\boxheading{Definition}{#1}}
+}
+
+\newtcolorbox{principlebox}[1][]{
+  securitybox,
+  colback=securitygray,
+  colframe=securityblue,
+  title={\boxheading{Principle}{#1}}
+}
+
+\newtcolorbox{securitymodelbox}[1][]{
+  securitybox,
+  colback=white,
+  colframe=securityblue,
+  title={\boxheading{Security Model}{#1}}
+}
+
+\newtcolorbox{failuremodebox}[1][]{
+  securitybox,
+  colback=white,
+  colframe=securityred,
+  title={\boxheading{Failure Mode}{#1}}
+}
+
+\newtcolorbox{workedexamplebox}[1][]{
+  securitybox,
+  colback=white,
+  colframe=securitygreen,
+  title={\boxheading{Worked Example}{#1}}
+}
+
+\newtcolorbox{artifactbox}[1][]{
+  securitybox,
+  colback=securitygray,
+  colframe=securitygreen,
+  title={\boxheading{Artifact}{#1}}
+}
+
+\newtcolorbox{labbox}[1][]{
+  securitybox,
+  colback=securitygray,
+  colframe=securityred,
+  title={\boxheading{Integrated Lab}{#1}}
+}
+
+\newenvironment{reviewquestions}
+  {\section{Review Questions}\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=*]}
+  {\end{enumerate}}
+
+\newenvironment{appliedexercises}
+  {\section{Applied Exercises}\begin{enumerate}[label=\textbf{Exercise \arabic*.}, leftmargin=*]}
+  {\end{enumerate}}
+
+\newenvironment{artifactchecklist}
+  {\begin{itemize}[leftmargin=*, itemsep=0.2em]}
+  {\end{itemize}}
+
+\tikzset{
+  security node/.style={
+    draw=securityblue,
+    fill=securitygray,
+    rounded corners=2pt,
+    align=center,
+    minimum height=8mm,
+    text width=28mm
+  },
+  security decision/.style={
+    draw=securityred,
+    fill=white,
+    diamond,
+    aspect=2,
+    align=center,
+    inner sep=1.5pt,
+    text width=24mm
+  },
+  security arrow/.style={-{Latex[length=2.3mm]}, thick},
+  trust boundary/.style={draw=securityred, dashed, thick, rounded corners=2pt}
+}

@@ -1,0 +1,1956 @@
+\chapter{Blockchains as Adversarial State Machines}
+
+\section{Purpose}
+
+This chapter establishes the central mental model for the book:
+
+\begin{quote}
+A blockchain is a replicated state machine whose inputs are chosen in an
+adversarial environment.
+\end{quote}
+
+That sentence is more useful than most slogans about decentralization,
+immutability, or trustlessness. It gives us a way to reason about
+security without getting trapped inside the vocabulary of any single
+chain. Bitcoin, Ethereum, Solana, Move-based systems, appchains,
+bridges, rollups, and smart contracts all differ in execution model and
+consensus mechanism. But they all have to answer the same
+first-principles questions:
+
+\begin{itemize}
+\tightlist
+\item
+  What is the state?
+\item
+  What inputs can change it?
+\item
+  Which transitions are valid?
+\item
+  Who gets to submit, order, censor, or finalize those inputs?
+\item
+  Which properties must remain true across every reachable state?
+\item
+  What assumptions make replication, progress, and agreement possible?
+\end{itemize}
+
+This chapter is deliberately not a tour of blockchain buzzwords. We will
+not yet study signatures in depth, consensus protocols, token standards,
+reentrancy, MEV, or bridges. Those topics come later. Here we build the
+frame that makes those topics teachable.
+
+If you learn one habit from this chapter, make it this:
+
+\begin{quote}
+Never review a blockchain system as a collection of features. Review it
+as a set of possible state transitions under adversarial input and
+ordering.
+\end{quote}
+
+\section{Learning Objectives}
+
+By the end of this chapter, you should be able to:
+
+\begin{itemize}
+\tightlist
+\item
+  Explain a blockchain as a state machine rather than as a database or a
+  payment network.
+\item
+  Distinguish state, transaction, block, transition function, validity
+  rule, and invariant.
+\item
+  Explain why deterministic execution is necessary for replicated
+  validation.
+\item
+  Identify where adversarial inputs enter a blockchain system.
+\item
+  Separate safety failures from liveness failures.
+\item
+  Explain why many serious exploits are not ``invalid transactions'' but
+  valid transitions that violate protocol intent.
+\end{itemize}
+
+\section{The Core Model}
+
+A state machine has four basic ingredients:
+
+\begin{itemize}
+\tightlist
+\item
+  A set of possible states.
+\item
+  A set of possible inputs.
+\item
+  A transition function that maps a current state and an input to a next
+  state.
+\item
+  Rules for rejecting inputs or transitions that are not allowed.
+\end{itemize}
+
+In abstract form:
+
+\begin{lstlisting}
+next_state = apply(current_state, input)
+\end{lstlisting}
+
+For blockchains, the important inputs are usually transactions,
+messages, blocks, votes, proofs, signatures, and governance actions. A
+block is a batch of ordered inputs. A chain is a history of such
+batches. A node validates the chain by starting from an initial state
+and applying the accepted inputs in the accepted order.
+
+Ethereum's formal specification explicitly frames Ethereum as a
+transaction-based state machine: a genesis state is transformed into a
+current state by executing transactions.\footnote{Gavin Wood,
+  ``Ethereum: A Secure Decentralised Generalised Transaction Ledger'',
+  https://ethereum.github.io/yellowpaper/paper.pdf.} Ethereum.org's
+developer documentation makes the same operational point in simpler
+terms: transactions are signed instructions from accounts that update
+network state, and blocks batch transactions so participants can
+synchronize around a common history.\footnote{ethereum.org,
+  ``Transactions'', https://ethereum.org/developers/docs/transactions/.}
+\footnote{ethereum.org, ``Blocks'',
+  https://ethereum.org/developers/docs/blocks/.}
+
+Bitcoin is often described as a ledger rather than a state machine, but
+the same model applies. The state is the set of unspent transaction
+outputs, along with consensus-relevant chain data. A transaction
+consumes existing outputs and creates new outputs. A block proposes an
+ordered set of such transactions. Nodes accept a block only if its
+transactions satisfy the validity rules, including the rule that the
+same output is not spent twice.\footnote{Satoshi Nakamoto, ``Bitcoin: A
+  Peer-to-Peer Electronic Cash System'',
+  https://bitcoin.org/bitcoin.pdf.}
+
+This generalizes:
+
+\begin{lstlisting}
+genesis_state
+  --tx_1--> state_1
+  --tx_2--> state_2
+  --tx_3--> state_3
+  ...
+\end{lstlisting}
+
+For review work, draw the machine before naming bug classes:
+
+\begin{lstlisting}
+flowchart LR
+    S[Current state] --> I[Input]
+    I --> V{Validity check}
+    V -- reject --> R[No state change]
+    V -- accept --> T[Transition function]
+    T --> N[Next state]
+    N --> P{Invariant check}
+    P -- holds --> A[Accept transition]
+    P -- broken --> B[Unsafe reachable state]
+\end{lstlisting}
+
+The same idea can be written as minimal review pseudocode:
+
+\begin{lstlisting}
+apply(state, input):
+    check syntax and encoding
+    check authority
+    check validity in current state
+    compute next_state
+    check required invariants
+    return next_state or reject
+\end{lstlisting}
+
+For blocks:
+
+\begin{lstlisting}
+state_after_block = apply_block(parent_state, [tx_0, tx_1, tx_2, ...])
+\end{lstlisting}
+
+And for a chain:
+
+\begin{lstlisting}
+current_state = replay(genesis_state, canonical_history)
+\end{lstlisting}
+
+The security question is not merely whether a transaction is formatted
+correctly. The question is whether the system's rules ensure that every
+reachable state is acceptable under the intended security model.
+
+That distinction will carry the whole book.
+
+\section{State, State Transitions, and Validity Rules}
+
+\subsection{State Is Everything the Rules Need to Remember}
+
+State is the information that matters for future validity and behavior.
+
+In a blockchain system, state may include:
+
+\begin{itemize}
+\tightlist
+\item
+  Account balances.
+\item
+  UTXO sets.
+\item
+  Contract storage.
+\item
+  Ownership records.
+\item
+  Nonces and sequence numbers.
+\item
+  Validator sets and stakes.
+\item
+  Governance configuration.
+\item
+  Pending withdrawals.
+\item
+  Oracle prices cached on-chain.
+\item
+  Token supplies.
+\item
+  Vault share balances.
+\item
+  Bridge message statuses.
+\item
+  Rollup output roots.
+\item
+  Protocol parameters such as fee rates, limits, and emergency flags.
+\end{itemize}
+
+Do not reduce state to ``balances.'' Balances are only one kind of
+state. A paused flag is state. An upgrade admin is state. A stored
+oracle timestamp is state. A consumed bridge message nonce is state. A
+validator's slashing status is state. A record that a withdrawal has
+already been claimed is state.
+
+For security analysis, state is whatever the attacker wants to change,
+depend on, corrupt, desynchronize, or freeze.
+
+\subsection{Transitions Are the Only Way State Changes}
+
+A state transition is a change from one state to another. In blockchain
+systems, transitions are usually caused by accepted inputs:
+
+\begin{itemize}
+\tightlist
+\item
+  A user signs and submits a transaction.
+\item
+  A contract calls another contract.
+\item
+  A validator proposes a block.
+\item
+  A governance proposal executes.
+\item
+  A bridge relayer submits a message.
+\item
+  A sequencer posts a rollup batch.
+\item
+  A withdrawal proof is verified.
+\item
+  An oracle update is accepted.
+\item
+  A protocol upgrade changes the transition rules themselves.
+\end{itemize}
+
+The transition is not the transaction object. The transaction is the
+input. The transition is the state change produced by applying the input
+under the rules.
+
+Consider a tiny token ledger:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Element
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Token ledger model
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+State & \passthrough{\lstinline!balances[address]!},
+\passthrough{\lstinline!total\_supply!} \\
+Input &
+\passthrough{\lstinline!transfer(sender, recipient, amount, signature)!} \\
+Authority & \passthrough{\lstinline!signature!} must authorize
+\passthrough{\lstinline!sender!} \\
+Validity & \passthrough{\lstinline!amount > 0!} and
+\passthrough{\lstinline!balances[sender] >= amount!} \\
+Transition & Decrease sender, increase recipient, leave
+\passthrough{\lstinline!total\_supply!} unchanged \\
+Invariant & Sum of balances remains equal to
+\passthrough{\lstinline!total\_supply!} \\
+\end{longtable}
+}
+
+The transfer transition table is:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Step
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Check or update
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Security purpose
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+1 & Decode \passthrough{\lstinline!sender!},
+\passthrough{\lstinline!recipient!}, \passthrough{\lstinline!amount!},
+\passthrough{\lstinline!signature!} & Reject malformed inputs before
+state changes \\
+2 & Verify the signature authorizes \passthrough{\lstinline!sender!} &
+Prevent unauthorized movement \\
+3 & Check \passthrough{\lstinline!amount > 0!} & Reject nonsensical or
+ambiguous movement \\
+4 & Check \passthrough{\lstinline!balances[sender] >= amount!} & Prevent
+negative balances \\
+5 & Subtract from \passthrough{\lstinline!sender!} and add to
+\passthrough{\lstinline!recipient!} & Move value without changing total
+supply \\
+6 & Recheck conservation & Catch implementation or integration errors \\
+\end{longtable}
+}
+
+The transition is acceptable only if the validity rules hold. If
+\passthrough{\lstinline!balances[sender]!} is less than
+\passthrough{\lstinline!amount!}, the input must not produce the
+transfer. If the signature does not authorize the sender, the input must
+not move funds. If the transition decreases the sender but forgets to
+increase the recipient, the transition violates asset conservation even
+if the transaction looked well formed.
+
+Security starts with this discipline:
+
+\begin{lstlisting}
+For every accepted input, what state changes?
+For every rejected input, why is it rejected?
+For every state change, what must remain true?
+\end{lstlisting}
+
+\subsection{Validity Is Not the Same as Safety}
+
+The word ``valid'' is dangerous because it is often used at different
+layers.
+
+A transaction may be:
+
+\begin{itemize}
+\tightlist
+\item
+  Syntactically valid: it is encoded correctly.
+\item
+  Authenticated: the signature or authorization data checks out.
+\item
+  Executable: the current state has enough resources for execution.
+\item
+  Protocol-valid: it satisfies the base chain's validity rules.
+\item
+  Application-valid: it satisfies a smart contract or program's explicit
+  checks.
+\item
+  Intent-safe: it preserves the economic or security properties the
+  protocol was supposed to protect.
+\end{itemize}
+
+The last category is where many expensive failures live.
+
+A lending protocol may accept a transaction that is syntactically valid,
+signed by the attacker, included in a valid block, and allowed by the
+contract code. Yet the same transaction may still leave the protocol
+insolvent because the oracle price was manipulable or the collateral
+accounting rounded in the attacker's favor. The chain did not fail to
+validate the transaction. The application failed to encode the right
+validity constraints or invariants.
+
+This is why ``the transaction was valid'' is not a defense of a
+protocol. It is often the description of the exploit.
+
+\subsection{Validity Rules Define Reachable States}
+
+The set of reachable states is the set of states the system can enter by
+starting from the initial state and applying accepted transitions.
+
+Informally:
+
+\begin{lstlisting}
+genesis_state is reachable
+
+if state is reachable
+and input is valid in state
+then apply(state, input) is reachable
+\end{lstlisting}
+
+A security property must hold over reachable states, not imagined
+states. If a state cannot occur under any accepted transition, it may be
+irrelevant. If a dangerous state can occur through any valid sequence of
+inputs, it matters even if the sequence looks unusual.
+
+Attackers specialize in unusual valid sequences.
+
+They will not use your protocol according to the product story. They
+will use it according to the transition rules.
+
+\subsection{Invariants Are Properties That Must Survive Every
+Transition}
+
+An invariant is a property that should remain true across all reachable
+states.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  Total token balances equal total supply.
+\item
+  No account balance is negative.
+\item
+  A withdrawal cannot be claimed twice.
+\item
+  A user cannot spend funds without authorization.
+\item
+  A vault's assets are sufficient to redeem outstanding shares according
+  to the redemption rules.
+\item
+  A bridge message cannot be executed on the destination chain unless it
+  was committed on the source chain under the required finality
+  assumptions.
+\item
+  A governance executor cannot bypass the configured delay unless
+  emergency powers explicitly allow it.
+\end{itemize}
+
+The invariant mindset comes from state-machine reasoning. Lamport's
+treatment of state machines emphasizes invariants as predicates that
+hold in all reachable states, and proves them by showing they hold
+initially and are preserved by transitions.\footnote{Leslie Lamport,
+  ``Computation and State Machines'',
+  https://lamport.azurewebsites.net/pubs/state-machine.pdf.} This is not
+academic ornamentation. It is exactly the reasoning security reviewers
+need.
+
+For a blockchain protocol, the practical version is:
+
+\begin{lstlisting}
+If the invariant is true before this transaction,
+is it still true after this transaction?
+\end{lstlisting}
+
+If the answer is no, you have either found a bug or discovered that your
+invariant is not actually part of the intended design.
+
+Both outcomes are valuable.
+
+\subsection{State Includes the Rules That Can Change the Rules}
+
+Many blockchain systems have upgrade mechanisms, governance modules,
+feature flags, admin keys, pausing controls, validator-set updates, and
+parameter changes. These are not external to the state machine. They are
+transitions that alter future transition rules or future authority.
+
+For example:
+
+\begin{lstlisting}
+State:
+  implementation_address
+  admin
+  timelock_delay
+  paused
+
+Input:
+  upgrade_to(new_implementation)
+
+Validity:
+  caller == admin
+  timelock elapsed
+  new implementation passes required checks
+
+Transition:
+  implementation_address = new_implementation
+\end{lstlisting}
+
+An upgrade does not merely change a value. It changes the code that
+determines future state transitions. That makes upgrade authority one of
+the most important security boundaries in any system that has it.
+
+Do not treat governance and upgrades as operational details. They are
+part of the state machine.
+
+\section{Determinism, Replication, and Global Agreement}
+
+\subsection{Replication Requires Determinism}
+
+A blockchain is replicated. Many nodes maintain or verify the same
+system. They may be run by different people, on different machines, in
+different countries, using different client implementations.
+
+Replication only works if honest validators can independently reach the
+same result.
+
+If two honest nodes start from the same state and apply the same valid
+input sequence, they must compute the same next state. Otherwise the
+network does not have one replicated state machine. It has a collection
+of machines drifting apart.
+
+This requirement can be stated simply:
+
+\begin{lstlisting}
+same initial state
++ same ordered inputs
++ same transition rules
+= same resulting state
+\end{lstlisting}
+
+Determinism is why blockchain execution environments restrict or
+carefully define sources of environmental data. A contract cannot ask an
+arbitrary web server for the current weather during consensus execution.
+A validator cannot use its local machine clock as an unbounded source of
+truth. A program cannot depend on uncommitted local randomness and still
+expect all validators to agree.
+
+When a blockchain exposes ``environmental'' values such as block number,
+timestamp, slot, block hash, base fee, recent blockhash, or chain ID,
+those values are not private local facts. They are consensus-visible
+inputs or protocol-defined values. They are part of the transition
+context.
+
+This has a security consequence:
+
+\begin{quote}
+If a value is available to on-chain execution, assume it is public,
+constrained by protocol rules, and potentially influenced by actors who
+participate in block production.
+\end{quote}
+
+That does not mean every such value is useless. It means the security
+assumption must be explicit.
+
+\subsection{Consensus Orders Inputs; Execution Applies Them}
+
+For teaching purposes, separate two jobs:
+
+\begin{itemize}
+\tightlist
+\item
+  Consensus, fork choice, or block production determines which ordered
+  history is canonical.
+\item
+  Execution applies the transition rules to that ordered history.
+\end{itemize}
+
+Different chains combine these jobs differently, but the distinction
+matters.
+
+Bitcoin's proof-of-work chain selection gives nodes a way to converge on
+a history of valid blocks under a resource assumption. Ethereum's modern
+proof-of-stake protocol uses validators, attestations, fork choice, and
+finality checkpoints. BFT-style appchains may use voting rounds and
+finality certificates. Rollups may use sequencers, L1 contracts, fraud
+proofs, validity proofs, or data availability assumptions.
+
+Those mechanisms differ. The state-machine question remains:
+
+\begin{lstlisting}
+Which ordered inputs are accepted as canonical?
+What state results from applying them?
+When can users treat that result as settled?
+\end{lstlisting}
+
+Chapter 8 will study consensus and finality in detail. For now, do not
+confuse ``valid transition'' with ``canonical transition.'' A
+transaction can be locally valid and still not land in the canonical
+chain. A block can contain valid transactions and still lose a
+fork-choice race. A withdrawal can be valid on an L2 but not yet settled
+on L1.
+
+Security depends on both execution validity and history selection.
+
+\subsection{Blocks Are Commitment Devices}
+
+A block is not merely a container. It commits to an ordered set of data
+and to a relationship with prior history.
+
+Ethereum documentation describes blocks as batches of transactions
+linked by hashes of previous blocks, so that changing prior data affects
+later commitments.\footnote{ethereum.org, ``Blocks'',
+  https://ethereum.org/developers/docs/blocks/.} The Ethereum Yellow
+Paper makes a more formal point: blocks record transactions, reference
+the prior block, and include an identifier of the resulting state rather
+than storing the entire state itself.\footnote{Gavin Wood, ``Ethereum: A
+  Secure Decentralised Generalised Transaction Ledger'',
+  https://ethereum.github.io/yellowpaper/paper.pdf.}
+
+This matters for security because nodes do not need to trust a block
+producer's claim about the final state. They can execute the block and
+verify that the resulting state commitment is correct.
+
+At a high level:
+
+\begin{lstlisting}
+proposed block:
+  parent reference
+  ordered transactions
+  state commitment
+  other consensus data
+
+validator checks:
+  parent is acceptable
+  transactions are valid in order
+  execution result matches commitment
+  consensus rules are satisfied
+\end{lstlisting}
+
+If the block producer lies about the state result, honest validating
+nodes should reject the block. If clients disagree about the transition
+rules, a chain split can occur. If the commitment scheme has a flaw,
+proofs and light-client assumptions can fail. Those are different
+failure modes, but all are visible in the state-machine frame.
+
+\subsection{Global Agreement Is Not Instant Agreement}
+
+``The blockchain state'' sounds singular. In reality, nodes observe the
+network through time, latency, forks, local mempools, peer choices, RPC
+providers, and client software. Agreement is a property achieved under
+assumptions, not magic.
+
+At a given moment:
+
+\begin{itemize}
+\tightlist
+\item
+  Two nodes may have seen different pending transactions.
+\item
+  Two nodes may have different mempool contents.
+\item
+  Two nodes may temporarily prefer different chain heads.
+\item
+  A block that appears confirmed may later be reorged in
+  probabilistic-finality systems.
+\item
+  A rollup transaction may be accepted by a sequencer before it is
+  settled on the base layer.
+\item
+  A user interface may show state from an indexer that is behind, wrong,
+  or pointed at a minority fork.
+\end{itemize}
+
+Security reviews must be precise about which level of agreement is being
+assumed:
+
+\begin{itemize}
+\tightlist
+\item
+  Local execution result.
+\item
+  Mempool observation.
+\item
+  Included in a block.
+\item
+  Confirmed after some depth.
+\item
+  Economically finalized.
+\item
+  BFT-finalized.
+\item
+  Settled on another domain.
+\item
+  Reflected correctly by an RPC, indexer, or frontend.
+\end{itemize}
+
+Many application bugs come from treating one level as if it were
+another.
+
+Example: a bridge that releases funds on chain B after seeing an event
+on chain A must define how final that event must be. Seeing a
+transaction in a block is not the same as accepting that the event can
+never be removed from the canonical history. If the bridge treats
+tentative state as final state, the bridge has imported the source
+chain's reorg risk into its own asset accounting.
+
+\subsection{Determinism Does Not Eliminate Implementation Risk}
+
+A protocol can be deterministic on paper and still fail in
+implementation.
+
+Possible causes include:
+
+\begin{itemize}
+\tightlist
+\item
+  Client bugs.
+\item
+  Parser differences.
+\item
+  Integer overflow or underflow in a client implementation.
+\item
+  Inconsistent handling of malformed data.
+\item
+  Different interpretations of serialization rules.
+\item
+  Non-deterministic iteration over maps or sets.
+\item
+  Platform-specific behavior.
+\item
+  Incorrect gas or resource accounting.
+\item
+  Database corruption or state-pruning errors.
+\end{itemize}
+
+This is why blockchain security is not only smart contract security. The
+replicated state machine depends on correct clients, correct
+specifications, compatible implementations, and robust handling of
+adversarial data.
+
+If a malformed block causes one client to accept and another to reject,
+the failure is not at the application layer. The replicated machine has
+split on the meaning of its transition rules.
+
+\section{Permissionless Inputs and Adversarial Execution}
+
+\subsection{Permissionless Means Attackers Are Normal Users}
+
+In many traditional systems, a backend receives requests from
+authenticated users through controlled interfaces. Attackers may still
+send malicious requests, but the system often has additional
+chokepoints: web servers, rate limits, IP-based controls, account
+review, fraud teams, manual rollback, or privileged database access.
+
+Public blockchains change the default.
+
+If a function, instruction, transaction type, or message path is public,
+an attacker can usually call it. If a contract can be composed with, an
+attacker can compose with it. If a state can be read, an attacker can
+simulate against it. If a transaction can be frontrun, copied,
+sandwiched, delayed, or backrun, someone may try.
+
+The attacker is not outside the system. The attacker is a participant
+using the system's own rules.
+
+This is the permissionless input model:
+
+\begin{lstlisting}
+Any allowed actor may submit any syntactically valid input,
+at any allowed time,
+with any allowed parameters,
+in any allowed sequence,
+to any public entry point,
+as long as they can pay the required costs.
+\end{lstlisting}
+
+That is the baseline. Then you add the chain-specific details: mempools,
+fees, account models, signer semantics, compute limits, validator
+behavior, sequencer rules, relayers, governance, and off-chain
+infrastructure.
+
+\subsection{Attackers Choose Edge Cases, Not Happy Paths}
+
+A user story says:
+
+\begin{lstlisting}
+Alice deposits collateral, borrows conservatively, repays later, and withdraws.
+\end{lstlisting}
+
+An attacker asks:
+
+\begin{lstlisting}
+Can I deposit and withdraw in the same transaction?
+Can I manipulate the price before borrowing?
+Can I enter with zero shares?
+Can I donate assets directly to skew accounting?
+Can I call through a contract that reenters?
+Can I create many accounts?
+Can I force rounding to favor me?
+Can I make another user's operation fail?
+Can I trigger a state where exits are impossible?
+Can I exploit a stale cache?
+Can I submit the same message on another chain?
+Can I reorder operations so the invariant fails?
+\end{lstlisting}
+
+The difference is not attitude. It is method.
+
+Security review is adversarial state exploration. It asks what the
+transition system permits, not what the designers expected honest users
+to do.
+
+\subsection{Public State Changes the Defender's Burden}
+
+On-chain systems often expose state, code, events, pending transactions,
+liquidity, prices, governance proposals, and privileged roles. Attackers
+can inspect them cheaply. They can simulate transactions before sending
+them. They can fork mainnet locally. They can watch pending
+transactions. They can build bots that react faster than humans.
+
+Public state has benefits: auditability, verifiability, composability,
+and independent monitoring. But it also changes the defensive burden.
+
+Do not rely on:
+
+\begin{itemize}
+\tightlist
+\item
+  Hidden contract logic.
+\item
+  Attackers not knowing the current state.
+\item
+  Attackers not finding a profitable ordering.
+\item
+  Attackers not composing your protocol with another.
+\item
+  Attackers not noticing a governance proposal.
+\item
+  Attackers not simulating the outcome.
+\item
+  Attackers behaving like UI users.
+\end{itemize}
+
+In public systems, obscurity is usually temporary. Security must live in
+the transition rules, economic assumptions, and operational controls.
+
+\subsection{The Adversary Controls More Than Transaction Parameters}
+
+At minimum, an attacker controls the transactions they submit. Often
+they can influence more:
+
+\begin{itemize}
+\tightlist
+\item
+  Timing: when to submit, delay, replace, or cancel.
+\item
+  Ordering: through priority fees, private order flow, builder
+  relationships, or sequencer influence.
+\item
+  Atomicity: bundling multiple operations in one transaction.
+\item
+  Call graph: routing through contracts or programs that trigger
+  callbacks.
+\item
+  Identity surface: creating many accounts or addresses.
+\item
+  Liquidity: moving prices temporarily.
+\item
+  Governance power: buying, borrowing, or bribing votes.
+\item
+  Infrastructure view: choosing which RPC, relayer, indexer, or frontend
+  to interact with.
+\item
+  Cross-domain timing: exploiting finality gaps between chains or
+  layers.
+\end{itemize}
+
+The exact powers differ by system. The habit is the same: make the
+adversary's powers explicit.
+
+Bad security reasoning says:
+
+\begin{lstlisting}
+No rational user would do that.
+\end{lstlisting}
+
+Better security reasoning says:
+
+\begin{lstlisting}
+Can any valid actor do that, and would doing it improve their position?
+\end{lstlisting}
+
+\subsection{Rejection Is a Security Boundary}
+
+A blockchain system is defined as much by what it rejects as by what it
+accepts.
+
+Rejection can happen at several layers:
+
+\begin{itemize}
+\tightlist
+\item
+  A peer rejects malformed network data.
+\item
+  A node rejects an invalid transaction.
+\item
+  A block builder refuses to include a transaction.
+\item
+  A validator rejects an invalid block.
+\item
+  A contract reverts.
+\item
+  A program returns an error.
+\item
+  A bridge rejects a proof.
+\item
+  A governance executor rejects a payload that has not passed the
+  timelock.
+\end{itemize}
+
+For reviewers, every rejection path deserves attention:
+
+\begin{itemize}
+\tightlist
+\item
+  Is the rejection condition complete?
+\item
+  Is it checked before any irreversible side effect?
+\item
+  Does failure revert all state changes or only some?
+\item
+  Can the rejection be triggered to grief others?
+\item
+  Is rejection deterministic across validators?
+\item
+  Does the caller learn enough to adapt and exploit?
+\item
+  Does the system fail closed or fail open?
+\end{itemize}
+
+In many smart contract exploits, the missing line is a missing rejection
+condition:
+
+\begin{lstlisting}
+require(caller == owner)
+require(amount <= balance)
+require(message_not_already_used)
+require(price_is_fresh)
+require(account.owner == expected_program)
+require(output_root_is_final)
+\end{lstlisting}
+
+But a rejection condition is not automatically correct just because it
+exists. It may check the wrong authority, use stale state, validate the
+wrong account, trust the wrong domain, or run after an external call.
+
+\subsection{Adversarial Execution Includes Honest-Looking Transactions}
+
+Not every harmful transaction is obviously malicious.
+
+A transaction can be:
+
+\begin{itemize}
+\tightlist
+\item
+  Signed by the legitimate key.
+\item
+  Routed through a normal UI.
+\item
+  Included by an honest validator.
+\item
+  Valid under the protocol rules.
+\item
+  Economically profitable because of an unintended state interaction.
+\end{itemize}
+
+This is common in wallet drainers, approval phishing, governance
+manipulation, oracle manipulation, liquidation races, and MEV
+extraction. The security failure may not be ``someone hacked
+consensus.'' It may be that the system allowed a user, bot, admin,
+relayer, or contract to authorize a transition whose consequences were
+not understood.
+
+This is why the next chapter treats assets, ownership, authority, and
+trust boundaries as first-class topics.
+
+\section{Safety, Liveness, and Fault Assumptions}
+
+\subsection{Safety: Bad States Must Not Happen}
+
+Safety properties say that certain bad things must never happen. In
+blockchain security, safety is about preventing unacceptable states or
+conflicting histories.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  No one can spend the same coin twice in the finalized history.
+\item
+  No account can transfer funds without authorization.
+\item
+  No accepted block can create coins outside the issuance rules.
+\item
+  No bridge message can be executed twice.
+\item
+  No finalized checkpoint conflicts with another finalized checkpoint
+  under the protocol's assumptions.
+\item
+  No vault can issue claims that exceed redeemable assets under its
+  accounting rules.
+\item
+  No governance action can execute before the required delay.
+\end{itemize}
+
+Safety failures are usually severe because the bad state has already
+happened. A later transaction may repair accounting, compensate users,
+or pause the system, but the safety violation itself is part of history
+unless the chain or application has an explicit recovery mechanism.
+
+In state-machine terms, safety asks:
+
+\begin{lstlisting}
+Can any valid sequence of transitions reach a forbidden state?
+\end{lstlisting}
+
+If yes, the system is unsafe with respect to that property.
+
+\subsection{Liveness: Necessary Progress Must Remain Possible}
+
+Liveness properties say that something required can eventually happen.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  Valid transactions can eventually be included.
+\item
+  A user can eventually withdraw funds.
+\item
+  A rollup user can eventually force inclusion or exit.
+\item
+  A bridge message can eventually be relayed.
+\item
+  A liquidation system can eventually clear unhealthy debt.
+\item
+  A governance proposal can eventually execute after approval.
+\item
+  A paused protocol can eventually recover through a defined path.
+\end{itemize}
+
+Liveness failures can be just as destructive as safety failures. A
+protocol that never loses accounting correctness but traps user funds
+forever is not secure in any meaningful sense. A chain that preserves
+safety by halting may be preferable to accepting conflicting histories,
+but the halt is still a liveness failure with economic consequences.
+
+In state-machine terms, liveness asks:
+
+\begin{lstlisting}
+From an allowed state, can the system still make required progress
+under the stated assumptions?
+\end{lstlisting}
+
+If no, the system is live only on paper.
+
+\subsection{Safety and Liveness Pull Against Each Other}
+
+Distributed systems often face a tradeoff between preserving safety and
+maintaining liveness under adverse network conditions.
+
+If the network is partitioned, a system may choose to stop finalizing
+rather than finalize conflicting histories. That preserves safety but
+sacrifices liveness. A system that continues accepting conflicting
+histories may preserve local availability but violate global safety.
+
+Blockchain designs make different choices:
+
+\begin{itemize}
+\tightlist
+\item
+  Nakamoto-style systems may continue producing competing branches and
+  resolve them probabilistically through fork choice.
+\item
+  BFT-style systems may stop finalizing if they cannot gather enough
+  votes.
+\item
+  Rollups may allow users to exit through L1 mechanisms if the sequencer
+  stops cooperating, but only if the escape hatch is actually
+  implemented and usable.
+\item
+  Bridges may wait for deeper finality before releasing funds,
+  sacrificing speed to reduce reorg risk.
+\end{itemize}
+
+The security reviewer should not ask ``Is it decentralized?'' as a vague
+comfort phrase. Ask:
+
+\begin{lstlisting}
+Under which network and adversary assumptions is safety preserved?
+Under which assumptions is progress guaranteed?
+What happens outside those assumptions?
+\end{lstlisting}
+
+\subsection{Fault Assumptions Are Part of the Security Model}
+
+No blockchain system is secure without assumptions. The assumptions may
+be cryptographic, economic, network-level, implementation-level, or
+human.
+
+Common assumptions include:
+
+\begin{itemize}
+\tightlist
+\item
+  Hash functions are collision resistant for practical adversaries.
+\item
+  Signature schemes cannot be forged.
+\item
+  Honest nodes execute the protocol rules correctly.
+\item
+  A sufficient fraction of block production power follows the protocol.
+\item
+  The network eventually delivers messages.
+\item
+  Validators with enough stake are not colluding to violate safety.
+\item
+  At least one honest relayer exists for liveness.
+\item
+  A sequencer cannot permanently censor without users escaping through
+  L1.
+\item
+  A multisig threshold is not compromised.
+\item
+  An oracle committee reports fresh and accurate prices within defined
+  bounds.
+\item
+  A client bug does not affect a supermajority of economic weight.
+\item
+  Governance voters have enough time and information to react to
+  malicious proposals.
+\end{itemize}
+
+These are not decorative. They determine the boundary of the security
+claim.
+
+Weak writing says:
+
+\begin{lstlisting}
+The protocol is secure because it is decentralized.
+\end{lstlisting}
+
+Serious writing says:
+
+\begin{lstlisting}
+The protocol preserves safety if fewer than one-third of voting power is Byzantine during the relevant finality window, clients agree on the transition rules, and the network eventually delivers messages. It preserves withdrawal liveness if at least one honest actor can submit the exit transaction and the base layer remains live.
+\end{lstlisting}
+
+The second statement can be attacked, tested, debated, and improved. The
+first cannot.
+
+\subsection{Byzantine, Rational, and Accidental Faults Are Different}
+
+Faults are not all the same.
+
+A crash fault occurs when a component stops. A Byzantine fault occurs
+when a component behaves arbitrarily: lying, equivocating, censoring,
+fabricating data, or behaving inconsistently toward different peers. A
+rational adversary behaves strategically to maximize payoff. An
+accidental fault may come from a bug, misconfiguration, operator error,
+or misunderstood integration.
+
+Blockchain systems often face all of these at once:
+
+\begin{itemize}
+\tightlist
+\item
+  A validator can go offline.
+\item
+  A validator can equivocate.
+\item
+  A block builder can reorder transactions for profit.
+\item
+  A user can sign a malicious approval by mistake.
+\item
+  A developer can deploy with the wrong address.
+\item
+  A client can parse a malformed block incorrectly.
+\item
+  A governance participant can vote for a payload they did not inspect.
+\item
+  A relayer can stop submitting messages because fees are uneconomic.
+\end{itemize}
+
+Do not collapse these into one generic ``attacker.'' Each fault type
+requires different controls.
+
+\begin{itemize}
+\tightlist
+\item
+  Crash faults need redundancy and recovery.
+\item
+  Byzantine faults need validation, quorum assumptions, slashing, fraud
+  proofs, or cryptographic proofs.
+\item
+  Rational faults need incentive analysis and payoff bounds.
+\item
+  Human faults need operational controls, interfaces, delays, and review
+  processes.
+\end{itemize}
+
+\subsection{Time and Finality Are Security Parameters}
+
+Many blockchain systems are secure only relative to time.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  A Bitcoin payment becomes harder to reverse as more blocks are built
+  after it, under the assumption that the attacker controls less hash
+  power than the honest network.\footnote{Satoshi Nakamoto, ``Bitcoin: A
+    Peer-to-Peer Electronic Cash System'',
+    https://bitcoin.org/bitcoin.pdf.}
+\item
+  A proof-of-stake chain may justify or finalize checkpoints after a
+  voting process.
+\item
+  A rollup withdrawal may require a challenge window.
+\item
+  An oracle price may be safe only if it is fresh.
+\item
+  A governance delay may be safe only if users can detect and respond
+  before execution.
+\item
+  A liquidation may be safe only if keepers can act before bad debt
+  accumulates.
+\end{itemize}
+
+Security review should therefore ask:
+
+\begin{lstlisting}
+When is this state considered final enough for the next action?
+How long can an attacker delay progress?
+How stale can this input become before it is unsafe?
+How much time do defenders have to react?
+\end{lstlisting}
+
+Time is not an implementation detail. It is part of the threat model.
+
+\section{Security Failures as Broken State Transitions}
+
+\subsection{The Most Important Distinction}
+
+There are two broad classes of state-machine failure:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  The system accepts a transition that should be invalid under its
+  explicit rules.
+\item
+  The system accepts a transition that is valid under its explicit rules
+  but violates the intended security properties.
+\end{enumerate}
+
+The first class is usually a protocol or implementation failure.
+Examples include a signature verification bug, a consensus client bug, a
+parser discrepancy, or an invalid block accepted by validators.
+
+The second class is the center of application-layer blockchain security.
+The chain does exactly what the code says. The code does not say what
+the protocol actually needed.
+
+Most smart contract exploits are in the second class.
+
+That is why this book will repeatedly separate:
+
+\begin{lstlisting}
+rule validity
+from
+security intent
+\end{lstlisting}
+
+\subsection{A Taxonomy of Broken Transitions}
+
+The state-machine model gives us a clean failure taxonomy.
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Failure type
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+State-machine description
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Example
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Invalid transition accepted & The validator accepts a transition outside
+the rules & Invalid block, forged signature, client consensus bug \\
+Valid transition violates intent & The rules allow a reachable state
+that breaks an invariant & Accounting bug, oracle manipulation, share
+inflation \\
+Unauthorized transition & State changes under the wrong authority &
+Missing owner check, wrong signer, account substitution \\
+Duplicate transition & A one-time transition executes more than once &
+Replay, double claim, bridge message reused \\
+Missing transition & A required state change cannot happen & Stuck
+withdrawal, frozen queue, no recovery path \\
+Wrong ordering & The same inputs in a different order produce harmful
+state & Front-running, sandwiching, liquidation race \\
+Divergent replicas & Honest nodes compute different states from the same
+history & Client bug, nondeterminism, parser inconsistency \\
+Unsafe external assumption & Transition relies on a fact not guaranteed
+by the system & Stale oracle, unfinalized source-chain event,
+compromised relayer \\
+\end{longtable}
+}
+
+This taxonomy is not exhaustive, but it is a better starting point than
+memorizing bug names. Bug names are symptoms. Broken transitions are
+causes.
+
+\subsection{Valid Exploits Are Still Exploits}
+
+Suppose a vault has this simplified design:
+
+\begin{lstlisting}
+State:
+  asset_balance
+  total_shares
+  shares[user]
+
+deposit(amount):
+  if total_shares == 0:
+    minted = amount
+  else:
+    minted = amount * total_shares / asset_balance
+
+  transfer amount from user to vault
+  shares[user] += minted
+  total_shares += minted
+
+withdraw(shares_to_burn):
+  amount = shares_to_burn * asset_balance / total_shares
+  shares[user] -= shares_to_burn
+  total_shares -= shares_to_burn
+  transfer amount from vault to user
+\end{lstlisting}
+
+At first glance, the transition rules look reasonable. Deposits mint
+shares. Withdrawals burn shares. The exchange rate comes from assets
+divided by shares.
+
+Now ask state-machine questions:
+
+\begin{itemize}
+\tightlist
+\item
+  Can \passthrough{\lstinline!asset\_balance!} change without
+  \passthrough{\lstinline!total\_shares!} changing?
+\item
+  What happens when \passthrough{\lstinline!total\_shares!} is very
+  small?
+\item
+  Which way does integer division round?
+\item
+  Can a deposit mint zero shares?
+\item
+  Does the first depositor get special power over the exchange rate?
+\item
+  Is direct donation to the vault part of the transition model?
+\end{itemize}
+
+If an attacker can become the first depositor with a tiny amount, then
+donate assets directly to increase
+\passthrough{\lstinline!asset\_balance!}, they may manipulate the share
+price so later depositors receive too few shares because of rounding.
+Every individual transaction may be valid. The exploit is a valid path
+through the state machine that violates the intended fairness and
+accounting properties.
+
+The lesson is not ``all vaults are broken.'' The lesson is that security
+properties must be encoded and tested against all reachable states,
+including states produced by unusual but valid sequences.
+
+\subsection{The Chain Protects Its Own Rules, Not Your Intent}
+
+Base-layer validation enforces base-layer rules. It does not know your
+business logic unless your business logic is encoded in executable
+rules.
+
+A chain can verify:
+
+\begin{itemize}
+\tightlist
+\item
+  This signature is valid.
+\item
+  This nonce is correct.
+\item
+  This transaction pays enough fee.
+\item
+  This block follows consensus rules.
+\item
+  This contract execution ended in a valid state according to the VM.
+\end{itemize}
+
+The chain generally cannot verify:
+
+\begin{itemize}
+\tightlist
+\item
+  This lending market's risk parameters are economically safe.
+\item
+  This oracle reflects a fair market price.
+\item
+  This governance proposal is not malicious.
+\item
+  This bridge message corresponds to a source event that your protocol
+  should trust.
+\item
+  This user understood the approval they signed.
+\item
+  This vault share price is fair to later depositors.
+\end{itemize}
+
+Those properties must be designed, constrained, monitored, or explicitly
+accepted as trust assumptions.
+
+\subsection{Reorgs and Ordering Are State-Transition Problems}
+
+A reorg is not only a chain-layer curiosity. It changes which state
+transitions are part of canonical history.
+
+Suppose a protocol observes:
+
+\begin{lstlisting}
+Block A includes deposit.
+Protocol credits user on another domain.
+Block A is reorged out.
+Deposit no longer exists in canonical history.
+Credit remains on other domain.
+\end{lstlisting}
+
+The failure is a mismatch between state machines. One domain treated a
+transition as final before the other domain's finality assumptions
+justified it.
+
+Ordering has similar consequences. Consider two transactions:
+
+\begin{lstlisting}
+tx_1: oracle price update
+tx_2: borrow against collateral
+\end{lstlisting}
+
+The resulting state may differ depending on whether
+\passthrough{\lstinline!tx\_1!} happens before
+\passthrough{\lstinline!tx\_2!} or after it. If attackers can influence
+ordering, they can sometimes choose which state transition path the
+system takes.
+
+That is why mempools, block production, finality, bridges, and MEV
+belong in a blockchain security curriculum. They are not separate from
+smart contract security. They determine the input order and history that
+the state machine accepts.
+
+\subsection{Security Review Starts With Transition Questions}
+
+When you encounter a new blockchain system, start with these questions:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  What is the state?
+\item
+  What are the entry points that can change it?
+\item
+  What are the validity rules for each entry point?
+\item
+  Who or what provides authority for each transition?
+\item
+  What external facts does the transition trust?
+\item
+  What ordering assumptions does the transition rely on?
+\item
+  What must remain true after every transition?
+\item
+  What required transitions must remain possible?
+\item
+  What happens if the input is delayed, duplicated, reordered, replayed,
+  or removed from history?
+\item
+  What happens if an authorized actor behaves maliciously or
+  irrationally?
+\end{enumerate}
+
+These questions are intentionally repetitive. Repetition is how you
+avoid being fooled by surface complexity.
+
+\section{Worked Example: A Minimal Escrow State Machine}
+
+Consider a simple escrow:
+
+\begin{lstlisting}
+State:
+  buyer
+  seller
+  arbiter
+  amount
+  funded: boolean
+  released: boolean
+  refunded: boolean
+
+Transitions:
+  fund()
+  release()
+  refund()
+  arbitrate_release()
+  arbitrate_refund()
+\end{lstlisting}
+
+The state diagram is:
+
+\begin{lstlisting}
+stateDiagram-v2
+    [*] --> Unfunded
+    Unfunded --> Funded: fund
+    Funded --> Released: release / arbitrate_release
+    Funded --> Refunded: refund / arbitrate_refund
+    Released --> [*]
+    Refunded --> [*]
+\end{lstlisting}
+
+A product description might say:
+
+\begin{lstlisting}
+The buyer funds the escrow. If delivery succeeds, the seller is paid.
+If delivery fails, the buyer is refunded. The arbiter resolves disputes.
+\end{lstlisting}
+
+That is not yet a security model.
+
+A state-machine review asks for explicit transition rules:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Transition
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Caller
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Preconditions
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+State change
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Value movement
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+\passthrough{\lstinline!fund()!} & \passthrough{\lstinline!buyer!} &
+\passthrough{\lstinline!funded == false!} and payment received &
+\passthrough{\lstinline!funded = true!} & Buyer deposits
+\passthrough{\lstinline!amount!} into escrow \\
+\passthrough{\lstinline!release()!} & \passthrough{\lstinline!buyer!} &
+\passthrough{\lstinline!funded == true!},
+\passthrough{\lstinline!released == false!},
+\passthrough{\lstinline!refunded == false!} &
+\passthrough{\lstinline!released = true!} & Escrow pays seller \\
+\passthrough{\lstinline!refund()!} & \passthrough{\lstinline!seller!} &
+\passthrough{\lstinline!funded == true!},
+\passthrough{\lstinline!released == false!},
+\passthrough{\lstinline!refunded == false!} &
+\passthrough{\lstinline!refunded = true!} & Escrow pays buyer \\
+\passthrough{\lstinline!arbitrate\_release()!} &
+\passthrough{\lstinline!arbiter!} &
+\passthrough{\lstinline!funded == true!},
+\passthrough{\lstinline!released == false!},
+\passthrough{\lstinline!refunded == false!} &
+\passthrough{\lstinline!released = true!} & Escrow pays seller \\
+\passthrough{\lstinline!arbitrate\_refund()!} &
+\passthrough{\lstinline!arbiter!} &
+\passthrough{\lstinline!funded == true!},
+\passthrough{\lstinline!released == false!},
+\passthrough{\lstinline!refunded == false!} &
+\passthrough{\lstinline!refunded = true!} & Escrow pays buyer \\
+\end{longtable}
+}
+
+Now write invariants:
+
+\begin{lstlisting}
+released and refunded cannot both be true
+
+if released == true:
+  seller has been paid exactly once
+
+if refunded == true:
+  buyer has been refunded exactly once
+
+if funded == false:
+  release and refund transitions cannot transfer funds
+
+only buyer can voluntarily release
+only seller can voluntarily refund
+only arbiter can resolve disputes
+\end{lstlisting}
+
+The forbidden states should be visible before code review begins:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Forbidden state
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Why it matters
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Required guard
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+\passthrough{\lstinline!released == true!} and
+\passthrough{\lstinline!refunded == true!} & Pays both sides from one
+escrow & Every payout transition checks both terminal flags \\
+\passthrough{\lstinline!funded == false!} and funds transferred out &
+Pays from an unfunded escrow & Payouts require successful funding \\
+Seller paid more than once & Double spend against escrow balance & Mark
+terminal state before unsafe external control flow \\
+Buyer refunded more than once & Duplicate refund & Consume
+withdrawal/refund state exactly once \\
+Arbiter changed by one party during dispute & Authority capture &
+Arbiter changes require explicit, delayed, reviewable authority \\
+Terminal state reached but transfer failed & Accounting says paid while
+value did not move & State change and value movement must have
+consistent failure behavior \\
+\end{longtable}
+}
+
+Now look for broken transitions:
+
+\begin{itemize}
+\tightlist
+\item
+  What if \passthrough{\lstinline!release()!} transfers funds before
+  setting \passthrough{\lstinline!released = true!} and the recipient
+  can reenter?
+\item
+  What if \passthrough{\lstinline!arbitrate\_release()!} forgets to
+  check \passthrough{\lstinline!refunded == false!}?
+\item
+  What if \passthrough{\lstinline!fund()!} can be called twice and
+  overwrites \passthrough{\lstinline!amount!}?
+\item
+  What if \passthrough{\lstinline!refund()!} sends funds to
+  \passthrough{\lstinline!msg.sender!} instead of
+  \passthrough{\lstinline!buyer!}?
+\item
+  What if the arbiter address can be changed by the seller?
+\item
+  What if the token used for payment takes a fee on transfer?
+\item
+  What if the transfer fails but the state is marked released?
+\item
+  What if neither buyer nor seller cooperates and the arbiter key is
+  lost?
+\end{itemize}
+
+Notice the range: authorization, accounting, external calls, token
+semantics, liveness, and operational risk all appear in a tiny state
+machine. The same method scales to larger systems.
+
+\section{Practical Discipline: Do Not Start With Bug Names}
+
+Beginners often ask:
+
+\begin{lstlisting}
+Is this vulnerable to reentrancy?
+Is this vulnerable to oracle manipulation?
+Is this vulnerable to replay?
+\end{lstlisting}
+
+Those are useful questions, but they are not the first questions.
+
+Start earlier:
+
+\begin{lstlisting}
+What transition changes value?
+What authority permits it?
+What invariant should it preserve?
+What external fact does it rely on?
+What happens if the transition occurs twice?
+What happens if it occurs before or after another transition?
+What happens if it never occurs?
+\end{lstlisting}
+
+Then bug classes become labels for specific ways the transition model
+can fail.
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Bug label
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+State-machine interpretation
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Reentrancy & External control flow allows another transition before
+invariants are restored \\
+Replay & An input is accepted again after it should have been
+consumed \\
+Oracle manipulation & A transition depends on an external value whose
+production rules do not support the claimed property \\
+MEV & Observation, inclusion, or ordering power changes which valid
+transition sequence executes \\
+Bridge failure & State, proof, finality, domain separation, or trust
+assumptions do not line up across machines \\
+\end{longtable}
+}
+
+This is how the rest of the book will proceed.
+
+\section{Review Questions}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  What information belongs in ``state'' for a UTXO system and for an
+  account-based smart contract system?
+\item
+  What is the difference between a transaction object and the state
+  transition it causes?
+\item
+  Why can a transaction be valid under explicit rules but unsafe under
+  protocol intent?
+\item
+  Why must replicated blockchain execution be deterministic?
+\item
+  Give one safety property and one liveness property for a bridge or
+  lending protocol.
+\item
+  Why does ``the chain accepted the transaction'' not prove that the
+  application was secure?
+\item
+  What assumption is being made when a system claims safety below a
+  one-third Byzantine threshold?
+\end{enumerate}
+
+\section{Applied Exercises}
+
+\subsection{Exercise 1: Model a Token Transfer}
+
+Write a state-machine model for a simple token with:
+
+\begin{itemize}
+\tightlist
+\item
+  \passthrough{\lstinline!balances[address]!}
+\item
+  \passthrough{\lstinline!total\_supply!}
+\item
+  \passthrough{\lstinline!transfer(sender, recipient, amount)!}
+\item
+  \passthrough{\lstinline!mint(recipient, amount)!}
+\item
+  \passthrough{\lstinline!burn(holder, amount)!}
+\end{itemize}
+
+For each transition, write:
+
+\begin{itemize}
+\tightlist
+\item
+  Required authority.
+\item
+  Validity conditions.
+\item
+  State updates.
+\item
+  At least two invariants.
+\item
+  A transition table.
+\end{itemize}
+
+Then answer: which invariants depend on the mint authority being honest
+or constrained?
+
+\subsection{Exercise 2: Separate Rule Validity From Intent}
+
+Consider a protocol that allows anyone to deposit collateral and borrow
+up to 80 percent of the collateral's oracle value.
+
+The contract checks:
+
+\begin{lstlisting}
+collateral_value * 80 / 100 >= borrowed_value
+\end{lstlisting}
+
+Assume the oracle price can be manipulated for one block using a
+low-liquidity pool.
+
+Answer:
+
+\begin{itemize}
+\tightlist
+\item
+  Is the borrow transaction valid under the contract's explicit rule?
+\item
+  Which security property is violated?
+\item
+  What external assumption was false?
+\item
+  Is this a safety failure, liveness failure, or both?
+\end{itemize}
+
+\subsection{Exercise 3: Identify Liveness Risk}
+
+A rollup says users can withdraw through L1 if the sequencer censors
+them. The withdrawal path requires a proof generated by an off-chain
+service run by the rollup team.
+
+Answer:
+
+\begin{itemize}
+\tightlist
+\item
+  What safety property is the escape hatch supposed to protect?
+\item
+  What liveness assumption does it introduce?
+\item
+  What happens if the sequencer is censoring and the proof service is
+  down?
+\item
+  How would you rewrite the security claim more honestly?
+\end{itemize}
+
+\subsection{Exercise 4: Broken Transition Taxonomy}
+
+Classify each failure:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  A bridge accepts the same message twice.
+\item
+  A validator client accepts a block another client rejects.
+\item
+  A vault lets the first depositor manipulate share price through direct
+  donation.
+\item
+  A governance proposal executes before the timelock expires.
+\item
+  A withdrawal queue can become permanently stuck because one recipient
+  reverts.
+\item
+  A frontend asks users to sign a transaction that grants unlimited
+  token approval to an attacker.
+\end{enumerate}
+
+For each, identify:
+
+\begin{itemize}
+\tightlist
+\item
+  The relevant state.
+\item
+  The broken transition.
+\item
+  The missing or false assumption.
+\item
+  Whether the primary failure is safety, liveness, authorization,
+  ordering, or user-side authority.
+\end{itemize}
+
+The Part I Integrated Lab will combine this chapter's state-machine
+method with assets, authority, threat modeling, and invariants. These
+exercises are intentionally smaller: they train the pieces.
+
+\section{Key Takeaways}
+
+\begin{itemize}
+\tightlist
+\item
+  A blockchain is best understood as a replicated state machine
+  operating under adversarial inputs.
+\item
+  State is not only balances. It includes every variable, commitment,
+  role, parameter, queue, nonce, proof status, and authority record that
+  affects future behavior.
+\item
+  Transactions are inputs. State transitions are the changes caused by
+  applying inputs under rules.
+\item
+  Validity is layered. A transaction can be syntactically valid, signed,
+  included, and executable while still violating protocol intent.
+\item
+  Replication requires deterministic execution. Honest nodes must
+  compute the same result from the same starting state and ordered
+  inputs.
+\item
+  Consensus and fork choice select history. Execution applies transition
+  rules to that history.
+\item
+  Safety means forbidden states or conflicting histories do not happen.
+  Liveness means required progress remains possible.
+\item
+  Fault assumptions are part of the security claim. If they are vague,
+  the security claim is vague.
+\item
+  Most serious application-layer exploits are valid paths through an
+  underspecified or incorrectly constrained state machine.
+\end{itemize}
+
+\section{Further Reading}
+
+\begin{itemize}
+\tightlist
+\item
+  Leslie Lamport,
+  \href{https://lamport.azurewebsites.net/pubs/state-machine.pdf}{``Computation
+  and State Machines''}. A concise foundation for thinking about
+  computation as state machines and reasoning about invariants.
+\item
+  Gavin Wood,
+  \href{https://ethereum.github.io/yellowpaper/paper.pdf}{``Ethereum: A
+  Secure Decentralised Generalised Transaction Ledger''}. The formal
+  Ethereum specification, especially the blockchain paradigm and
+  state-transition framing.
+\item
+  ethereum.org,
+  \href{https://ethereum.org/developers/docs/transactions/}{``Transactions''}.
+  A practical introduction to Ethereum transactions as signed
+  state-changing instructions.
+\item
+  ethereum.org,
+  \href{https://ethereum.org/developers/docs/blocks/}{``Blocks''}. A
+  practical introduction to blocks as ordered batches of transactions
+  linked by hashes.
+\item
+  Satoshi Nakamoto, \href{https://bitcoin.org/bitcoin.pdf}{``Bitcoin: A
+  Peer-to-Peer Electronic Cash System''}. The original Bitcoin paper,
+  especially the network, proof-of-work, and double-spend sections.
+\item
+  Bowen Alpern and Fred B. Schneider, ``Defining Liveness'' and
+  ``Recognizing Safety and Liveness.'' These papers are the classical
+  formal background for the safety/liveness distinction used throughout
+  distributed systems.
+\end{itemize}

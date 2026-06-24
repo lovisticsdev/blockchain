@@ -1,0 +1,471 @@
+\chapter{Move's Resource and Object Model}
+
+\section{Purpose}
+
+\begin{principlebox}
+Move security review starts with types, abilities, module boundaries, storage location, and explicit authority values. The language prevents some classes of asset mistakes, but it does not design the protocol for you.
+\end{principlebox}
+
+The previous chapters taught three execution-model instincts. Bitcoin forces reviewers to think in spendable outputs. Ethereum forces reviewers to reconstruct ordered account-state transitions and EVM frames. Solana forces reviewers to validate explicit account lists. Move introduces a different discipline: valuable state is represented as typed values with restricted abilities, and the module that defines a type controls the most important operations on that type.
+
+This is not a cosmetic difference. In many smart-contract systems, an asset is a row in storage plus code that promises not to duplicate it. In Move, the programmer can make valuable things uncopyable, undroppable, and available only through module-controlled APIs. That gives the reviewer stronger starting guarantees than an untyped storage map.
+
+The mistake is to overlearn that lesson. Move's type system can prevent accidental copying, discarding, certain reference errors, and many storage-shape mistakes. It does not prove that the protocol's exchange rate is correct, that a capability should exist, that an object belongs to the expected user, that a shared object has adequate authorization checks, that an oracle is honest, or that governance cannot upgrade the module into something worse.
+
+This chapter teaches Move as a security model, not as a programming tutorial. The review sequence is:
+
+\begin{codeblock}
+type
+  -> abilities
+  -> defining module
+  -> public API
+  -> storage location
+  -> authority value
+  -> transaction input
+  -> invariant
+\end{codeblock}
+
+That sequence is the point of the chapter.
+
+\section{Resources, Abilities, and Linear Assets}
+
+\subsection{Move Is a Resource Language}
+
+Move was designed so that valuable values can behave like resources rather than ordinary copyable data. The Move Book describes structs as user-defined types and explains that only structs with the \texttt{key} ability can be saved directly in persistent global storage.\footnote{\href{https://move-language.github.io/move/structs-and-resources.html}{The Move Book, ``Structs and Resources''}.} The security idea is broader than the storage rule: an asset can be modeled as a value whose type controls whether it can be copied, dropped, stored, moved, unpacked, or created.
+
+By default, a Move value is not a casual ledger entry. It is owned by some local variable, field, or storage location. Moving it transfers ownership of the value. If the type lacks \texttt{copy}, the value cannot be duplicated by value. If the type lacks \texttt{drop}, the value cannot simply disappear at the end of execution. If the type lacks the right storage abilities, it cannot be placed into persistent storage.
+
+\begin{codeblock}
+ordinary storage-map habit:
+    balances[user] += amount
+    trust code not to mint accidentally
+
+Move resource habit:
+    create a typed value
+    move the value
+    store it only where its abilities allow
+    destroy it only through module-controlled code
+\end{codeblock}
+
+This does not mean every Move asset is literally a single resource value moving between accounts. Real protocols still use counters, tables, aggregators, object fields, fungible-asset abstractions, and chain-specific frameworks. The review habit remains: identify the valuable type and ask which operations the type system permits before asking what the code does.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[node distance=9mm and 12mm]
+\node[security node, text width=25mm] (create) {Create\\value};
+\node[security node, right=of create, text width=25mm] (move) {Move\\ownership};
+\node[security node, right=of move, text width=25mm] (store) {Store\\if allowed};
+\node[security node, right=of store, text width=25mm] (borrow) {Borrow\\reference};
+\node[security node, right=of borrow, text width=25mm] (mutate) {Mutate\\through API};
+\node[security node, right=of mutate, text width=25mm] (destroy) {Destroy\\if allowed};
+\draw[security arrow] (create) -- (move);
+\draw[security arrow] (move) -- (store);
+\draw[security arrow] (store) -- (borrow);
+\draw[security arrow] (borrow) -- (mutate);
+\draw[security arrow] (mutate) -- (destroy);
+\end{tikzpicture}
+}
+\caption{Move review follows the value lifecycle: creation, movement, storage, borrowing, mutation, and destruction.}
+\end{figure}
+
+A reviewer should therefore treat a struct declaration as security-critical. The declaration tells you whether the value is scarce, persistent, transferable, disposable, or freely duplicable. A bad Move review starts at the entry function and skims downward. A good review starts at the types and abilities.
+
+\subsection{Abilities Are Security Decisions}
+
+Move abilities control what operations are available for values of a type. Aptos documentation summarizes the four abilities as \texttt{copy}, \texttt{drop}, \texttt{store}, and \texttt{key}.\footnote{\href{https://aptos.dev/build/smart-contracts/book/abilities}{Aptos Documentation, ``Abilities''}.} They are small words with large security consequences.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.16\textwidth}>{\RaggedRight\arraybackslash}p{0.29\textwidth}X@{}}
+\toprule
+Ability & What it permits & Security question \\
+\midrule
+\texttt{copy} & Values of the type can be copied by value. & Should this value ever be duplicated, or does copying violate scarcity or authority? \\
+\texttt{drop} & Values can be discarded without being explicitly unpacked or consumed. & Can losing this value silently burn assets, authority, or evidence? \\
+\texttt{store} & Values can be stored inside persistent global-storage values. & Should this value be embeddable, wrapped, or held by other durable state? \\
+\texttt{key} & Values can be top-level resources in global storage. & Should this type be globally addressable as durable state? \\
+\bottomrule
+\end{tabularx}
+\caption{Abilities are not decoration. They are part of the protocol's authority and asset model.}
+\end{table}
+
+Ability mistakes are usually design mistakes, not syntax mistakes.
+
+\begin{failuremodebox}[Over-permissive ability]
+A protocol defines \texttt{MintCap has copy, drop, store}. The code still checks for a mint capability parameter, so the function appears protected. But the capability can be copied, discarded, or stored in places the designer did not intend. The type no longer models exclusive authority.
+\end{failuremodebox}
+
+Sometimes a permissive ability is correct. A small configuration marker may need \texttt{copy}. A harmless event-like value may need \texttt{drop}. A nested asset component may need \texttt{store}. The point is not to ban abilities. The point is to require justification.
+
+Review each valuable type with a short ability memo:
+
+\begin{codeblock}
+type AbilityMemo:
+    why copy is present or absent
+    why drop is present or absent
+    why store is present or absent
+    why key is present or absent
+    which invariant would fail if the ability changed
+\end{codeblock}
+
+This is a better first pass than searching for familiar Solidity bug names. Move's strongest protections exist before control flow begins.
+
+\section{Modules as Authority Boundaries}
+
+Move modules are not only namespaces. They are authority boundaries. A struct is declared inside a module, and the defining module controls field access and construction patterns for that type. Other modules can hold or pass values if the type and function visibility permit it, but they cannot freely inspect, pack, or unpack private fields as if the value were an unstructured byte array.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=10mm and 14mm]
+\node[security node, text width=35mm] (module) {Defining module\\declares type};
+\node[security node, below=of module, xshift=-30mm, text width=34mm] (fields) {Private fields\\pack/unpack};
+\node[security node, below=of module, xshift=30mm, text width=34mm] (api) {Public API\\entry points};
+\node[security node, below=of api, text width=34mm] (callers) {Callers\\other modules\\transactions};
+\draw[security arrow] (module) -- (fields);
+\draw[security arrow] (module) -- (api);
+\draw[security arrow] (callers) -- (api);
+\draw[security arrow] (api) -- (fields);
+\end{tikzpicture}
+\caption{The defining module controls the meaningful operations on its types through field access and exposed APIs.}
+\end{figure}
+
+The review surface is therefore the module API. Which functions create the value? Which destroy it? Which split it? Which merge it? Which mutate fields? Which expose references? Which are transaction entry points? Which can be called by friends or other modules?
+
+Move function visibility is part of the boundary. Public functions, entry functions, friend-visible functions, and internal functions expose different surfaces. Aptos security guidance emphasizes the role of \texttt{entry} functions as transaction starting points and distinguishes them from ordinary public or private functions.\footnote{\href{https://aptos.dev/build/smart-contracts/move-security-guidelines}{Aptos Documentation, ``Move Security Guidelines''}.}
+
+\begin{codeblock}
+module review:
+    list all structs
+    list abilities for each struct
+    list functions that create each valuable type
+    list functions that destroy each valuable type
+    list functions that mutate global state
+    list entry functions callable by transactions
+    list friend/public functions callable by other modules
+    list capability or signer requirements for each operation
+\end{codeblock}
+
+Friend visibility is useful, but it is not harmless. A friend module is part of the trusted computing base for the exposed operation. If an invariant depends on "only this module can do X," and a friend can also do X through a privileged helper, the invariant has a larger boundary than the headline module suggests.
+
+\section{Capabilities and Witnesses}
+
+Move protocols often express authority as values. A capability is a value that grants permission to perform an operation. A mint capability grants minting. A burn capability grants burning. An admin capability grants configuration or upgrade control. A transfer capability may allow otherwise restricted movement.
+
+\begin{codeblock}
+struct AdminCap has key {}
+struct MintCap has key {}
+struct PauseCap has key {}
+
+public fun pause(_cap: &PauseCap, vault: &mut Vault) {
+    vault.paused = true;
+}
+\end{codeblock}
+
+This is cleaner than checking a hard-coded address in every function, but it moves the security problem into capability lifecycle design.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=10mm and 14mm]
+\node[security node, text width=30mm] (init) {Initialization};
+\node[security node, right=of init, text width=30mm] (cap) {AdminCap\\or MintCap};
+\node[security node, right=of cap, text width=31mm] (storage) {Stored under\\holder};
+\node[security node, below=of storage, text width=31mm] (action) {Privileged\\operation};
+\node[security node, left=of action, text width=31mm] (risk) {Leak\\copy\\stale authority};
+\draw[security arrow] (init) -- (cap);
+\draw[security arrow] (cap) -- (storage);
+\draw[security arrow] (storage) -- (action);
+\draw[security arrow] (cap) -- (risk);
+\draw[security arrow] (risk) -- (action);
+\end{tikzpicture}
+\caption{Capability review follows issuance, storage, transfer, use, revocation, and failure if leaked or over-broad.}
+\end{figure}
+
+Ask the capability questions directly:
+
+\begin{codeblock}
+capability review:
+    who creates it?
+    how many can exist?
+    where is it stored?
+    can it be copied?
+    can it be transferred?
+    can it be wrapped or embedded?
+    can it be revoked or rotated?
+    is it narrower than the operation it authorizes?
+    what happens if it is lost?
+\end{codeblock}
+
+Witness types are related but distinct. A witness is usually a value whose type proves that a particular module participated in initialization or authorization. One-time witness patterns are common in Move ecosystems. The security question is the same as for capabilities: does possession of this value prove exactly the fact the protocol thinks it proves?
+
+Do not let the word "capability" make authority feel automatically safe. A capability is only as good as its abilities, issuance path, storage location, and use sites.
+
+\section{Storage Models: Core Move, Aptos, and Sui}
+
+\subsection{Global Storage in Core Move and Aptos}
+
+Core Move global storage can be understood as a map from address and resource type to resource value. The global-storage operators are \texttt{move\_to}, \texttt{move\_from}, \texttt{borrow\_global}, \texttt{borrow\_global\_mut}, and \texttt{exists}.\footnote{\href{https://move-language.github.io/move/global-storage-operators.html}{The Move Book, ``Global Storage - Operators''}.}
+
+\begin{codeblock}
+global_storage:
+    address -> resource_type -> resource_value
+
+move_to<T>(&signer, value: T):
+    publish T under the signer's address
+
+move_from<T>(addr):
+    remove T from addr and return it
+
+borrow_global<T>(addr):
+    borrow immutable reference to T under addr
+
+borrow_global_mut<T>(addr):
+    borrow mutable reference to T under addr
+
+exists<T>(addr):
+    test whether T exists under addr
+\end{codeblock}
+
+Two distinctions matter for security review.
+
+First, \texttt{signer} is not the same thing as \texttt{address}. A signer is a verified transaction authority for an address. An address is just data. A function that accepts \texttt{addr: address} has not proved that the caller controls that address. A function that accepts \texttt{account: \&signer} has a stronger authority fact, but even then the reviewer must ask what that signer is allowed to do inside the protocol.
+
+Second, global storage is type-indexed. A resource of type \texttt{Vault} under an address is not the same thing as a resource of type \texttt{Position} under the same address. A reviewer should not say "the account has the vault." The better sentence is "address A stores resource type M::Vault, and module M exposes these operations over it."
+
+\begin{codeblock}
+weak review statement:
+    Alice owns the vault.
+
+better review statement:
+    address Alice stores 0xV::vault::Position.
+    0xV::vault entry functions can borrow it mutably
+    when Alice supplies a signer or when another authorized path exists.
+\end{codeblock}
+
+Where a Move dialect requires or preserves \texttt{acquires} annotations, treat them as evidence. They tell the reviewer that a function may touch global storage for the named resource type. They are not the whole review, but they are a fast way to find storage-changing code.
+
+\subsection{Aptos Objects}
+
+Aptos extends Move with an object model for grouping resources together under an object address. Aptos documentation describes objects as a way to group resources so they can be treated as a single on-chain entity; objects have their own address and can own resources similarly to an account.\footnote{\href{https://aptos.dev/build/smart-contracts/objects}{Aptos Documentation, ``Building with Objects''}.}
+
+This changes the storage picture:
+
+\begin{codeblock}
+classic Aptos resource:
+    account address -> resource type -> value
+
+Aptos object:
+    object address -> ObjectCore
+                   -> resource type A
+                   -> resource type B
+                   -> extension resources
+\end{codeblock}
+
+The object address gives the protocol a durable identity around which multiple resources can be grouped. That is useful for NFTs, positions, vaults, memberships, games, and composable protocol objects. It also creates a new review obligation: possession of an object handle is not the same thing as being authorized to perform every operation on the object.
+
+Aptos documentation notes that objects can be owned by addresses including accounts, objects, and resource accounts.\footnote{\href{https://aptos.dev/build/smart-contracts/object/using-objects}{Aptos Documentation, ``Using Objects''}.} Nested ownership can be powerful, but it makes sloppy language dangerous. "The caller passed \texttt{Object<T>}" is not an ownership proof. It is a typed object reference. If a function requires the caller to be the owner, the function must check the object's ownership relation through the object framework or require the appropriate capability.
+
+\begin{failuremodebox}[Typed object without ownership]
+An entry function accepts \texttt{Object<Vault>} and a signer. It verifies that the object contains a valid vault resource, then withdraws fees to the signer's address. The code never proves that the signer owns the object or holds the required management capability. Any caller who can name a valid vault object can redirect fee withdrawal.
+\end{failuremodebox}
+
+For Aptos object review, build this table for each object-bearing function:
+
+\begin{codeblock}
+object review:
+    object type
+    object address source
+    resources stored under the object
+    object owner
+    transferability policy
+    capabilities associated with the object
+    signer relationship, if any
+    operation being authorized
+\end{codeblock}
+
+The object model makes composition cleaner. It does not remove authorization review.
+
+\subsection{Sui Objects}
+
+Sui makes objects the center of the execution model. Sui documentation describes programmable Sui objects as assets and smart-contract state defined and managed with Move.\footnote{\href{https://docs.sui.io/develop/write-move/sui-move-concepts}{Sui Documentation, ``Move Concepts''}.} A Sui object is a Move struct with \texttt{key}; Sui framework documentation states that any Sui object must have \texttt{id: UID} as its first field.\footnote{\href{https://docs.sui.io/references/framework/sui_sui/object}{Sui Documentation, ``Module sui::object''}.}
+
+\begin{codeblock}
+public struct Vault has key {
+    id: UID,
+    total_assets: u64,
+    total_shares: u64,
+}
+\end{codeblock}
+
+The \texttt{UID} is not a decorative identifier. It gives the object a globally unique identity in storage. This identity is then governed by Sui's ownership model.
+
+Sui object ownership includes address-owned objects, shared objects, immutable objects, wrapped or object-owned objects, and party objects.\footnote{\href{https://docs.sui.io/develop/objects/object-ownership/}{Sui Documentation, ``Types of Object Ownership''}.} Each ownership form changes the review question.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.23\textwidth}>{\RaggedRight\arraybackslash}p{0.32\textwidth}X@{}}
+\toprule
+Ownership form & Meaning & Review question \\
+\midrule
+Address-owned & Object is owned by a particular address. & Does the signer own the object or otherwise have authority over it? \\
+Shared & Anyone can access the object through transactions. & What checks inside the module restrict mutation or economic action? \\
+Immutable & Anyone can use the object read-only; it cannot be mutated, transferred, or deleted. & Is public read access acceptable, and is immutability intended forever? \\
+Object-owned or wrapped & Object is held by another object or inside dynamic storage. & Who can access the parent, unwrap the child, or mutate the field? \\
+Party & Object is owned through Sui's party ownership mode. & Which party permissions actually authorize the operation? \\
+\bottomrule
+\end{tabularx}
+\caption{Sui object ownership is an execution-model fact, not a substitute for protocol authorization.}
+\end{table}
+
+Shared objects deserve special care. Sui documentation warns that shared objects are accessible to anyone and require effort to secure access where needed.\footnote{\href{https://docs.sui.io/develop/objects/object-ownership/shared}{Sui Documentation, ``Shared Objects''}.} A function that takes \texttt{\&mut Vault} for a shared vault has not proved that the caller should be able to withdraw, reconfigure, pause, or update fees. It has proved that the transaction can access the shared object under Sui's rules. The module must still check a capability, owner field, allowlist, clock condition, invariant, or other authority rule.
+
+Sui also uses abilities to shape transfer policy. Framework transfer functions distinguish module-controlled transfer from public transfer for types with broader abilities.\footnote{\href{https://docs.sui.io/references/framework/sui_sui/transfer}{Sui Documentation, ``Module sui::transfer''}.} For review, the lesson is simple: whether a type has \texttt{store} can affect whether it can be publicly transferred, wrapped, or used in more general storage patterns. Ability review and object-ownership review are not separate passes.
+
+\section{Transaction Construction and Object Access}
+
+Move is not deployed into one universal transaction model. Aptos and Sui both use Move, but their transaction surfaces differ enough that a reviewer must not flatten them.
+
+On Aptos, a common transaction entry point is an \texttt{entry} function. Entry functions are designed as transaction starting points, and Aptos documentation treats the transaction sender as a \texttt{signer}, a verified owner of a specific account.\footnote{\href{https://aptos.dev/network/blockchain/move}{Aptos Documentation, ``Move - A Web3 Language and Runtime''}.} Review therefore asks which signer resources, global resources, object references, and capabilities the entry function can touch.
+
+On Sui, programmable transaction blocks, or PTBs, are first-class transaction composition units. Sui documentation states that PTB commands execute in order, command results can be used by later commands, and effects are applied atomically; if one command fails, the entire block fails.\footnote{\href{https://docs.sui.io/develop/transactions/ptbs/prog-txn-blocks}{Sui Documentation, ``What is a PTB?''}.}
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.34\textwidth}X@{}}
+\toprule
+Surface & Aptos-style review & Sui-style review \\
+\midrule
+Storage model & Resources under addresses and objects. & Objects are explicit transaction inputs and state units. \\
+Authority input & Signers, capabilities, object ownership, framework checks. & Owned objects, shared objects, immutable objects, capabilities, sender, PTB inputs. \\
+Composition & Entry functions and module calls, with account/global storage access. & Ordered PTB commands whose outputs can feed later commands atomically. \\
+Common mistake & Treating an address parameter as signer authority. & Treating access to a shared object as permission to perform any mutation. \\
+\bottomrule
+\end{tabularx}
+\caption{Aptos and Sui share Move foundations but expose different transaction and storage review surfaces.}
+\end{table}
+
+This comparison is not a ranking. It is a warning against lazy transfer of habits. A Move reviewer should know which Move dialect and chain framework they are reviewing before forming conclusions about storage, ownership, entry points, object transfer, and transaction composition.
+
+\section{What Move Prevents, and What It Does Not}
+
+Move prevents important classes of bugs when the type design is correct. A resource without \texttt{copy} cannot be duplicated by value. A resource without \texttt{drop} cannot be silently thrown away. The module boundary can prevent arbitrary callers from constructing or unpacking a valuable type. Reference safety and bytecode verification remove many low-level memory hazards. Global storage operators are typed and scoped.
+
+Those are real advantages. They are not a security proof.
+
+Move does not automatically prove:
+
+\begin{itemize}
+\item the exchange rate used for minting shares;
+\item the solvency relation between liabilities and assets;
+\item that an admin capability should exist;
+\item that the current holder of a capability is legitimate;
+\item that object ownership was checked at the right boundary;
+\item that a shared object has adequate authorization;
+\item that a generic type parameter represents the intended asset;
+\item that upgrade governance is safe;
+\item that oracle data is fresh or manipulation-resistant; or
+\item that economic incentives make attacks unprofitable.
+\end{itemize}
+
+The good review stance is neither cynicism nor worship. Move gives stronger primitives for asset safety and authority expression. The protocol still has to use them correctly.
+
+\section{Worked Example: Vault Share Resource and Admin Capability}
+
+Consider a vault that accepts deposits, mints shares, and allows withdrawals. A simplified Move-oriented design might define:
+
+\begin{codeblock}
+struct Share has store {
+    amount: u64,
+}
+
+struct Vault has key {
+    total_assets: u64,
+    total_shares: u64,
+    paused: bool,
+}
+
+struct Position has key {
+    shares: Share,
+}
+
+struct AdminCap has key {}
+\end{codeblock}
+
+The \texttt{Share} type lacks \texttt{copy} and \texttt{drop}. That means share values cannot be duplicated or silently discarded by ordinary code. It has \texttt{store} because positions need to hold shares in persistent state. It does not need \texttt{key} unless the design stores shares directly as top-level global resources.
+
+Those type choices are useful, but they do not finish the review.
+
+\begin{codeblock}
+deposit(amount):
+    receive assets
+    compute shares_to_mint
+    create Share { amount: shares_to_mint }
+    merge into user's Position
+    update Vault.total_assets
+    update Vault.total_shares
+
+withdraw(shares):
+    remove Share from user's Position
+    compute assets_to_return
+    update Vault.total_assets
+    update Vault.total_shares
+    return assets
+\end{codeblock}
+
+The key invariant is still economic:
+
+\begin{codeblock}
+vault accounting invariant:
+    total_shares equals the sum of all live position shares
+    total_assets matches assets actually controlled by the vault
+    exchange-rate rounding cannot be exploited for profit
+\end{codeblock}
+
+Move helps with the first line if all share creation and destruction happen through the module's API and the type abilities are narrow. It does not prove the second line unless the asset custody model is correct. It does not prove the third line at all; rounding, fees, donation attacks, stale prices, and withdrawal queues still require protocol analysis.
+
+Now add admin authority:
+
+\begin{codeblock}
+public fun pause(admin: &AdminCap, vault: &mut Vault) {
+    vault.paused = true;
+}
+\end{codeblock}
+
+The existence of \texttt{AdminCap} makes the authority explicit. Review still has to answer who receives it at initialization, whether it can be transferred, whether multiple copies can exist, whether it can be rotated, whether pause is too broad, and whether emergency functions preserve user exit rights.
+
+In an Aptos object design, the vault may be an object that groups \texttt{Vault}, configuration, event handles, and extension resources under one object address. The review must check that the signer or capability is authorized over that object, not merely that the function received \texttt{Object<Vault>}.
+
+In a Sui design, the vault may be a shared object. The review must check that shared access is not mistaken for permission. A deposit function may be open to everyone. A fee-update function should require a capability or owner check. A withdrawal function must prove ownership of the position or consume a share object that the caller actually controls.
+
+That is Move review in miniature. The language gives you better security primitives. The protocol must still assemble them into a correct state machine.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why does Move's resource discipline change how a reviewer thinks about assets?
+\item What does each ability control, and why can an ability choice become a security bug?
+\item Why is a module boundary an authority boundary in Move?
+\item What is the difference between \texttt{signer} and \texttt{address}?
+\item How do global-storage operators shape review of Aptos-style resources?
+\item Why is a capability object not automatically safe?
+\item Why does receiving an Aptos \texttt{Object<T>} not by itself prove caller ownership?
+\item Why does access to a Sui shared object not by itself prove authorization?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Given five Move struct declarations, write an ability memo for each. Identify which types are over-permissive, which are under-permissive, and which invariant would break if each ability changed.
+
+\item Review a Move module API. List every function that can create, destroy, move, mutate, or store a valuable type. Identify which calls require signer authority, which require capabilities, and which are callable by other modules.
+
+\item Analyze an Aptos object entry function that accepts \texttt{Object<Vault>} and a signer. Add the missing checks needed to prove the signer owns the object or holds the correct management capability.
+
+\item Analyze a Sui shared-object function that mutates protocol configuration. Identify why shared access is insufficient, then propose a capability, owner, or governance check that would make the mutation explicit.
+\end{enumerate}

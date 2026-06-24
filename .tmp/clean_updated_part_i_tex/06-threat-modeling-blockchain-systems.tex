@@ -1,0 +1,2899 @@
+\chapter{Threat Modeling Blockchain Systems}
+
+\section{Purpose}
+
+The first five chapters gave us the primitives:
+
+\begin{itemize}
+\tightlist
+\item
+  State machines.
+\item
+  Assets and authority.
+\item
+  Transactions and state transitions.
+\item
+  Commitments and proofs.
+\item
+  Keys, signatures, and authorization.
+\end{itemize}
+
+This chapter turns those primitives into a working security-review
+method.
+
+\begin{quote}
+A threat model is a structured explanation of what the system is, what
+can go wrong, why those failures matter, and what will be done about
+them.
+\end{quote}
+
+That sounds simple. In practice, most weak threat models fail in one of
+three ways:
+
+\begin{itemize}
+\tightlist
+\item
+  They are too vague: ``attackers may steal funds.''
+\item
+  They are too generic: ``check access control, reentrancy, and
+  arithmetic.''
+\item
+  They are too decorative: a diagram exists, but it does not change what
+  anyone reviews, tests, monitors, or fixes.
+\end{itemize}
+
+A useful blockchain threat model must be more concrete. It should tell a
+reviewer:
+
+\begin{lstlisting}
+These are the assets.
+These are the state transitions that affect them.
+These actors can influence those transitions.
+These assumptions must hold.
+These assumptions are most fragile.
+These threats deserve priority.
+These invariants should be written.
+These tests, proofs, mitigations, and monitoring controls should exist.
+\end{lstlisting}
+
+OWASP describes threat modeling as identifying, communicating, and
+understanding threats and mitigations in the context of protecting
+something valuable.\footnote{OWASP, ``Threat Modeling'',
+  https://owasp.org/www-community/Threat\_Modeling.} The Threat Modeling
+Manifesto frames threat modeling around four practical questions: what
+are we working on, what can go wrong, what will we do about it, and did
+we do a good enough job.\footnote{Threat Modeling Manifesto,
+  https://www.threatmodelingmanifesto.org/.}
+
+For blockchain systems, we will adapt those questions:
+
+\begin{lstlisting}
+What state machine are we reviewing?
+Which assets and authorities matter?
+Which adversarial transitions can break safety, liveness, solvency, or authorization?
+Which assumptions are we relying on?
+Which mitigations, invariants, tests, and monitoring controls make those assumptions defensible?
+\end{lstlisting}
+
+Threat modeling is not separate from auditing. It is how you decide
+where serious review begins. OWASP's smart-contract security
+verification material makes this operational: security architecture
+review should identify threats, assess risks, and define mitigations for
+smart-contract systems.\footnote{OWASP Smart Contract Security,
+  ``SCSVS-ARCH-3: Threat Modeling'',
+  https://scs.owasp.org/SCSVS/controls/SCSVS-ARCH-3/.}
+
+\section{Learning Objectives}
+
+By the end of this chapter, you should be able to:
+
+\begin{itemize}
+\tightlist
+\item
+  Turn a whitepaper, docs, codebase, deployment map, or protocol
+  description into a security model.
+\item
+  Identify actors, assets, entry points, privileged roles, trust
+  boundaries, and external dependencies.
+\item
+  Separate users, attackers, rational participants, Byzantine actors,
+  insiders, and trusted operators.
+\item
+  Write explicit trust assumptions instead of vague claims about
+  decentralization or security.
+\item
+  Map attack surfaces across chain, contract, protocol, economic,
+  infrastructure, and human layers.
+\item
+  Use threat modeling to produce review priorities, invariants, tests,
+  mitigations, and monitoring requirements.
+\item
+  Recognize threat-modeling anti-patterns that waste time or create
+  false confidence.
+\end{itemize}
+
+\section{The Core Model}
+
+A blockchain threat model connects seven things:
+
+\begin{lstlisting}
+System:
+  What are we reviewing?
+
+Assets:
+  What can be lost, corrupted, frozen, diluted, censored, or misrepresented?
+
+Actors:
+  Who can interact with the system, operate it, influence it, or attack it?
+
+Entry points:
+  Which transactions, messages, functions, instructions, proofs, admin actions,
+  APIs, bots, and human processes can change state or influence decisions?
+
+Assumptions:
+  What must be true outside the local code for the security claim to hold?
+
+Threats:
+  What can go wrong if actors use entry points adversarially or assumptions fail?
+
+Response:
+  What will we build, test, monitor, document, or explicitly accept?
+\end{lstlisting}
+
+In compact form:
+
+\begin{lstlisting}
+Threat = actor + capability + entry point + vulnerable assumption + impact
+\end{lstlisting}
+
+Example:
+
+\begin{lstlisting}
+Actor:
+  MEV searcher with flash liquidity
+
+Capability:
+  Can manipulate a low-liquidity AMM pool for one block
+
+Entry point:
+  borrow(collateral, amount)
+
+Vulnerable assumption:
+  Oracle spot price reflects fair collateral value
+
+Impact:
+  Attacker borrows against inflated collateral and leaves bad debt
+\end{lstlisting}
+
+That is a useful threat. It points to code, state, economic conditions,
+tests, and mitigations.
+
+Compare:
+
+\begin{lstlisting}
+Threat:
+  Oracle attack.
+\end{lstlisting}
+
+That is a label. It is not yet a model.
+
+\section{Turning a Protocol Description into a Security Model}
+
+\subsection{Start With Scope}
+
+Threat modeling begins by defining what is inside the review.
+
+Scope may include:
+
+\begin{itemize}
+\tightlist
+\item
+  Smart contracts or programs.
+\item
+  Protocol docs and whitepaper.
+\item
+  Token contracts.
+\item
+  Governance contracts.
+\item
+  Upgrade mechanisms.
+\item
+  Deployed addresses.
+\item
+  Admin multisigs.
+\item
+  Frontend and wallet interactions.
+\item
+  Backend signers.
+\item
+  Keepers and bots.
+\item
+  Oracles.
+\item
+  Bridges and cross-chain messages.
+\item
+  Rollup or appchain assumptions.
+\item
+  Monitoring and incident response.
+\item
+  Human operational processes.
+\end{itemize}
+
+Scope should also state what is outside the review.
+
+Bad:
+
+\begin{lstlisting}
+Review the protocol.
+\end{lstlisting}
+
+Better:
+
+\begin{lstlisting}
+Review the EVM vault, strategy adapters, share accounting, oracle integration,
+upgrade path, and emergency controls. Exclude the frontend implementation and
+the external lending market used by one strategy, but document both as trust
+dependencies.
+\end{lstlisting}
+
+If the scope is unclear, the threat model will be unclear. If the threat
+model is unclear, review effort will drift toward whatever is easiest to
+inspect instead of whatever is most dangerous.
+
+\subsection{Collect the Actual System, Not the Marketing System}
+
+The system is not only the whitepaper.
+
+Inputs to a real threat model include:
+
+\begin{itemize}
+\tightlist
+\item
+  Whitepaper.
+\item
+  Protocol docs.
+\item
+  Architecture diagrams.
+\item
+  Smart contract code.
+\item
+  Program code.
+\item
+  ABI/IDL/interface definitions.
+\item
+  Deployment addresses.
+\item
+  Proxy admin addresses.
+\item
+  Governance contracts.
+\item
+  Multisig owners and thresholds.
+\item
+  Timelock configurations.
+\item
+  Oracle configuration.
+\item
+  Token lists and accepted collateral.
+\item
+  Backend services.
+\item
+  Keeper and relayer design.
+\item
+  Frontend transaction construction.
+\item
+  Monitoring alerts.
+\item
+  Incident response plan.
+\item
+  Historical governance proposals.
+\item
+  Previous audit reports.
+\item
+  Known incidents and postmortems.
+\end{itemize}
+
+The docs describe the intended system. The deployment describes the
+actual system. The code describes executable rules. Operations describe
+who can change or rescue the system. Threat modeling needs all four.
+
+If the docs say:
+
+\begin{lstlisting}
+Governance controls upgrades through a 48-hour timelock.
+\end{lstlisting}
+
+Verify:
+
+\begin{lstlisting}
+Which governance contract?
+Which timelock?
+Which proxy admin?
+Which deployed implementation?
+Who can cancel?
+Who can execute?
+Can anyone bypass the timelock?
+Can emergency powers pause withdrawals?
+\end{lstlisting}
+
+Threat modeling starts polite. It does not stay naive.
+
+\subsection{Extract Security Claims}
+
+A protocol description usually contains security claims, even when it
+does not call them that.
+
+Examples:
+
+\begin{lstlisting}
+Depositors can always withdraw their fair share.
+The oracle prevents price manipulation.
+The bridge is trust-minimized.
+Governance is decentralized.
+The protocol is non-custodial.
+The vault is delta-neutral.
+Liquidations protect solvency.
+The sequencer cannot steal funds.
+The admin can only pause in emergencies.
+The stablecoin is fully backed.
+\end{lstlisting}
+
+Convert each claim into reviewable form.
+
+Weak:
+
+\begin{lstlisting}
+The protocol is non-custodial.
+\end{lstlisting}
+
+Reviewable:
+
+\begin{lstlisting}
+No privileged actor can transfer user funds, change withdrawal accounting,
+upgrade to logic that transfers user funds, freeze withdrawals indefinitely,
+or alter token mappings in a way that captures user claims without a documented
+trust assumption and user exit window.
+\end{lstlisting}
+
+Weak:
+
+\begin{lstlisting}
+The bridge is trust-minimized.
+\end{lstlisting}
+
+Reviewable:
+
+\begin{lstlisting}
+Destination-chain minting requires a proof against finalized source-chain state,
+source and destination domains are bound into the message, each message nonce is
+consumed exactly once, and no multisig or upgrade path can mint unbacked assets
+without an explicit trust assumption.
+\end{lstlisting}
+
+Every serious security claim should become either:
+
+\begin{itemize}
+\tightlist
+\item
+  An invariant.
+\item
+  A trust assumption.
+\item
+  A test.
+\item
+  A proof obligation.
+\item
+  A monitoring requirement.
+\item
+  A risk acceptance.
+\end{itemize}
+
+If a claim becomes none of those, it is probably marketing.
+
+\subsection{Translate Features Into State Transitions}
+
+Feature lists hide attack surfaces.
+
+Example feature list:
+
+\begin{lstlisting}
+Users can deposit, withdraw, borrow, repay, and claim rewards.
+Admins can configure markets.
+Keepers handle liquidations.
+Governance controls upgrades.
+\end{lstlisting}
+
+State-machine translation:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Feature
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+State transitions
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Deposit & Transfer collateral in, mint shares or credit balance, update
+indexes \\
+Withdraw & Burn shares or debit balance, transfer collateral out, update
+queues \\
+Borrow & Read price, check collateral, mint or transfer debt asset,
+update debt \\
+Repay & Transfer debt asset in, reduce debt, update interest indexes \\
+Claim rewards & Calculate accrued rewards, mark claimed, transfer reward
+asset \\
+Configure markets & Change collateral factors, caps, oracle, interest
+model \\
+Liquidate & Read price, check health, seize collateral, repay debt, pay
+incentive \\
+Upgrade & Change implementation or future transition rules \\
+\end{longtable}
+}
+
+Now the reviewer can ask:
+
+\begin{lstlisting}
+Which transition touches assets?
+Which transition reads external data?
+Which transition can become insolvent?
+Which transition can be called by anyone?
+Which transition depends on ordering?
+Which transition can be paused?
+Which transition cannot be paused?
+\end{lstlisting}
+
+Threat modeling should turn nouns into transitions.
+
+\subsection{Build a System Context Diagram}
+
+You do not need a beautiful diagram. You need an accurate one.
+
+A minimal blockchain system context diagram should show:
+
+\begin{lstlisting}
+Users / wallets
+  -> frontend
+  -> RPC provider
+  -> chain
+  -> protocol contracts/programs
+
+Protocol contracts/programs
+  -> tokens
+  -> oracles
+  -> external protocols
+  -> governance
+  -> admin multisig
+  -> upgrade proxy
+  -> keepers/relayers
+  -> indexers/analytics
+  -> monitoring/alerts
+\end{lstlisting}
+
+For cross-domain systems:
+
+\begin{lstlisting}
+source chain
+  -> source bridge contract
+  -> event/state proof
+  -> relayer or validator set
+  -> destination bridge contract
+  -> wrapped token
+\end{lstlisting}
+
+For each arrow, ask:
+
+\begin{lstlisting}
+What crosses this boundary?
+Who can modify it?
+Who verifies it?
+What happens if it is delayed, missing, stale, reordered, or false?
+\end{lstlisting}
+
+
+A simple attack tree turns a high-level threat into review paths:
+
+\begin{lstlisting}
+Goal: drain or disable the protocol
+  -> abuse accounting transition
+  -> manipulate oracle input
+  -> compromise privileged authority
+  -> exploit external call/control flow
+  -> block withdrawals or exits
+  -> exploit upgrade or governance path
+\end{lstlisting}
+
+Use the tree to decide where review time goes first. A threat model that does not change review priorities is only decoration.
+
+The Threat Modeling Manifesto explicitly warns against looking for a
+perfect representation and recommends multiple representations because
+different views reveal different problems.\footnote{Threat Modeling
+  Manifesto, https://www.threatmodelingmanifesto.org/.} For blockchain
+protocols, useful views include:
+
+\begin{itemize}
+\tightlist
+\item
+  State-transition view.
+\item
+  Asset-flow view.
+\item
+  Authority graph.
+\item
+  Trust-boundary view.
+\item
+  Dependency graph.
+\item
+  Transaction-sequence view.
+\item
+  Upgrade/governance control graph.
+\end{itemize}
+
+No single diagram is sacred. The question is whether the representation
+exposes risk.
+
+\subsection{Threat Modeling Is Iterative}
+
+OWASP emphasizes that threat modeling should be refined through the
+lifecycle and updated after new features, incidents, or architecture
+changes.\footnote{OWASP, ``Threat Modeling'',
+  https://owasp.org/www-community/Threat\_Modeling.}
+
+Blockchain systems especially require iteration because:
+
+\begin{itemize}
+\tightlist
+\item
+  Governance can change parameters.
+\item
+  New collateral can be added.
+\item
+  Oracles can be replaced.
+\item
+  Token behavior can differ across integrations.
+\item
+  Upgrade paths can change implementation.
+\item
+  TVL can grow and change attacker incentives.
+\item
+  Liquidity can move.
+\item
+  MEV conditions can change.
+\item
+  Bridge or rollup dependencies can change.
+\item
+  New chains and deployments can be added.
+\end{itemize}
+
+A threat model written before deployment may be obsolete after the first
+governance proposal.
+
+Threat model maintenance triggers:
+
+\begin{itemize}
+\tightlist
+\item
+  New asset listing.
+\item
+  New strategy.
+\item
+  New oracle.
+\item
+  New chain deployment.
+\item
+  Upgrade.
+\item
+  Governance change.
+\item
+  Admin role rotation.
+\item
+  Incident or near miss.
+\item
+  Large TVL increase.
+\item
+  Market regime change.
+\item
+  External dependency change.
+\item
+  New integration by another protocol.
+\end{itemize}
+
+If the threat model is not updated when the system changes, it becomes a
+museum piece.
+
+\section{Mapping Actors, Assets, Entry Points, and Privileged Roles}
+
+\subsection{Actor Inventory}
+
+Actors are entities that can interact with, operate, influence, or
+depend on the system.
+
+In blockchain systems, actors often include:
+
+\begin{itemize}
+\tightlist
+\item
+  End users.
+\item
+  Wallets.
+\item
+  Traders.
+\item
+  LPs.
+\item
+  Borrowers.
+\item
+  Liquidators.
+\item
+  Arbitrageurs.
+\item
+  MEV searchers.
+\item
+  Validators, miners, builders, and sequencers.
+\item
+  Governance token holders.
+\item
+  Delegates.
+\item
+  Admin multisigs.
+\item
+  Guardians.
+\item
+  Oracles and oracle operators.
+\item
+  Keepers.
+\item
+  Relayers.
+\item
+  Bridge validators.
+\item
+  Provers.
+\item
+  Frontend maintainers.
+\item
+  RPC providers.
+\item
+  Indexers.
+\item
+  Backend operators.
+\item
+  Custodians.
+\item
+  Exchanges.
+\item
+  Token issuers.
+\item
+  Auditors.
+\item
+  Attackers.
+\item
+  Insiders.
+\end{itemize}
+
+For each actor, record:
+
+\begin{lstlisting}
+Actor:
+  Who or what is this?
+
+Role:
+  What are they supposed to do?
+
+Authority:
+  What transitions can they cause?
+
+Capabilities:
+  What resources, timing, information, or access do they have?
+
+Incentives:
+  What do they gain or lose?
+
+Failure mode:
+  What happens if they are malicious, compromised, unavailable, irrational,
+  negligent, or mistaken?
+\end{lstlisting}
+
+This is intentionally broader than ``who can call functions.'' A
+frontend maintainer may not call a privileged function, but can
+construct malicious transactions. An RPC provider may not move funds,
+but can distort a user's view. A keeper may not own assets, but can be
+necessary for liveness.
+
+\subsection{Asset Inventory}
+
+Chapter 2 defined assets as enforceable claims over state. Threat
+modeling requires a structured asset inventory.
+
+Include:
+
+\begin{itemize}
+\tightlist
+\item
+  Native assets.
+\item
+  Tokens.
+\item
+  Shares.
+\item
+  LP positions.
+\item
+  Debt positions.
+\item
+  Collateral.
+\item
+  Pending withdrawals.
+\item
+  Rewards.
+\item
+  Bridge messages.
+\item
+  Governance power.
+\item
+  Upgrade authority.
+\item
+  Oracle authority.
+\item
+  Validator or sequencer keys.
+\item
+  Backend signing keys.
+\item
+  Domain names and frontend distribution.
+\item
+  Deployment secrets.
+\item
+  Monitoring credentials.
+\item
+  Off-chain reserves.
+\item
+  Legal claims.
+\end{itemize}
+
+For each asset:
+
+\begin{lstlisting}
+Asset:
+  What has value?
+
+Representation:
+  Where is it recorded?
+
+Normal transition:
+  How should it move or change?
+
+Privileged transition:
+  Who can move, freeze, mint, burn, configure, or upgrade around it?
+
+Invariant:
+  What must remain true?
+
+Impact:
+  What happens if it is stolen, frozen, diluted, mispriced, duplicated,
+  or made unrecoverable?
+\end{lstlisting}
+
+Do not restrict the asset inventory to user funds. Privileged keys are
+often the most valuable assets in the system.
+
+\subsection{Entry Point Inventory}
+
+Entry points are ways state can be changed or security-relevant
+decisions can be influenced.
+
+On-chain entry points:
+
+\begin{itemize}
+\tightlist
+\item
+  Public functions.
+\item
+  Program instructions.
+\item
+  Module entry functions.
+\item
+  Governance proposal execution.
+\item
+  Upgrade functions.
+\item
+  Admin setters.
+\item
+  Oracle updates.
+\item
+  Bridge message handlers.
+\item
+  Permit or signature-based functions.
+\item
+  Callback hooks.
+\item
+  Token receiver functions.
+\item
+  Fallback and receive functions.
+\item
+  Batch and multicall paths.
+\item
+  Liquidation functions.
+\item
+  Emergency controls.
+\end{itemize}
+
+Off-chain entry points:
+
+\begin{itemize}
+\tightlist
+\item
+  Frontend transaction construction.
+\item
+  RPC request/response.
+\item
+  Indexer ingestion.
+\item
+  Backend APIs.
+\item
+  Keeper bots.
+\item
+  Relayer endpoints.
+\item
+  Signing services.
+\item
+  CI/CD pipelines.
+\item
+  Package publishing.
+\item
+  Governance forums.
+\item
+  Multisig signing workflows.
+\item
+  DNS and domain management.
+\end{itemize}
+
+For each entry point:
+
+\begin{lstlisting}
+Entry point:
+  Function, instruction, API, workflow, or process.
+
+Caller:
+  Who can invoke it?
+
+Authority:
+  What authorization is required?
+
+State read:
+  What state does it depend on?
+
+State written:
+  What state can it change?
+
+External assumptions:
+  What oracle, token, RPC, relayer, signer, or human process does it trust?
+
+Failure behavior:
+  What happens on revert, partial failure, timeout, or non-response?
+
+Abuse:
+  What can an adversarial caller do with valid inputs?
+\end{lstlisting}
+
+This inventory becomes the review map. It tells you where to spend
+attention.
+
+\subsection{Privileged Role Inventory}
+
+Privileged roles are authorities that can change rules, parameters,
+dependencies, or emergency state.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  Owner.
+\item
+  Proxy admin.
+\item
+  Upgrade executor.
+\item
+  Timelock proposer.
+\item
+  Timelock canceller.
+\item
+  Governance executor.
+\item
+  Pauser.
+\item
+  Guardian.
+\item
+  Minter.
+\item
+  Burner.
+\item
+  Blacklist manager.
+\item
+  Oracle admin.
+\item
+  Risk parameter admin.
+\item
+  Strategy manager.
+\item
+  Fee recipient setter.
+\item
+  Bridge validator-set admin.
+\item
+  Sequencer admin.
+\item
+  Backend signer.
+\item
+  Deployment key.
+\end{itemize}
+
+For each privileged role:
+
+\begin{lstlisting}
+Role:
+  Name and contract/program/module.
+
+Holder:
+  EOA, multisig, contract, governance, DAO, backend service, or operator.
+
+Capability:
+  Exact transitions authorized.
+
+Delay:
+  Timelock, voting delay, challenge window, or no delay.
+
+Bypass:
+  Emergency path, guardian override, admin override, or upgrade path.
+
+Rotation:
+  How can it be changed?
+
+Loss:
+  What happens if lost?
+
+Compromise:
+  What happens if compromised?
+
+Observability:
+  Can users see pending action before harm?
+\end{lstlisting}
+
+Role names lie by omission. A ``guardian'' may only pause deposits, or
+it may pause withdrawals and trap funds. A ``risk admin'' may only lower
+caps, or it may raise collateral factors to unsafe values. A
+``governor'' may only adjust fees, or it may call arbitrary targets.
+
+Write the verbs.
+
+\subsection{Data and Control Flows}
+
+Traditional threat modeling often uses data-flow diagrams and trust
+boundaries. Microsoft STRIDE guidance frames threats around questions
+such as whether authentication data can be changed, whether data can be
+read, or whether access can be denied, and categorizes threats as
+spoofing, tampering, repudiation, information disclosure, denial of
+service, and elevation of privilege.\footnote{Microsoft, ``Microsoft
+  Threat Modeling Tool threats'',
+  https://learn.microsoft.com/en-us/azure/security/develop/threat-modeling-tool-threats.}
+
+Blockchain systems need both data-flow and control-flow views.
+
+Data flows:
+
+\begin{itemize}
+\tightlist
+\item
+  Oracle price -\textgreater{} lending market.
+\item
+  Event log -\textgreater{} bridge relayer -\textgreater{} destination
+  chain.
+\item
+  RPC response -\textgreater{} frontend -\textgreater{} wallet.
+\item
+  Governance proposal JSON -\textgreater{} forum -\textgreater{} UI
+  -\textgreater{} voters.
+\item
+  Indexer state -\textgreater{} dashboard -\textgreater{} user decision.
+\item
+  Transaction simulation -\textgreater{} wallet display.
+\item
+  Keeper observation -\textgreater{} liquidation transaction.
+\end{itemize}
+
+Control flows:
+
+\begin{itemize}
+\tightlist
+\item
+  User transaction -\textgreater{} contract call -\textgreater{}
+  external token hook -\textgreater{} callback.
+\item
+  Governance vote -\textgreater{} timelock -\textgreater{} proxy admin
+  -\textgreater{} implementation change.
+\item
+  Admin setter -\textgreater{} oracle address -\textgreater{}
+  price-dependent borrow path.
+\item
+  Sequencer ordering -\textgreater{} liquidation execution
+  -\textgreater{} solvency.
+\item
+  Multisig approval -\textgreater{} upgrade -\textgreater{} storage
+  layout migration.
+\item
+  Relayer submission -\textgreater{} proof verification -\textgreater{}
+  mint.
+\end{itemize}
+
+For each flow:
+
+\begin{lstlisting}
+What crosses the boundary?
+Who can alter it?
+Who verifies it?
+What state transition depends on it?
+What if it is stale, false, delayed, missing, or reordered?
+\end{lstlisting}
+
+\subsection{The Minimum Map}
+
+Before reviewing a serious protocol, you should be able to fill this
+table.
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Category
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Minimum questions
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Assets & What can be stolen, frozen, diluted, mispriced, or made
+unrecoverable? \\
+Actors & Who can interact, operate, influence, or attack? \\
+Entry points & What can change state or influence a state-changing
+decision? \\
+Privileged roles & Who can change parameters, dependencies, code, or
+emergency state? \\
+Trust boundaries & What does the system rely on but not verify
+locally? \\
+External dependencies & Which tokens, oracles, chains, bridges,
+relayers, RPCs, indexers, and humans matter? \\
+Invariants & What must remain true across transitions? \\
+Liveness paths & What required transitions must remain possible? \\
+Monitoring & What must be observed to detect assumption failure? \\
+\end{longtable}
+}
+
+If a team cannot answer these questions, the team is not ready for a
+deep audit. It is still discovering the system.
+
+\section{Separating Users, Attackers, Rational Participants, and Trusted Operators}
+
+\subsection{Do Not Use One Generic Attacker}
+
+``The attacker'' is often too broad to be useful.
+
+Different adversaries have different powers:
+
+\begin{itemize}
+\tightlist
+\item
+  A normal user can call public entry points.
+\item
+  A bot can call them faster and more often.
+\item
+  A searcher can simulate pending transactions and pay for ordering.
+\item
+  A validator or sequencer can influence inclusion and ordering.
+\item
+  A governance whale can pass proposals.
+\item
+  An admin can call privileged functions.
+\item
+  A compromised frontend can construct malicious transactions.
+\item
+  A malicious token can behave unexpectedly during integration.
+\item
+  A bridge validator set can sign false messages.
+\item
+  A custodian can delay or block withdrawals.
+\item
+  An insider can access keys, deployments, secrets, or configs.
+\item
+  A state-level actor may have long time horizons, supply-chain reach,
+  and legal or coercive power.
+\end{itemize}
+
+NIST SP 800-30 recommends identifying threat sources and characterizing
+adversarial sources by factors such as capability, intent, and
+targeting.\footnote{NIST, ``SP 800-30 Revision 1: Guide for Conducting
+  Risk Assessments'', threat-source identification and characterization,
+  https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-30r1.pdf.}
+
+For blockchain systems, also add:
+
+\begin{itemize}
+\tightlist
+\item
+  Capital.
+\item
+  Liquidity.
+\item
+  Ordering access.
+\item
+  Governance power.
+\item
+  Cross-domain reach.
+\item
+  Operational access.
+\item
+  Ability to wait.
+\item
+  Ability to take reputational or legal risk.
+\end{itemize}
+
+Threat modeling improves when each actor has a realistic capability set.
+
+\subsection{Users Can Be Adversarial Without Being ``Hackers''}
+
+In permissionless systems, any user may call public functions with valid
+inputs. That does not make them a hacker. It makes them a participant.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  A trader submits a sandwich.
+\item
+  A liquidator triggers liquidation at the worst moment for a borrower.
+\item
+  A borrower maximizes leverage.
+\item
+  A depositor withdraws just before losses are realized.
+\item
+  A governance voter sells votes.
+\item
+  A user creates thousands of addresses.
+\item
+  A keeper ignores unprofitable upkeep.
+\end{itemize}
+
+These may be rational behaviors inside the rules.
+
+Security model:
+
+\begin{lstlisting}
+Users are not trusted to follow product intent.
+They are trusted only to satisfy validity rules and pay costs.
+\end{lstlisting}
+
+This is why business logic must be robust against adversarial but valid
+use.
+
+\subsection{Rational Participants Are Not Byzantine Actors}
+
+A rational actor pursues payoff. A Byzantine actor may behave
+arbitrarily, including actions that appear irrational, malicious,
+inconsistent, or self-harming.
+
+This distinction matters.
+
+Rational searcher:
+
+\begin{lstlisting}
+Will reorder or backrun if profit exceeds cost.
+Probably will not burn money without benefit.
+\end{lstlisting}
+
+Byzantine validator:
+
+\begin{lstlisting}
+May censor, equivocate, or violate protocol rules if capable,
+even if immediate profit is unclear.
+\end{lstlisting}
+
+Compromised key:
+
+\begin{lstlisting}
+Can sign any message the key is authorized to sign.
+The original owner's incentives no longer matter.
+\end{lstlisting}
+
+Negligent operator:
+
+\begin{lstlisting}
+May fail to update, rotate, monitor, or respond.
+The failure may not be malicious.
+\end{lstlisting}
+
+The mitigation differs:
+
+\begin{itemize}
+\tightlist
+\item
+  Rational attacks require economic bounds.
+\item
+  Byzantine attacks require validation, quorum assumptions, proofs, or
+  slashing.
+\item
+  Compromise requires key management and blast-radius reduction.
+\item
+  Negligence requires process controls, automation, monitoring, and
+  recovery paths.
+\end{itemize}
+
+Do not prescribe one defense for different fault models.
+
+\subsection{Trusted Operators Are Threat Sources Too}
+
+Trusted operators are actors the system relies on:
+
+\begin{itemize}
+\tightlist
+\item
+  Admin multisig signers.
+\item
+  Governance delegates.
+\item
+  Oracle operators.
+\item
+  Bridge validators.
+\item
+  Sequencer operators.
+\item
+  Relayers.
+\item
+  Keepers.
+\item
+  Backend signers.
+\item
+  Frontend maintainers.
+\item
+  DevOps engineers.
+\item
+  Custodians.
+\item
+  Token issuers.
+\end{itemize}
+
+They may fail in several ways:
+
+\begin{itemize}
+\tightlist
+\item
+  Malicious action.
+\item
+  Key compromise.
+\item
+  Downtime.
+\item
+  Misconfiguration.
+\item
+  Slow response.
+\item
+  Collusion.
+\item
+  Legal compulsion.
+\item
+  Insider abuse.
+\item
+  Incorrect deployment.
+\item
+  Poor monitoring.
+\end{itemize}
+
+Treating trusted operators as outside the threat model is a classic
+mistake.
+
+Better:
+
+\begin{lstlisting}
+The oracle committee is trusted to report prices within acceptable deviation
+and availability bounds. The protocol fails safely if one publisher is wrong,
+but may become unsafe if a quorum signs a bad price or if updates stop for more
+than 30 minutes during high volatility.
+\end{lstlisting}
+
+This names both safety and liveness assumptions.
+
+\subsection{Insiders Have Different Access}
+
+Insiders may have access that outsiders do not:
+
+\begin{itemize}
+\tightlist
+\item
+  Unreleased code.
+\item
+  Deployment keys.
+\item
+  Admin interfaces.
+\item
+  CI/CD secrets.
+\item
+  Monitoring credentials.
+\item
+  Backend databases.
+\item
+  Signing services.
+\item
+  Governance proposal drafts.
+\item
+  Oracle update infrastructure.
+\item
+  Private relayer endpoints.
+\item
+  Multisig coordination channels.
+\item
+  Incident response plans.
+\end{itemize}
+
+Insider threat modeling asks:
+
+\begin{lstlisting}
+What can one insider do?
+What requires two insiders?
+What is logged?
+What is reviewed?
+What can be done without on-chain visibility?
+What can be done before users can react?
+\end{lstlisting}
+
+This is not paranoia. It is basic authority mapping.
+
+\subsection{Actor Table Template}
+
+Use this table.
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 10\tabcolsep) * \real{0.1667}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 10\tabcolsep) * \real{0.1667}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 10\tabcolsep) * \real{0.1667}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 10\tabcolsep) * \real{0.1667}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 10\tabcolsep) * \real{0.1667}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 10\tabcolsep) * \real{0.1667}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Actor
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Normal role
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Capabilities
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Incentives
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Failure mode
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Controls
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+User & Deposit/withdraw/borrow & Public calls, signatures &
+Utility/profit & Adversarial sequencing, phishing & Input checks,
+slippage, limits \\
+Searcher & Extract MEV & Simulation, bundles, priority fees & Profit &
+Ordering attack & MEV-aware design, private flow assumptions \\
+Admin multisig & Emergency/upgrade & Privileged calls & Protocol
+maintenance & Collusion, compromise, wrong signing & Timelock,
+threshold, monitoring \\
+Oracle & Price data & Signed updates & Correct reporting &
+Stale/manipulated price & Deviation checks, circuit breakers \\
+Keeper & Maintenance & Calls upkeep functions & Fees/rewards & No
+liveness if unprofitable & Incentives, fallback, permissionless calls \\
+\end{longtable}
+}
+
+Fill it with actual actors. Generic roles are placeholders, not
+conclusions.
+
+\section{Identifying Trust Assumptions and External Dependencies}
+
+\subsection{Assumptions Are Security Debt}
+
+Every system has assumptions. The problem is not having assumptions. The
+problem is hiding them.
+
+Examples:
+
+\begin{lstlisting}
+The oracle price is fresh.
+The bridge source event is final.
+The token does not reenter.
+The admin will not upgrade maliciously.
+The sequencer will not censor exits indefinitely.
+The relayer will submit messages.
+The keeper reward is enough.
+The frontend points to the correct contracts.
+The RPC provider reports current chain state.
+The stablecoin issuer honors redemption.
+\end{lstlisting}
+
+Each assumption is a place where the system is not self-contained.
+
+Write assumptions in a falsifiable form:
+
+\begin{lstlisting}
+The protocol assumes Chainlink ETH/USD updates at least every 1 hour
+and that the returned answer is not stale, negative, or outside configured
+deviation bounds.
+\end{lstlisting}
+
+Not:
+
+\begin{lstlisting}
+We use a secure oracle.
+\end{lstlisting}
+
+\subsection{Dependency Inventory}
+
+Common blockchain dependencies:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Dependency
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Common assumption
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Failure
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Base chain & Finality, liveness, valid execution & Reorg, halt,
+censorship \\
+Token contract & Standard behavior & Fee-on-transfer, blacklist, rebase,
+hook \\
+Oracle & Fresh and manipulation-resistant data & Bad price, stale price,
+missing update \\
+AMM/liquidity & Price reflects executable market & Low-liquidity
+manipulation \\
+Governance & Non-captured decision process & Malicious proposal,
+bribery, low quorum \\
+Admin multisig & Honest and available signers & Collusion, compromise,
+lost keys \\
+Bridge & Correct message verification & Forged messages, replay,
+finality mismatch \\
+Sequencer & Inclusion/liveness assumptions & Censorship, downtime,
+ordering extraction \\
+RPC & Correct view of chain & Incorrect responses, censorship, lag \\
+Indexer & Correct interpretation & Desync, missed reorg, event
+misread \\
+Frontend & Correct transaction construction & Malicious approvals, wrong
+addresses \\
+Backend signer & Correct policy enforcement & Unauthorized
+withdrawals \\
+Keeper & Timely maintenance & Stuck positions, bad debt \\
+CI/CD & Integrity of deployment & Malicious release, wrong address \\
+Custodian & Asset safekeeping & Insolvency, freeze, withdrawal halt \\
+\end{longtable}
+}
+
+Each row can become a threat scenario.
+
+\subsection{Safety vs Liveness Assumptions}
+
+Separate assumptions that preserve safety from assumptions that preserve
+liveness.
+
+Safety assumptions:
+
+\begin{itemize}
+\tightlist
+\item
+  Oracle price is not manipulable enough to cause undercollateralized
+  borrowing.
+\item
+  Bridge validator quorum does not sign false messages.
+\item
+  Upgrade admin cannot bypass timelock.
+\item
+  Token mint authority cannot create unbacked supply.
+\item
+  Contract verifier rejects malformed proofs.
+\end{itemize}
+
+Liveness assumptions:
+
+\begin{itemize}
+\tightlist
+\item
+  At least one keeper will liquidate unhealthy positions.
+\item
+  Relayers will submit bridge messages.
+\item
+  Users can withdraw during an exit window.
+\item
+  Sequencer downtime fallback works.
+\item
+  Governance can execute emergency fixes.
+\item
+  Proof generation service remains available.
+\end{itemize}
+
+Some assumptions affect both:
+
+\begin{itemize}
+\tightlist
+\item
+  Sequencer censorship can block exits and affect liquidation ordering.
+\item
+  Oracle downtime can freeze borrowing and liquidations.
+\item
+  Admin key loss can prevent emergency response.
+\item
+  Bridge relayer compromise can become safety risk if relayers are
+  trusted for message truth.
+\end{itemize}
+
+For each assumption, write:
+
+\begin{lstlisting}
+Type:
+  Safety, liveness, or both.
+
+Failure impact:
+  What bad state or stuck state results?
+
+Detection:
+  How do we know it failed?
+
+Response:
+  What can the system do?
+\end{lstlisting}
+
+\subsection{External Contracts Are Dependencies, Not Background}
+
+If your protocol calls another contract, integrates a token, deposits
+into a strategy, reads an oracle, or relies on a registry, that external
+system is inside the threat model as a dependency.
+
+External contract risks:
+
+\begin{itemize}
+\tightlist
+\item
+  Upgradeable dependency.
+\item
+  Reentrancy or callbacks.
+\item
+  Nonstandard token behavior.
+\item
+  Incorrect decimals.
+\item
+  Pausable or blacklistable token.
+\item
+  Fee-on-transfer or rebasing token.
+\item
+  Governance-controlled parameter changes.
+\item
+  Oracle update delays.
+\item
+  Liquidity migration.
+\item
+  Contract selfdestruct or deprecated behavior.
+\item
+  Address substitution.
+\end{itemize}
+
+Dependency review questions:
+
+\begin{lstlisting}
+Can the dependency change behavior?
+Who controls it?
+Can it call back?
+Can it return false, no data, malformed data, or stale data?
+Can it pause or freeze?
+Can it become illiquid?
+Can it censor or reject this protocol?
+Can it break accounting assumptions?
+\end{lstlisting}
+
+Do not integrate an external contract as if it were a math function.
+
+\subsection{Human Dependencies Are Real Dependencies}
+
+Human processes are often the hidden critical path:
+
+\begin{itemize}
+\tightlist
+\item
+  Someone notices an oracle failure.
+\item
+  Someone signs a pause transaction.
+\item
+  Someone rotates a compromised key.
+\item
+  Someone updates the frontend.
+\item
+  Someone submits the governance proposal.
+\item
+  Someone pays relayer gas.
+\item
+  Someone checks deployment addresses.
+\item
+  Someone verifies a multisig transaction.
+\end{itemize}
+
+Threat model them.
+
+Questions:
+
+\begin{lstlisting}
+Who is responsible?
+What signal triggers action?
+How fast must action happen?
+What if the person is unavailable?
+What if signers disagree?
+What if the runbook is wrong?
+What if the attacker acts faster?
+What if the emergency control itself is compromised?
+\end{lstlisting}
+
+If the system's safety depends on a human responding in five minutes at
+3 AM, write that assumption plainly.
+
+\subsection{Assumption Register}
+
+Use an assumption register.
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.1429}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.1429}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.1429}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.1429}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.1429}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.1429}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.1429}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+ID
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Assumption
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Type
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Dependency
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Failure impact
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Detection
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Mitigation
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+A1 & Oracle updates within 30 minutes & Safety/liveness & Oracle network
+& Bad debt or market freeze & Price age alert & Staleness checks,
+pause \\
+A2 & 3-of-5 admin multisig not compromised & Safety & Signers &
+Malicious upgrade & Timelock monitor & Higher threshold, delay \\
+A3 & Relayer submits messages within 1 hour & Liveness & Relayer network
+& Stuck withdrawals & Queue age alert & Permissionless relay \\
+A4 & Token has no transfer fee & Safety & Collateral token & Accounting
+drift & Balance delta check & Measure actual received \\
+\end{longtable}
+}
+
+An assumption register is valuable because it gives reviewers a target.
+Each assumption can be challenged, tested, monitored, or accepted
+explicitly.
+
+\section{Mapping Attack Surfaces Across Chain, Contract, Infrastructure, and Human Layers}
+
+\subsection{Blockchain Attack Surface Is Layered}
+
+Blockchain security fails across layers:
+
+\begin{lstlisting}
+Chain layer:
+  Consensus, finality, reorgs, censorship, block production.
+
+Transaction/order layer:
+  Mempools, MEV, fees, ordering, inclusion, replacement.
+
+Execution layer:
+  VM semantics, gas/compute limits, account model, callbacks.
+
+Contract/protocol layer:
+  Authorization, accounting, external calls, upgrades, invariants.
+
+Economic layer:
+  Liquidity, oracle manipulation, incentives, governance capture.
+
+Cross-domain layer:
+  Bridges, rollups, relayers, proof systems, finality mismatch.
+
+Infrastructure layer:
+  RPCs, indexers, frontends, backends, CI/CD, dependencies.
+
+Human layer:
+  Multisig signing, incident response, custody, social engineering.
+\end{lstlisting}
+
+Many real exploits cross layers.
+
+Example:
+
+\begin{lstlisting}
+Low-liquidity AMM price
+  -> oracle manipulation
+  -> lending borrow
+  -> bad debt
+  -> governance emergency pause
+  -> users unable to withdraw
+\end{lstlisting}
+
+If your threat model only covers Solidity code, you miss the exploit
+path.
+
+\subsection{STRIDE as a Prompt, Not a Cage}
+
+STRIDE is useful as a prompt:
+
+\begin{itemize}
+\tightlist
+\item
+  Spoofing.
+\item
+  Tampering.
+\item
+  Repudiation.
+\item
+  Information disclosure.
+\item
+  Denial of service.
+\item
+  Elevation of privilege.
+\end{itemize}
+
+Microsoft describes STRIDE as a way to categorize threats and ask
+pointed questions about authentication, data modification, data
+exposure, service denial, and privilege escalation.\footnote{Microsoft,
+  ``Microsoft Threat Modeling Tool threats'',
+  https://learn.microsoft.com/en-us/azure/security/develop/threat-modeling-tool-threats.}
+
+Blockchain adaptation:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+STRIDE category
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Blockchain examples
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Spoofing & Forged signer, fake token, fake frontend, fake bridge
+message, fake oracle \\
+Tampering & Storage corruption, malicious upgrade, manipulated price,
+altered calldata \\
+Repudiation & Unclear signer intent, missing audit logs, unverifiable
+admin process \\
+Information disclosure & Leaked private order flow, exposed xpub, leaked
+signing policy, metadata deanonymization \\
+Denial of service & Stuck withdrawals, gas griefing, account locking,
+sequencer censorship, proof too large \\
+Elevation of privilege & Missing access control, role-admin abuse,
+governance capture, proxy admin takeover \\
+\end{longtable}
+}
+
+STRIDE should not replace blockchain-specific reasoning. It should help
+you ask what can go wrong from several angles.
+
+\subsection{Contract and Program Attack Surface}
+
+Contract/program surfaces include:
+
+\begin{itemize}
+\tightlist
+\item
+  Public functions and instructions.
+\item
+  External calls.
+\item
+  Delegatecall or equivalent dynamic dispatch.
+\item
+  Token transfers.
+\item
+  Callbacks and hooks.
+\item
+  Signature verification.
+\item
+  Access control.
+\item
+  Upgradeability.
+\item
+  Initialization.
+\item
+  Storage layout.
+\item
+  Math and rounding.
+\item
+  Oracle reads.
+\item
+  Event emission.
+\item
+  Batch/multicall.
+\item
+  Fallback logic.
+\item
+  Account constraints.
+\item
+  Resource limits.
+\end{itemize}
+
+OWASP's Smart Contract Top 10 includes categories such as access
+control, business logic, oracle manipulation, flash-loan-facilitated
+attacks, input validation, unchecked external calls, arithmetic errors,
+reentrancy, and upgradeability risk.\footnote{OWASP, ``Smart Contract
+  Top 10'', https://owasp.org/www-project-smart-contract-top-10/.}
+
+Use such lists as prompts, not as a finish line. A protocol can avoid
+every named category and still fail economically because its invariant
+is wrong.
+
+\subsection{Chain and Ordering Attack Surface}
+
+Chain-layer and ordering surfaces include:
+
+\begin{itemize}
+\tightlist
+\item
+  Reorgs.
+\item
+  Delayed finality.
+\item
+  Chain halts.
+\item
+  Censorship.
+\item
+  Mempool visibility.
+\item
+  Transaction replacement.
+\item
+  Priority fees.
+\item
+  Builder/searcher behavior.
+\item
+  Sequencer downtime.
+\item
+  Forced inclusion.
+\item
+  Cross-domain settlement delay.
+\end{itemize}
+
+Threat questions:
+
+\begin{lstlisting}
+Can a profitable actor change ordering?
+Can a transaction be sandwiched?
+Can a liquidation be delayed?
+Can a bridge event be reorged out?
+Can exits be censored?
+Can a user rely on state before settlement?
+Can a governance proposal be front-run or blocked?
+\end{lstlisting}
+
+If the protocol depends on timely or private execution, ordering is part
+of the threat model.
+
+\subsection{Economic Attack Surface}
+
+Economic security is not optional in blockchain systems because assets
+and incentives are native to the execution environment.
+
+Economic surfaces include:
+
+\begin{itemize}
+\tightlist
+\item
+  Liquidity depth.
+\item
+  Oracle reference markets.
+\item
+  Collateral factors.
+\item
+  Liquidation incentives.
+\item
+  Auction design.
+\item
+  Reward emissions.
+\item
+  Governance token distribution.
+\item
+  Vote borrowing and bribery.
+\item
+  Peg mechanisms.
+\item
+  Withdrawal queues.
+\item
+  Restaking correlation.
+\item
+  Insurance funds.
+\item
+  Bad debt handling.
+\end{itemize}
+
+Threat questions:
+
+\begin{lstlisting}
+How much capital does the attack require?
+Can flash liquidity reduce that capital requirement?
+Can the attacker manipulate a price only briefly?
+Can the attacker profit atomically?
+Who absorbs losses?
+Can a rational actor grief for indirect profit?
+Can incentives fail during market stress?
+\end{lstlisting}
+
+Economic attack surface cannot be found by scanning code alone.
+
+\subsection{Infrastructure Attack Surface}
+
+Infrastructure surfaces include:
+
+\begin{itemize}
+\tightlist
+\item
+  Frontend hosting.
+\item
+  DNS.
+\item
+  Wallet connectors.
+\item
+  RPC providers.
+\item
+  Indexers.
+\item
+  Backend APIs.
+\item
+  Signing services.
+\item
+  CI/CD.
+\item
+  Package dependencies.
+\item
+  Container images.
+\item
+  Monitoring tools.
+\item
+  Admin dashboards.
+\item
+  Cloud accounts.
+\item
+  Secrets management.
+\end{itemize}
+
+OWASP's Web3 attack-vector material explicitly goes beyond smart
+contracts and includes risks such as multisig hijacking, supply-chain
+attacks, private key compromise, UI/UX spoofing and approval phishing,
+centralized infrastructure breaches, DNS and routing hijacking, wallet
+compromise, insider threats, and malicious open-source
+contributions.\footnote{OWASP Smart Contract Security, ``Alternate Top
+  15 - Web3 Attack Vectors Beyond Smart Contracts'',
+  https://scs.owasp.org/sctop10/Web3-Attack-Vectors-Top15/.}
+
+This matters because many ``protocol'' losses happen outside protocol
+code.
+
+Threat questions:
+
+\begin{lstlisting}
+Can a compromised frontend construct malicious approvals?
+Can DNS hijack redirect users?
+Can an indexer desync make users take unsafe actions?
+Can backend signers authorize withdrawals?
+Can CI/CD deploy wrong contracts?
+Can a package update exfiltrate keys?
+Can RPC censorship hide pending danger?
+\end{lstlisting}
+
+If an off-chain component can cause users or operators to authorize
+harmful transitions, it is in scope.
+
+\subsection{Human and Governance Attack Surface}
+
+Human surfaces include:
+
+\begin{itemize}
+\tightlist
+\item
+  Multisig review.
+\item
+  Key backups.
+\item
+  Deployment ceremonies.
+\item
+  Governance discussion.
+\item
+  Vote delegation.
+\item
+  Emergency response.
+\item
+  Legal and compliance controls.
+\item
+  Operator incentives.
+\item
+  Public communications.
+\item
+  Support channels.
+\item
+  Social engineering.
+\end{itemize}
+
+Governance surfaces include:
+
+\begin{itemize}
+\tightlist
+\item
+  Proposal thresholds.
+\item
+  Quorum.
+\item
+  Voting power distribution.
+\item
+  Delegation.
+\item
+  Timelock.
+\item
+  Execution payloads.
+\item
+  Cancellation rights.
+\item
+  Emergency veto.
+\item
+  Treasury control.
+\item
+  Governance self-upgrade.
+\end{itemize}
+
+Threat questions:
+
+\begin{lstlisting}
+Can governance call arbitrary targets?
+Can voting power be borrowed?
+Can delegates be bribed?
+Can a proposal hide malicious calldata?
+Can signers verify what they approve?
+Can an attacker exploit public incident response?
+Can a social-engineered employee deploy malicious code?
+\end{lstlisting}
+
+The human layer often holds the keys to the machine.
+
+\section{Producing a Threat Model That Guides Review Instead of Decorating It}
+
+\subsection{The Threat Model Must Produce Work}
+
+A useful threat model produces review tasks.
+
+For each important threat, the model should say:
+
+\begin{lstlisting}
+Threat:
+  What can go wrong?
+
+Priority:
+  Why does it matter more or less than others?
+
+Review target:
+  Which code, config, process, or dependency must be inspected?
+
+Invariant:
+  What property should be written or tested?
+
+Mitigation:
+  What design control prevents or limits the threat?
+
+Residual risk:
+  What remains after mitigation?
+
+Monitoring:
+  How would we detect failure?
+\end{lstlisting}
+
+If a threat model does not affect review priorities, it is probably
+decoration.
+
+\subsection{Prioritize by Impact, Feasibility, and Uncertainty}
+
+NIST SP 800-30 frames risk around threat events, threat sources,
+vulnerabilities or predisposing conditions, likelihood, and
+impact.\footnote{NIST, ``SP 800-30 Revision 1: Guide for Conducting Risk
+  Assessments'', likelihood determination,
+  https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-30r1.pdf.}
+It also notes that impact determinations should make assumptions,
+sources, methods, and rationale explicit.\footnote{NIST, ``SP 800-30
+  Revision 1: Guide for Conducting Risk Assessments'', impact
+  determination,
+  https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-30r1.pdf.}
+
+For blockchain security review, use practical factors:
+
+\begin{itemize}
+\tightlist
+\item
+  Funds at risk.
+\item
+  Privilege impact.
+\item
+  Solvency impact.
+\item
+  Governance impact.
+\item
+  Liveness impact.
+\item
+  Cross-domain contagion.
+\item
+  Attacker capital required.
+\item
+  Exploit reliability.
+\item
+  Preconditions.
+\item
+  Time sensitivity.
+\item
+  Detectability.
+\item
+  Recovery difficulty.
+\item
+  Uncertainty.
+\end{itemize}
+
+Uncertainty deserves emphasis. A high-impact area with unclear
+assumptions should get review attention even before a known bug exists.
+
+Risk shorthand:
+
+\begin{lstlisting}
+High priority:
+  High impact + plausible path + unclear or weak controls.
+
+Medium priority:
+  Meaningful impact + constrained path or strong controls.
+
+Low priority:
+  Low impact, implausible path, or well-constrained residual risk.
+
+Research priority:
+  Impact potentially high but model uncertain.
+\end{lstlisting}
+
+Do not pretend you can reduce every blockchain threat to a neat numeric
+score. Use scoring to communicate, not to replace judgment.
+
+\subsection{Turn Threats Into Invariants and Tests}
+
+Threat:
+
+\begin{lstlisting}
+Attacker manipulates vault share price by donating assets before a victim deposit.
+\end{lstlisting}
+
+Invariant:
+
+\begin{lstlisting}
+Depositing assets should mint shares proportional to economic contribution,
+and no direct asset transfer should let an attacker force later deposits to mint
+zero or unfairly low shares.
+\end{lstlisting}
+
+Tests:
+
+\begin{lstlisting}
+first depositor fuzzing
+direct donation before deposit
+small deposit rounding
+large asset balance / tiny share supply
+differential comparison with ideal math model
+\end{lstlisting}
+
+Threat:
+
+\begin{lstlisting}
+Admin upgrades vault to malicious implementation during timelock.
+\end{lstlisting}
+
+Invariant or security property:
+
+\begin{lstlisting}
+Users can withdraw before a delayed upgrade executes, unless withdrawals are
+paused only under documented emergency rules.
+\end{lstlisting}
+
+Tests/review:
+
+\begin{lstlisting}
+simulate upgrade queue and execution
+verify timelock delay
+verify pause cannot block exit indefinitely without escalation
+verify monitoring can detect queued implementation
+\end{lstlisting}
+
+The threat model should generate the testing plan.
+
+\subsection{Decide Mitigation, Acceptance, Transfer, or Elimination}
+
+Not every risk is fixed the same way.
+
+Possible responses:
+
+\begin{itemize}
+\tightlist
+\item
+  Eliminate the feature.
+\item
+  Redesign the transition.
+\item
+  Add validation.
+\item
+  Add invariant checks.
+\item
+  Add rate limits.
+\item
+  Add timelock.
+\item
+  Add circuit breaker.
+\item
+  Add monitoring.
+\item
+  Restrict supported assets.
+\item
+  Add independent oracle.
+\item
+  Add fallback path.
+\item
+  Increase multisig threshold.
+\item
+  Improve signing workflow.
+\item
+  Add tests or formal specifications.
+\item
+  Document and accept residual risk.
+\item
+  Transfer risk through insurance or legal process.
+\end{itemize}
+
+OWASP's threat-modeling guidance includes identifying countermeasures or
+managing risk after identifying what can go wrong.\footnote{OWASP,
+  ``Threat Modeling'', https://owasp.org/www-community/Threat\_Modeling.}
+
+For each material threat, write the decision:
+
+\begin{lstlisting}
+Mitigate:
+  Add staleness and deviation checks.
+
+Accept:
+  Governance can change collateral factor after timelock; users accept governance risk.
+
+Eliminate:
+  Do not support fee-on-transfer collateral.
+
+Monitor:
+  Alert if oracle age > 30 minutes or market price deviates > 2 percent.
+\end{lstlisting}
+
+Unwritten acceptance is not risk management. It is amnesia.
+
+\subsection{Threat Model Deliverable Template}
+
+A useful threat model can be concise if it is structured.
+
+\begin{lstlisting}
+1. Scope
+  Included systems:
+  Excluded systems:
+  Review goals:
+
+2. System summary
+  State machines:
+  Major flows:
+  Deployment addresses:
+
+3. Assets
+  User assets:
+  Protocol assets:
+  Control assets:
+  Off-chain claims:
+
+4. Actors
+  Users:
+  Operators:
+  Privileged roles:
+  External participants:
+  Adversaries:
+
+5. Entry points
+  On-chain:
+  Off-chain:
+  Human/operational:
+
+6. Trust boundaries
+  Oracles:
+  Bridges:
+  RPC/indexers:
+  Frontend/backend:
+  Governance/admin:
+  Custody/legal:
+
+7. Assumptions
+  Safety:
+  Liveness:
+  Economic:
+  Operational:
+
+8. Threat scenarios
+  Threat:
+  Preconditions:
+  Attack path:
+  Impact:
+  Existing controls:
+  Gaps:
+  Priority:
+
+9. Review plan
+  Code areas:
+  Invariants:
+  Tests:
+  Manual review questions:
+  Monitoring requirements:
+
+10. Residual risk
+  Accepted:
+  Mitigated:
+  Requires decision:
+\end{lstlisting}
+
+This template is not bureaucracy. It is a compression format for
+security reasoning.
+
+\subsection{Anti-Patterns}
+
+Avoid these.
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Anti-pattern
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Why it fails
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Bug-list threat model & Names vulnerabilities without modeling
+system-specific attack paths \\
+Diagram-only threat model & Looks serious but does not drive tests or
+review \\
+Contract-only scope & Misses oracles, governance, frontends, keepers,
+bridges, and keys \\
+Honest-user model & Reviews product flows instead of adversarial
+transitions \\
+``Decentralized'' as assumption & Replaces precise validator,
+governance, oracle, or admin assumptions with a slogan \\
+Ignoring liveness & Preserves accounting while trapping funds \\
+Treating trusted roles as safe & Hides the largest authority edges \\
+No update process & Model becomes stale after deployment or governance
+change \\
+Equal-priority threats & Fails to guide scarce review effort \\
+No residual-risk statement & Leaves users and teams unclear about what
+remains trusted \\
+\end{longtable}
+}
+
+The Threat Modeling Manifesto values finding and fixing design issues
+over checkbox compliance, and doing threat modeling over talking about
+it.\footnote{Threat Modeling Manifesto,
+  https://www.threatmodelingmanifesto.org/.} That is the standard to use
+here.
+
+\subsection{What Good Looks Like}
+
+A good threat model should let a reviewer say:
+
+\begin{lstlisting}
+I know where value is.
+I know who can affect it.
+I know which assumptions matter.
+I know which assumptions are weakest.
+I know which state transitions deserve the deepest review.
+I know which invariants to write.
+I know which tests should exist.
+I know which external systems can break this protocol.
+I know what risks the team is accepting.
+\end{lstlisting}
+
+If the threat model does not create that clarity, keep working.
+
+\section{Worked Example: Threat Modeling a Lending Market}
+
+Consider a simplified lending market:
+
+\begin{lstlisting}
+Users deposit collateral.
+Users borrow stablecoin up to a collateral factor.
+Oracle prices determine account health.
+Liquidators repay debt and receive collateral at a discount.
+Governance can list collateral assets and set parameters.
+An admin multisig can pause markets and upgrade contracts after a timelock.
+Keepers monitor accounts and submit liquidations.
+\end{lstlisting}
+
+\subsection{Step 1: Scope}
+
+\begin{lstlisting}
+Included:
+  Lending market contracts
+  Oracle integration
+  Collateral token integration
+  Liquidation logic
+  Governance parameter changes
+  Upgrade and pause controls
+
+Excluded but documented:
+  Frontend implementation
+  Stablecoin issuer reserves
+  External AMM liquidity sources
+\end{lstlisting}
+
+\subsection{Step 2: Assets}
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Asset
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Representation
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Failure
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Collateral & Token balances and account collateral records & Theft,
+mispricing, frozen withdrawal \\
+Debt & Borrow balances and interest indexes & Bad debt, incorrect
+repayment \\
+Stablecoin liquidity & Stablecoin balances and mint/transfer ability &
+Insolvency, liquidity shortage \\
+Liquidation right & Public liquidation function & Griefing, unfair
+seizure, failed liquidation \\
+Governance control & Voting and timelock state & Capture, unsafe
+listing \\
+Upgrade authority & Proxy admin/timelock & Malicious implementation \\
+Oracle price & Oracle feed and cached values & Manipulated or stale
+health checks \\
+\end{longtable}
+}
+
+\subsection{Step 3: Actors}
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}ll@{}}
+\toprule\noalign{}
+Actor & Capability \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Depositor & Supply collateral, withdraw \\
+Borrower & Borrow, repay, increase leverage \\
+Liquidator & Repay debt and seize collateral \\
+MEV searcher & Order liquidation and oracle-update transactions \\
+Governance & List assets, set factors, change oracle \\
+Admin multisig & Pause and upgrade \\
+Oracle operator & Publish price \\
+Keeper & Monitor and call liquidations \\
+Token issuer & Freeze or alter token behavior if token supports it \\
+\end{longtable}
+}
+
+\subsection{Step 4: Entry Points}
+
+\begin{lstlisting}
+deposit(asset, amount)
+withdraw(asset, amount)
+borrow(asset, amount)
+repay(asset, amount)
+liquidate(account, repayAmount)
+setCollateralFactor(asset, factor)
+setOracle(asset, oracle)
+pauseMarket(asset)
+upgradeTo(implementation)
+\end{lstlisting}
+
+\subsection{Step 5: Assumptions}
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Assumption
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Type
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Failure
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Oracle price is fresh and manipulation-resistant & Safety &
+Undercollateralized borrow \\
+Liquidators act when profitable & Liveness & Bad debt grows \\
+Collateral tokens behave as integrated & Safety & Accounting drift or
+freeze \\
+Governance cannot be cheaply captured & Safety & Malicious parameters \\
+Pause cannot permanently trap users without documented authority &
+Liveness & Frozen funds \\
+Upgrade timelock gives users a real exit window & Safety/liveness &
+Malicious upgrade before exit \\
+\end{longtable}
+}
+
+\subsection{Step 6: Threat Scenarios}
+
+Threat:
+
+\begin{lstlisting}
+Oracle manipulation enables bad debt.
+\end{lstlisting}
+
+Attack path:
+
+\begin{lstlisting}
+Attacker manipulates low-liquidity reference market.
+Oracle reads manipulated price.
+Attacker deposits inflated collateral.
+Attacker borrows maximum stablecoin.
+Price normalizes.
+Account becomes insolvent.
+\end{lstlisting}
+
+Controls:
+
+\begin{lstlisting}
+TWAP or robust oracle
+staleness checks
+collateral caps
+borrow caps
+liquidation incentives
+post-borrow health check
+monitoring for price deviation
+\end{lstlisting}
+
+Threat:
+
+\begin{lstlisting}
+Governance lists unsafe collateral.
+\end{lstlisting}
+
+Attack path:
+
+\begin{lstlisting}
+Attacker accumulates or borrows voting power.
+Proposal lists illiquid token with high collateral factor.
+Attacker manipulates token price or mints supply.
+Attacker borrows stablecoin and leaves bad debt.
+\end{lstlisting}
+
+Controls:
+
+\begin{lstlisting}
+listing framework
+governance timelock
+collateral caps
+oracle review
+liquidity requirements
+risk committee veto
+monitoring for proposal payloads
+\end{lstlisting}
+
+Threat:
+
+\begin{lstlisting}
+Liquidation liveness fails during market stress.
+\end{lstlisting}
+
+Attack path:
+
+\begin{lstlisting}
+Prices fall quickly.
+Many accounts become unhealthy.
+Liquidation transactions become expensive or unprofitable.
+Keepers stop executing.
+Bad debt accumulates.
+\end{lstlisting}
+
+Controls:
+
+\begin{lstlisting}
+liquidation incentives sized for stress
+permissionless liquidation
+batch limits
+keeper redundancy
+bad debt monitoring
+emergency parameter controls
+\end{lstlisting}
+
+\subsection{Step 7: Review Plan}
+
+Review priorities:
+
+\begin{lstlisting}
+1. Oracle integration and staleness/deviation handling.
+2. Collateral and debt accounting invariants.
+3. Liquidation math and liveness under stress.
+4. Governance/admin authority and timelock bypasses.
+5. Token integration assumptions.
+6. Upgrade and pause behavior.
+\end{lstlisting}
+
+Invariants:
+
+\begin{lstlisting}
+total debt accounting matches user debts plus indexes
+borrow cannot leave account below required health at execution time
+liquidation cannot seize more collateral than rules allow
+withdraw cannot make account unhealthy
+collateral caps cannot be exceeded
+paused state does not create undocumented permanent fund lock
+\end{lstlisting}
+
+Tests:
+
+\begin{lstlisting}
+manipulated oracle price
+stale oracle price
+fee-on-transfer collateral
+collateral decimals mismatch
+rapid price drop with many liquidations
+governance parameter edge cases
+upgrade queued while withdrawals are paused
+\end{lstlisting}
+
+This is a threat model that guides work. It tells the reviewer where to
+look and what properties to test.
+
+\section{Practical Discipline: The One-Page Threat Model}
+
+Before a deep review, write one page with:
+
+\begin{lstlisting}
+Protocol goal:
+
+Assets:
+
+Critical transitions:
+
+Privileged roles:
+
+External dependencies:
+
+Top safety assumptions:
+
+Top liveness assumptions:
+
+Most plausible profitable attack:
+
+Worst privileged-role failure:
+
+Most fragile dependency:
+
+Top five review priorities:
+\end{lstlisting}
+
+If this page cannot be written, the protocol is not understood yet.
+
+\section{Review Questions}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  What should a blockchain threat model produce besides a list of possible attackers?
+\item
+  Why should assets, actors, entry points, privileged roles, and trust boundaries be mapped before naming bug classes?
+\item
+  What is the difference between a user, attacker, rational participant, trusted operator, and privileged actor?
+\item
+  Why is an external dependency a security assumption rather than background infrastructure?
+\item
+  How does an attack tree help convert a vague threat into review priorities?
+\item
+  What makes a threat model useful during review rather than decorative?
+\item
+  Why should a threat model include both safety and liveness assumptions?
+\item
+  How should a reviewer turn threat-model output into tests, invariants, mitigations, and monitoring?
+\end{enumerate}
+
+\section{Applied Exercises}
+
+\subsection{Exercise 1: One-Page Threat Model}
+
+Given a protocol description, produce a one-page threat model with:
+
+\begin{itemize}
+\tightlist
+\item
+  protocol goal;
+\item
+  assets;
+\item
+  actors;
+\item
+  critical transitions;
+\item
+  privileged roles;
+\item
+  external dependencies;
+\item
+  top safety assumptions;
+\item
+  top liveness assumptions;
+\item
+  top five review priorities.
+\end{itemize}
+
+Expected output: a one-page artifact, not an essay.
+
+\subsection{Exercise 2: Data and Control Flow}
+
+Draw a data/control-flow diagram for one of the following:
+
+\begin{itemize}
+\tightlist
+\item
+  lending market with oracle and liquidators;
+\item
+  vault with strategist and withdrawal queue;
+\item
+  bridge with relayers and validator signatures.
+\end{itemize}
+
+For each arrow, state what crosses the boundary, who can modify it, who verifies it, and what happens if it is stale, false, missing, delayed, replayed, or reordered.
+
+Expected output: one diagram and one trust-boundary table.
+
+\subsection{Exercise 3: Attack Tree to Review Plan}
+
+Start with this goal:
+
+\begin{lstlisting}
+Cause the protocol to lose assets or freeze user exits.
+\end{lstlisting}
+
+Build an attack tree with at least three branches. Then convert it into a review plan with depth budgets.
+
+Expected output: attack tree plus a prioritized review plan.
+
+\subsection{Exercise 4: Threat Model Critique}
+
+Critique this weak statement:
+
+\begin{lstlisting}
+The system is safe because only trusted actors can perform sensitive actions.
+\end{lstlisting}
+
+Rewrite it as concrete assumptions about roles, keys, thresholds, timelocks, observability, and recovery paths.
+
+Expected output: an assumption register and one residual-risk paragraph.
+
+\section{Key Takeaways}
+
+\begin{itemize}
+\tightlist
+\item
+  Threat modeling turns a protocol description into a security model
+  that guides review.
+\item
+  A useful threat model connects system scope, assets, actors, entry
+  points, assumptions, threats, mitigations, and tests.
+\item
+  Blockchain threat models must include chain behavior, transaction
+  ordering, economic incentives, external dependencies, infrastructure,
+  and human operations.
+\item
+  Users are not trusted to follow product intent. Public entry points
+  must survive adversarial but valid use.
+\item
+  Rational participants, Byzantine actors, compromised keys, insiders,
+  and negligent operators require different controls.
+\item
+  Trust assumptions should be written in falsifiable form and classified
+  by safety, liveness, or both.
+\item
+  Attack surfaces exist across chain, contract, economic, cross-domain,
+  infrastructure, and human layers.
+\item
+  STRIDE and vulnerability lists are prompts, not substitutes for
+  system-specific reasoning.
+\item
+  A good threat model produces review priorities, invariants, tests,
+  mitigations, monitoring, and residual-risk decisions.
+\item
+  A threat model that does not change what gets reviewed or tested is
+  decoration.
+\end{itemize}
+
+\section{Further Reading}
+
+\begin{itemize}
+\tightlist
+\item
+  OWASP, \href{https://owasp.org/www-community/Threat_Modeling}{``Threat
+  Modeling''}. Good general overview of threat-modeling goals,
+  lifecycle, and the four-question framework.
+\item
+  \href{https://www.threatmodelingmanifesto.org/}{``Threat Modeling
+  Manifesto''}. Concise principles and anti-patterns for practical
+  threat modeling.
+\item
+  Microsoft,
+  \href{https://learn.microsoft.com/en-us/azure/security/develop/threat-modeling-tool-threats}{``Microsoft
+  Threat Modeling Tool threats''}. Practical overview of STRIDE threat
+  categories.
+\item
+  NIST,
+  \href{https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-30r1.pdf}{``SP
+  800-30 Revision 1: Guide for Conducting Risk Assessments''}. Useful
+  for threat sources, likelihood, impact, and risk framing.
+\item
+  OWASP,
+  \href{https://owasp.org/www-project-smart-contract-top-10/}{``Smart
+  Contract Top 10''}. Blockchain-specific awareness list of common
+  smart-contract risk categories.
+\item
+  OWASP Smart Contract Security,
+  \href{https://scs.owasp.org/SCSVS/controls/SCSVS-ARCH-3/}{``S1.3
+  Threat Modeling''}. Smart-contract security verification requirements
+  for identifying threats, assessing risks, and implementing
+  mitigations.
+\item
+  OWASP Smart Contract Security,
+  \href{https://scs.owasp.org/sctop10/Web3-Attack-Vectors-Top15/}{``Alternate
+  Top 15 - Web3 Attack Vectors Beyond Smart Contracts''}. Useful
+  reminder that protocol risk includes infrastructure, keys, supply
+  chain, and social engineering.
+\end{itemize}

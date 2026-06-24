@@ -1,0 +1,468 @@
+\chapter{Asset and Token Semantics}
+
+\section{Purpose}
+
+\begin{principlebox}
+A token interface tells a program how to ask an asset contract, mint, module, or token program to do something. It does not prove the economic effect that occurred. Security review must identify the asset behavior the protocol assumes and compare it with the asset behavior the system actually enforces.
+\end{principlebox}
+
+Chapter~20 introduced the public financial backend model. Chapter~21 studied who is allowed to cause a protected transition. This chapter studies what moves when the transition says an asset moved.
+
+That sounds simple. It is not. ``Token'' is a dangerously overloaded word. It can mean an ERC-20 balance in a contract, an NFT tracked by token ID, an ERC-1155 balance under an ID, an SPL token account tied to a mint, a Token-2022 mint with transfer restrictions, a Sui \texttt{Coin<T>} object, a CosmWasm CW20 contract balance, a Cosmos SDK bank coin, an IBC voucher with a denom trace, a vault share, a wrapped claim, a bridged representation, or a receipt for something off-chain.
+
+These things are not interchangeable. They answer different questions:
+
+\begin{codeblock}
+what identifies the asset?
+who can mint or burn it?
+who can move it?
+can movement fail, call back, charge a fee, freeze, or redirect?
+can balances change without direct transfers?
+can metadata, decimals, authority, or transfer rules change later?
+does the token represent native value, a claim, a share, or a wrapper?
+\end{codeblock}
+
+Many vulnerabilities come from pretending the answer is always the ERC-20 happy path: call \texttt{transferFrom}, assume the requested amount arrived, credit accounting, and move on. That pattern fails against fee-on-transfer tokens, rebasing tokens, non-standard return values, hooks, frozen accounts, wrong mints, wrong token programs, wrapped assets, bridged denoms, and assets whose authority surfaces change over time.
+
+This chapter is not the reentrancy chapter, even though some tokens call back. That is Chapter~23. It is not the rounding and share-accounting chapter, even though token behavior can corrupt accounting. That is Chapter~24. It is not the bridge chapter, even though wrapped and bridged tokens appear here. That is Chapter~35. The purpose here is narrower: teach the asset-behavior review that every contract and program integration needs before it trusts balances, transfers, approvals, supplies, or symbols.
+
+\section{Identifying the Asset}
+
+Asset review starts before any transfer call. The reviewer must identify the economic claim, the on-chain representation, the unit, and the authority surfaces that can change the claim.
+
+\subsection{Asset Identity and Economic Claims}
+
+The first mistake is to identify an asset only by a display name. Names and symbols are human interface data. They are not the asset's security identity.
+
+A security review should distinguish at least five layers:
+
+\begin{codeblock}
+economic asset:
+    what value or claim users believe they hold
+
+representation:
+    contract, mint, denom, type, object, share, or voucher
+
+unit:
+    decimals, token id, object id, share units, or base denom
+
+authority:
+    who can mint, burn, freeze, upgrade, denylist, migrate, or redeem
+
+invariant:
+    what must remain true if the protocol accepts this asset
+\end{codeblock}
+
+For native ETH, the representation is part of the Ethereum state machine. For an ERC-20, the representation is a contract that maintains balances and allowances according to its code. For an SPL token, the asset identity is centered on a mint, while balances live in token accounts for that mint. For Sui, a \texttt{Coin<T>} is denominated by its type parameter \texttt{T}, with coin metadata associated with that type.\footnote{\href{https://docs.sui.io/onchain-finance/fungible-tokens/coin}{Sui documentation, ``Coin Standard''}.} For IBC transfers, the receiving chain may hold a voucher whose denomination encodes source information rather than the original chain's native asset directly.\footnote{\href{https://github.com/cosmos/ibc/blob/main/spec/app/ics-020-fungible-token-transfer/README.md}{Cosmos IBC specification, ``ICS-20 Fungible Token Transfer''}.}
+
+Those differences matter because protocols often use assets as collateral, accounting inputs, routing units, governance power, redemption claims, or access credentials. A protocol that accepts ``USDC'' must answer which USDC representation it accepts, on which chain, under which contract or mint, with which issuer controls, under which bridge or wrapper, and with which failure behavior. The display symbol is not enough.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=9mm and 9mm,
+  compact node/.style={security node, text width=27mm, minimum height=8mm}
+]
+\node[compact node] (claim) {Economic claim};
+\node[compact node, right=of claim] (rep) {Representation};
+\node[compact node, right=of rep] (unit) {Unit and metadata};
+\node[compact node, below=of unit] (authority) {Asset authority};
+\node[compact node, left=of authority] (behavior) {Transfer behavior};
+\node[compact node, left=of behavior] (invariant) {Protocol invariant};
+
+\draw[security arrow] (claim) -- (rep);
+\draw[security arrow] (rep) -- (unit);
+\draw[security arrow] (unit) -- (authority);
+\draw[security arrow] (authority) -- (behavior);
+\draw[security arrow] (behavior) -- (invariant);
+\end{tikzpicture}
+\caption{Asset review connects the user-visible claim to the representation and behavior the protocol actually uses.}
+\end{figure}
+
+The same asset name can hide incompatible claims:
+
+\begin{itemize}
+\item Native ETH is not the same representation as WETH.
+\item WETH on Ethereum is not the same representation as a bridged WETH voucher on another chain.
+\item An ERC-20 receipt token is not the same asset as the underlying token it claims to represent.
+\item A vault share is not the same asset as the vault's holdings.
+\item An NFT collection contract is not the same security object as a specific token ID.
+\item An SPL token mint is not the same thing as a particular token account holding units of that mint.
+\end{itemize}
+
+The protocol invariant should be written against the representation the code actually controls. If a lending market accepts a bridged token as collateral, the invariant is not simply ``collateral backs debt.'' It includes assumptions about bridge redemption, finality, issuer controls, denomination trace, and whether the market can liquidate the representation it accepted. If a vault issues shares, the invariant is not ``shares are assets.'' Shares are claims on the vault's accounting rule. The underlying assets, share supply, exchange rate, and withdrawal path must be reviewed separately.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.26\textwidth}X@{}}
+\toprule
+Asset label & Review identity & Security question \\
+\midrule
+ERC-20 token & Contract address and chain & Does the contract behavior match the assumed token behavior? \\
+NFT & Contract address, token ID, ownership state & Which exact token is controlled, and which approvals apply? \\
+SPL token & Mint, token account, token program & Is the token account for the expected mint and authority? \\
+Sui coin & \texttt{Coin<T>} type and object state & Which type, metadata, treasury capability, and ownership rules apply? \\
+IBC voucher & Denom and trace path & Which source chain and channel history define the represented claim? \\
+Vault share & Share contract or type plus vault accounting & What claim does a share have on underlying assets? \\
+\bottomrule
+\end{tabularx}
+\caption{Asset identity is runtime-specific. The review question follows the representation, not the name.}
+\end{table}
+
+The practical artifact is an asset behavior profile:
+
+\begin{codeblock}
+asset profile:
+    representation id
+    economic claim
+    unit and decimals
+    transfer function or movement rule
+    approval or spending authority
+    mint, burn, freeze, denylist, pause, or upgrade authority
+    callback or hook behavior
+    balance-change behavior outside direct transfers
+    metadata mutability
+    protocol invariant affected
+\end{codeblock}
+
+Without that profile, a protocol is often trusting a token it has not actually specified.
+
+\subsection{Standards and Runtime Representations}
+
+Token standards are useful because they make assets composable. They are dangerous when reviewers treat the standard name as proof of behavior.
+
+ERC-20 defines a common interface for fungible tokens, including balances, transfers, allowances, approvals, and total supply.\footnote{\href{https://eips.ethereum.org/EIPS/eip-20}{EIP-20, ``Token Standard''}.} The interface tells an integrator which calls exist. It does not prove the token has no fees, no blacklist, no rebasing, no pausing, no mint authority, no upgrade path, no unusual return behavior, and no economic coupling to an issuer.
+
+ERC-721 tracks non-fungible tokens by token ID and includes ownership, approval, and operator concepts.\footnote{\href{https://eips.ethereum.org/EIPS/eip-721}{EIP-721, ``Non-Fungible Token Standard''}.} The security unit is not merely the collection contract. It is the token ID, its owner, its approvals, and any contract-level logic that can mint, burn, transfer, freeze, reveal, or change metadata.
+
+ERC-1155 generalizes this further by allowing one contract to manage many token IDs, each of which can represent fungible, non-fungible, or semi-fungible units.\footnote{\href{https://eips.ethereum.org/EIPS/eip-1155}{EIP-1155, ``Multi Token Standard''}.} A reviewer must not assume that every ID has the same supply, meaning, approval risk, metadata stability, or transfer behavior. Operator approval can apply broadly across IDs, so one authorization may expose more than one asset class.
+
+Solana separates token behavior into token programs, mint accounts, and token accounts. Solana's token documentation describes SPL tokens as digital assets represented through mint accounts and token accounts, with token program instructions for minting, transferring, approving delegates, freezing, thawing, closing, and setting authorities.\footnote{\href{https://solana.com/docs/tokens}{Solana documentation, ``Tokens on Solana''}.} Chapter~16 already covered the account-validation discipline. Here the asset lesson is that a balance is not stored under a user's wallet in one global mapping. It is stored in a token account for a mint, with authority fields that must be checked.
+
+Token-2022, documented as the Token Extensions Program, adds optional extensions to token mints and token accounts.\footnote{\href{https://solana.com/docs/tokens/extensions}{Solana documentation, ``Token Extensions''}.} Extensions can change transfer behavior, fees, metadata, close authority, transfer hooks, non-transferability, default account state, permanent delegation, and other rules. A program that treats every Token-2022 mint like a classic SPL token may accept behavior it never modeled.
+
+CosmWasm's CW20 specification provides a fungible-token interface for CosmWasm contracts, inspired by ERC-20 but not identical.\footnote{\href{https://github.com/CosmWasm/cw-plus/blob/main/packages/cw20/README.md}{CosmWasm CW20 specification}.} In Cosmos SDK applications, native bank-module coins and IBC vouchers follow still different paths. A CosmWasm contract may handle native funds attached to a message, CW20 receive hooks, or IBC-denominated bank balances. These are different asset paths and should not be collapsed.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.18\textwidth}>{\RaggedRight\arraybackslash}p{0.29\textwidth}X@{}}
+\toprule
+Representation & Security unit & What must be checked \\
+\midrule
+ERC-20 & Contract balance and allowance state & Return behavior, balance delta, supply controls, restrictions, decimals \\
+ERC-721 & Contract plus token ID & Owner, approved address, operator approval, receiver behavior, metadata assumptions \\
+ERC-1155 & Contract plus token ID and amount & ID meaning, balance, operator approval, batch behavior, receiver hooks \\
+SPL Token & Mint and token accounts & Mint, token-account authority, delegate, freeze state, token program ID \\
+Token-2022 & Mint/account plus extensions & Enabled extensions and their effect on transfer, fees, authority, hooks, and state \\
+Sui coin & \texttt{Coin<T>} object and type & Type, object ownership, metadata, treasury authority, transfer restrictions \\
+CW20 or IBC denom & Contract or denom trace & Contract behavior, native-vs-contract path, denom origin, channel history \\
+\bottomrule
+\end{tabularx}
+\caption{The standard tells the reviewer where to look. It does not settle the security claim.}
+\end{table}
+
+The reviewer should ask one question before using any token-standard label:
+
+\begin{codeblock}
+Which state transition does this representation actually perform,
+and what does my protocol assume happened afterward?
+\end{codeblock}
+
+That question prevents shallow compatibility thinking. A protocol may be compatible with an interface and incompatible with an asset behavior.
+
+\section{Movement and Supply Effects}
+
+After the asset is identified, the review moves to the effect of movement. The core question is whether the protocol's accounting records the effect that actually happened.
+
+\subsection{Transfer, Balance, and Supply Semantics}
+
+Most token-integration failures begin with a false equation:
+
+\begin{codeblock}
+requested transfer amount == amount received == amount credited
+\end{codeblock}
+
+That equation is sometimes true. It is not a general law.
+
+For ERC-20 transfers, the standard says callers must handle \texttt{false} returns and must not assume \texttt{false} is never returned.\footnote{\href{https://eips.ethereum.org/EIPS/eip-20}{EIP-20, ``Token Standard'', specification notes on transfer return values}.} In practice, some widely used tokens historically returned no boolean value, while others return \texttt{false}, revert, pause, blacklist, charge fees, or implement custom logic. OpenZeppelin's \texttt{SafeERC20} exists precisely because integrations need wrappers around ERC-20 operations that handle boolean return behavior and tokens that return no value.\footnote{\href{https://docs.openzeppelin.com/contracts/5.x/api/token/ERC20}{OpenZeppelin Contracts documentation, ``ERC20''}.}
+
+That solves only one integration layer. It does not prove the requested amount arrived.
+
+\begin{codeblock}
+unsafe_deposit(amount):
+    token.safeTransferFrom(user, vault, amount)
+    shares[user] += amount
+    total_assets += amount
+
+safer_deposit(amount):
+    before = token.balanceOf(vault)
+    token.safeTransferFrom(user, vault, amount)
+    after = token.balanceOf(vault)
+    received = after - before
+    require(received > 0)
+    shares[user] += shares_for(received)
+    total_assets += received
+\end{codeblock}
+
+The safer form is not universally sufficient. It is the right starting point when the protocol supports tokens whose transfer may deliver less than requested. It still needs accounting review, rounding review, and reentrancy review. But it captures the core asset-semantic correction: credit what custody actually gained, not what the caller asked to transfer.
+
+Fee-on-transfer tokens break requested-amount accounting. A user sends 100 units, the vault receives 99 units, and the token burns or redirects 1 unit. If the vault credits 100, its liabilities exceed custody. Rebasing tokens break static-balance assumptions because balances may change outside direct transfers. A vault holding a rebasing asset may gain or lose units while user share balances do not change. Elastic-supply assets, staking derivatives, interest-bearing tokens, and receipt tokens all require the reviewer to ask what ``balance'' represents.
+
+Mintable and burnable tokens create supply-authority risk. If a protocol accepts a token as collateral, it should ask whether someone can mint new units and deposit them against scarce assets. If the protocol issues shares, it should ask who can mint shares and whether share supply tracks the accounting invariant. Burn behavior also matters. A token that burns on transfer may reduce custody; a token that can be burned by an operator or delegate may destroy collateral; a wrapped asset may burn representation units during redemption.
+
+Freezing, pausing, and denylisting turn transferability into a state condition. A token that can be frozen may be acceptable for a protocol with explicit issuer-risk assumptions. It is not acceptable if the protocol's invariant assumes assets can always be liquidated, withdrawn, or moved to cover debt. A token account that is frozen on Solana cannot behave like an ordinary transferable balance. A regulated Sui coin with denylist controls should not be treated like an unrestricted open asset.
+
+Decimals are not cosmetic. They are part of unit semantics. Decimals affect human display, oracle scaling, share conversion, minimum viable amount, dust, and liquidation math. Chapter~24 will handle precision and rounding deeply. Chapter~22's rule is simpler: token decimals are an input to asset interpretation, not a security guarantee. A protocol should validate expected decimals where that assumption is built into price, accounting, or UI.
+
+\subsection{Transfer-Effect Review}
+
+\begin{artifactbox}[Transfer-effect review]
+For each asset movement, write the requested amount, the observed custody delta, the credited accounting amount, and the invariant that connects them. If those quantities can differ, the protocol must specify which one it trusts and why.
+\end{artifactbox}
+
+A strong transfer review reconstructs the post-state:
+
+\begin{codeblock}
+after transfer:
+    did the call revert, return false, return no data, or succeed?
+    did the recipient balance increase?
+    did the sender balance decrease?
+    did total supply change?
+    did a fee recipient, burn address, or hook observe the transfer?
+    did any approval, delegate, freeze, or restriction state change?
+    did protocol accounting credit exactly the effect it received?
+\end{codeblock}
+
+When a protocol wants to support only simple assets, that is legitimate. The mistake is to silently support arbitrary assets while coding against a narrow behavior model. A serious integration either supports the asset behavior with tests and invariants or rejects the asset explicitly.
+
+\section{Spending Authority and Non-Standard Behavior}
+
+The final asset question is who else can move or change the asset, and whether the movement itself can execute policy, call hooks, or depend on external representations.
+
+\subsection{Allowances, Operators, and Delegates}
+
+Token spending authority is asset-specific authorization. Chapter~21 taught privilege boundaries in general. Here the question is narrower: who can move this asset without being its ordinary holder?
+
+ERC-20 allowances let an owner approve a spender for an amount. The spender can then call \texttt{transferFrom} up to that allowance, subject to the token's rules. ERC-2612 extends ERC-20 with \texttt{permit}, allowing a signed message to modify allowance without an on-chain approval transaction from the owner.\footnote{\href{https://eips.ethereum.org/EIPS/eip-2612}{ERC-2612, ``Permit Extension for EIP-20 Signed Approvals''}.} The token-state consequence is the same: spending authority changes. The signature details belong to Chapter~4 and Chapter~27; the asset review asks what allowance now exists and what can be spent through it.
+
+ERC-721 has per-token approval and operator approval. A single approved address may transfer one token ID; an operator may be approved for all tokens owned by the owner in that collection. ERC-1155 uses operator approval across token IDs under the contract. That means one approval can expose many assets if a protocol or user treats an operator grant as narrow when it is broad.
+
+Solana token accounts can have a delegate and delegated amount. Solana's token basics documentation states that approving a delegate authorizes another address to transfer or burn a limited amount from a token account, and that a token account stores one current delegate and one delegated amount at a time.\footnote{\href{https://solana.com/docs/tokens/basics/approve-delegate}{Solana documentation, ``Approve Delegate''}.} Token-2022 can add more authority forms, such as permanent delegates or transfer hooks depending on enabled extensions.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.30\textwidth}X@{}}
+\toprule
+Authority form & What it permits & Review question \\
+\midrule
+ERC-20 allowance & Spender can transfer owner's fungible units up to allowance & Is the spender, amount, token, and lifetime intended? \\
+ERC-20 permit & Signature changes allowance state & Does the resulting allowance match the user's intended spend scope? \\
+ERC-721 token approval & Approved address can transfer one token ID & Is the exact token ID intended and still owned by the grantor? \\
+ERC-721/1155 operator & Operator can transfer a broad set of assets & Is the approval broader than the protocol assumes? \\
+SPL delegate & Delegate can transfer or burn a limited amount from a token account & Is the delegate, token account, mint, and remaining amount correct? \\
+Permanent or special delegate & Extension-defined authority over token behavior & Does the protocol accept issuer or delegate power as part of the asset risk? \\
+\bottomrule
+\end{tabularx}
+\caption{Spending authority is not portable across token standards. Each form has its own scope and failure mode.}
+\end{table}
+
+Allowance bugs are often authorization bugs wearing token clothes. A router may retain unlimited allowance after a swap. A vault may assume approval is transaction-scoped when it is persistent. A marketplace may accept an operator approval that lets it move all NFTs in a collection. A lending protocol may treat delegated token movement as user intent without checking the asset, amount, or destination.
+
+The review habit is to write the spending sentence:
+
+\begin{codeblock}
+This approval lets [spender/delegate/operator]
+move [asset representation]
+from [source]
+up to [amount or scope]
+until [revoked, consumed, expired, or changed],
+under [token-specific rules].
+\end{codeblock}
+
+If the sentence contains ``all,'' ``any,'' ``forever,'' or ``operator,'' the reviewer should slow down.
+
+One important boundary: this chapter does not deeply teach approval phishing. A malicious interface can trick users into granting spending authority, but user-side deception belongs later. Here the protocol question is whether the token-state authority accepted by the system is scoped, visible, revocable, and accounted for.
+
+\subsection{Programmable, Restricted, and Wrapped Assets}
+
+Some assets are not passive balances. They execute code, enforce policy, mutate authority state, or represent claims outside the current runtime.
+
+ERC-777 was designed so token sends can notify recipients through hooks, letting a contract accept or reject incoming tokens in the same transaction.\footnote{\href{https://eips.ethereum.org/EIPS/eip-777}{EIP-777, ``Token Standard''}.} ERC-721 and ERC-1155 safe-transfer paths also involve receiver checks for contracts. Token-2022 transfer hooks can require extra accounts and logic during transfers. These features may be useful. They also mean transfer is an external interaction, not a simple balance assignment. Chapter~23 will study hook and callback control flow. Chapter~22's point is that the asset behavior profile must say whether movement can execute code or require extra validation.
+
+Restricted assets are also common. Token contracts or mints may support pausing, freezing, denylisting, transfer fees, non-transferability, memo requirements, confidential transfer behavior, metadata updates, or permanent delegate controls. A protocol can support such assets if it deliberately models them. It should not accidentally support them because an interface call compiled.
+
+Wrapped and bridged assets add a separate class of behavior. A wrapper usually accepts one asset and issues another representation. A bridge often locks, burns, mints, escrows, or vouchers assets across domains. The representation may trade like the original asset, but the security model includes issuer solvency, bridge finality, message verification, redemption path, and source-chain conditions. Chapter~35 will treat bridge security in depth. Here the rule is simple: a wrapped or bridged token is a claim with dependencies, not the original asset in a new costume.
+
+Metadata can also mislead. Token name, symbol, URI, image, decimals display, and collection metadata are not security identity. Some metadata can change. Some is supplied by the token contract. Some is served off-chain. A protocol should not use metadata as an authorization or accounting source. A UI should display it carefully, but the contract should bind to contract addresses, mints, type identifiers, denoms, token IDs, and verified configuration.
+
+\begin{failuremodebox}[Interface compatibility is not asset compatibility]
+A vault says it accepts any ERC-20. Its accounting assumes no transfer fees, no rebases, no hooks, no blacklist, stable decimals, and no mint authority. The vault is not actually compatible with any ERC-20. It is compatible with a narrow asset behavior class that should be specified and enforced.
+\end{failuremodebox}
+
+An asset behavior profile should therefore classify the asset before integration:
+
+\begin{codeblock}
+support decision:
+    supported:
+        behavior is modeled, tested, and monitored
+
+    unsupported:
+        behavior violates accounting, liveness, authority, or recovery assumptions
+
+    conditionally supported:
+        behavior is safe only with caps, wrappers, adapters, balance-delta checks,
+        oracle rules, freeze-risk disclosure, or governance-controlled allowlisting
+\end{codeblock}
+
+Allowlisting is not automatically centralizing bloat. For protocols whose solvency depends on asset behavior, an allowlist can be the honest expression of the security model. The mistake is not allowlisting. The mistake is pretending arbitrary assets have uniform semantics.
+
+\section{Worked Example: Vault Deposit With Bad Token Assumptions}
+
+Consider a simplified vault:
+
+\begin{codeblock}
+deposit(asset, amount, receiver):
+    require(supported[asset])
+    token = ERC20(asset)
+    token.transferFrom(msg.sender, address(this), amount)
+    shares = amount
+    shareBalance[receiver] += shares
+    totalShares += shares
+    totalAssets[asset] += amount
+\end{codeblock}
+
+The honest story is: user deposits tokens and receives shares. The security review starts by rejecting that story as incomplete. Which token? Which behavior? Which received amount? Which accounting invariant?
+
+The intended invariant is:
+
+\begin{codeblock}
+for each supported asset:
+    totalAssets[asset] <= actual custody of asset
+    shares minted correspond to assets actually received
+\end{codeblock}
+
+Now test the deposit path against asset behavior.
+
+With a normal ERC-20 that returns \texttt{true} and transfers exactly \texttt{amount}, the function may appear to work. Even here, the code is incomplete because it ignores a \texttt{false} return. If the token returns \texttt{false} without reverting, the vault may mint shares even though no transfer occurred.
+
+With an old or non-standard token that returns no value, raw Solidity interface calls may revert or decode incorrectly depending on how the call is made. A wrapper such as \texttt{SafeERC20} handles this interaction layer. But even after that fix, economic behavior remains unchecked.
+
+With a fee-on-transfer token, the vault requests 100 units, receives 99, and credits 100. The invariant fails immediately:
+
+\begin{codeblock}
+actual custody:       99
+totalAssets credited: 100
+excess liability:      1
+\end{codeblock}
+
+If users can repeat the deposit and later withdraw against credited accounting, the vault becomes insolvent relative to custody. The bug is not merely ``fee-on-transfer token.'' The bug is crediting requested amount rather than observed balance delta.
+
+With a rebasing token, the vault may receive the requested amount at deposit time, but later custody can change without a deposit or withdrawal. If the vault's share price, total asset accounting, or solvency check assumes static custody, it may overpay, underpay, or misprice shares. The correct support decision may be to reject rebasing assets or to account against live balance and define how rebases accrue.
+
+With a frozen or denylisted token, deposits may succeed while withdrawals fail later. A lending protocol that accepts such an asset as collateral must ask whether liquidation remains possible under issuer restrictions. A vault must ask whether users can exit if the vault address, token account, or recipient is frozen.
+
+With a hook-enabled token, the transfer may call external code before the vault finishes state updates. That is Chapter~23 territory, but the asset profile must still flag the behavior:
+
+\begin{codeblock}
+asset behavior:
+    transfer may execute recipient hook or transfer hook
+    review external control flow before support
+\end{codeblock}
+
+With a Solana-style deposit, the equivalent bug is not a boolean return. The account list may include a token account for the wrong mint, a token account controlled by the wrong authority, a Token-2022 mint with extensions the program did not model, or a token program ID different from the expected program. The vault must validate mint, token account owner, token program, delegate state, freeze state where relevant, and PDA authority.
+
+A corrected EVM-style deposit begins like this:
+
+\begin{codeblock}
+deposit(asset, amount, receiver):
+    require(assetConfig[asset].enabled)
+    require(receiver != zero)
+
+    before = token.balanceOf(address(this))
+    token.safeTransferFrom(msg.sender, address(this), amount)
+    after = token.balanceOf(address(this))
+
+    received = after - before
+    require(received > 0)
+
+    require(assetConfig[asset].supportsBalanceDeltaAccounting)
+    shares = sharesForReceived(asset, received)
+
+    shareBalance[receiver] += shares
+    totalShares += shares
+    totalAssets[asset] += received
+\end{codeblock}
+
+That still does not prove the vault is safe. It simply fixes the most obvious transfer-effect lie. The review continues into Chapter~23 for callbacks and Chapter~24 for share math.
+
+A precise finding would be:
+
+\begin{codeblock}
+finding:
+    deposit(asset, amount, receiver) credits amount rather than
+    the vault's actual token balance delta.
+
+impact:
+    If a supported token charges a transfer fee or otherwise delivers
+    less than amount, the vault mints shares against assets it did not receive.
+    Repeated deposits can make totalAssets exceed custody.
+
+evidence:
+    transferFrom return value is not checked.
+    no pre/post balance delta is measured.
+    supported[asset] does not exclude fee-on-transfer or rebasing behavior.
+    totalAssets[asset] increases by requested amount.
+
+recommendation:
+    use safe token-call handling;
+    credit received balance delta where supported;
+    explicitly reject unsupported token behaviors;
+    add tests for false-return, no-return, fee-on-transfer, rebase,
+    freeze, and hook-enabled assets.
+\end{codeblock}
+
+The strongest version of the fix is not one code line. It is an asset support policy:
+
+\begin{codeblock}
+asset support policy:
+    standard ERC-20 without fee/rebase/hook/restriction: supported
+    fee-on-transfer: supported only with balance-delta accounting
+    rebasing: supported only with live-balance accounting rules
+    hook-enabled: requires external-control-flow review
+    freeze/denylist/restricted: requires liveness and liquidation review
+    wrapped/bridged: requires redemption and dependency assumptions
+    unknown behavior: unsupported
+\end{codeblock}
+
+That policy is the chapter's real output. The protocol does not need to support every asset. It needs to stop supporting assets accidentally.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why is a token symbol or display name not a sufficient security identity for an asset?
+\item What is the difference between an economic asset and an on-chain representation?
+\item Why does ERC-20 compatibility not prove that a token transfers exactly the requested amount?
+\item When should a protocol measure pre-transfer and post-transfer balance delta?
+\item Why can rebasing, fee-on-transfer, frozen, or denylisted assets break otherwise reasonable accounting?
+\item How do ERC-20 allowances, ERC-721 approvals, ERC-1155 operators, and SPL delegates differ in scope?
+\item Why are wrapped and bridged tokens claims with dependencies rather than the original asset itself?
+\item What belongs in an asset behavior profile before a protocol supports a token?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Choose one token, mint, denom, object, or vault share. Build an asset behavior profile that identifies its representation, unit, authority surfaces, transfer behavior, metadata assumptions, and protocol invariant at risk.
+
+\item Review a vault deposit path that credits the requested amount after calling \texttt{transferFrom}. Write the corrected transfer-effect analysis for normal, false-return, no-return, fee-on-transfer, rebasing, frozen, and hook-enabled tokens.
+
+\item Compare ERC-20 allowance, ERC-721 per-token approval, ERC-721 or ERC-1155 operator approval, SPL delegate authority, and a Token-2022 permanent delegate. For each, write who can move what, from where, for how long, and how revocation works.
+
+\item Write a short finding for a protocol that claims to support arbitrary ERC-20 collateral but assumes fixed supply, no transfer fee, no rebase, no blacklist, stable decimals, and no hooks. Include invariant, evidence, impact, and recommended support policy.
+\end{enumerate}

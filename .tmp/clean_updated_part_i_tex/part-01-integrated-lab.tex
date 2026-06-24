@@ -1,0 +1,287 @@
+
+\chapter*{Part I Integrated Lab: Security Model Review}
+\addcontentsline{toc}{chapter}{Part I Integrated Lab: Security Model Review}
+
+\section*{Purpose}
+
+This Integrated Lab replaces a separate capstone. It is the practical checkpoint for Part I. The goal is to combine the first seven chapters into one professional security-model review package.
+
+Part I taught the reusable method:
+
+\begin{lstlisting}
+model the state machine
+map assets and authority
+inspect transactions and authorization
+identify commitments, proofs, and trust boundaries
+write a threat model
+write invariants
+reason about exploitability
+\end{lstlisting}
+
+This lab asks you to perform that method on one small protocol.
+
+\section*{Scenario}
+
+You are reviewing a toy yield vault called \passthrough{\lstinline!EpochVault!}.
+
+\begin{lstlisting}
+Users deposit USDC into the vault.
+The vault mints shares.
+A strategist can allocate USDC into approved strategies.
+An oracle reports the strategy value once per epoch.
+Users request withdrawals into a queue.
+Withdrawals are processed at the next epoch boundary.
+Governance can add strategies after a 48-hour timelock.
+A guardian can pause deposits immediately.
+A separate emergency role can pause withdrawals.
+The vault is upgradeable through a proxy admin controlled by governance.
+\end{lstlisting}
+
+Assume the protocol documentation claims:
+
+\begin{quote}
+Users own vault shares backed by USDC and approved strategies. Governance protects users through timelocked upgrades. The oracle reports fair strategy value. The guardian can pause during emergencies.
+\end{quote}
+
+Your job is to replace that product description with a security model.
+
+\section*{Required Output}
+
+Produce one document titled:
+
+\begin{lstlisting}
+Security Model Review Package: EpochVault
+\end{lstlisting}
+
+It must include the sections below.
+
+\section*{1. State-Machine Model}
+
+Include:
+
+\begin{itemize}
+\tightlist
+\item
+  state variables;
+\item
+  accepted inputs;
+\item
+  transition table;
+\item
+  rejection conditions;
+\item
+  forbidden states;
+\item
+  at least three safety properties;
+\item
+  at least two liveness properties.
+\end{itemize}
+
+\section*{2. Asset Inventory}
+
+Identify assets that are not merely token balances.
+
+At minimum include:
+
+\begin{itemize}
+\tightlist
+\item
+  USDC deposits;
+\item
+  vault shares;
+\item
+  strategy positions;
+\item
+  queued withdrawal claims;
+\item
+  oracle-reported value;
+\item
+  governance power;
+\item
+  guardian and emergency roles;
+\item
+  upgrade authority.
+\end{itemize}
+
+\section*{3. Authority Map}
+
+Create a table with:
+
+\begin{lstlisting}
+asset or state
+transition
+required authority
+authority holder
+delay or timelock
+observability
+worst-case failure
+recovery path
+\end{lstlisting}
+
+Then answer:
+
+\begin{lstlisting}
+Which authority is economically equivalent to control over the vault?
+Which authority can break liveness without directly stealing funds?
+Which authority can change the future transition rules?
+\end{lstlisting}
+
+\section*{4. Trust-Boundary Map}
+
+Draw or describe the trust boundaries among:
+
+\begin{itemize}
+\tightlist
+\item
+  users and wallets;
+\item
+  frontend or transaction builder;
+\item
+  vault contract;
+\item
+  USDC token contract;
+\item
+  strategy contracts;
+\item
+  oracle or reporter;
+\item
+  governance and timelock;
+\item
+  guardian and emergency role;
+\item
+  proxy admin or upgrade path.
+\end{itemize}
+
+For each boundary, state what is trusted, who can lie or fail, who verifies, and what happens if the assumption is false.
+
+\section*{5. Transaction and Authorization Review}
+
+Choose three transitions:
+
+\begin{itemize}
+\tightlist
+\item
+  deposit;
+\item
+  request withdrawal;
+\item
+  governance strategy addition or vault upgrade.
+\end{itemize}
+
+For each transition, identify:
+
+\begin{itemize}
+\tightlist
+\item
+  caller or signer;
+\item
+  authorization rule;
+\item
+  nonce or replay protection if relevant;
+\item
+  state read;
+\item
+  state written;
+\item
+  external calls;
+\item
+  events or logs;
+\item
+  valid-but-unsafe outcome.
+\end{itemize}
+
+\section*{6. Threat Model}
+
+Produce a one-page threat model with:
+
+\begin{itemize}
+\tightlist
+\item
+  protocol goal;
+\item
+  actors;
+\item
+  assets;
+\item
+  critical transitions;
+\item
+  privileged roles;
+\item
+  external dependencies;
+\item
+  top safety assumptions;
+\item
+  top liveness assumptions;
+\item
+  top five attack hypotheses;
+\item
+  review priorities.
+\end{itemize}
+
+\section*{7. Invariant Catalogue}
+
+Write at least eight invariants:
+
+\begin{itemize}
+\tightlist
+\item
+  two conservation invariants;
+\item
+  two authorization invariants;
+\item
+  two share/accounting invariants;
+\item
+  one temporal or withdrawal invariant;
+\item
+  one recovery or pause invariant.
+\end{itemize}
+
+Each invariant must state its assumptions and what evidence would falsify it.
+
+\section*{8. Exploitability Memo}
+
+Pick one attack hypothesis and write an exploitability memo with:
+
+\begin{itemize}
+\tightlist
+\item
+  broken invariant;
+\item
+  preconditions;
+\item
+  required capital;
+\item
+  required timing;
+\item
+  liquidity assumptions;
+\item
+  ordering assumptions;
+\item
+  expected profit or damage;
+\item
+  reliability;
+\item
+  mitigations;
+\item
+  residual risk.
+\end{itemize}
+
+\section*{Grading Criteria}
+
+The submission is acceptable if it:
+
+\begin{itemize}
+\tightlist
+\item
+  identifies state and transitions before naming bug classes;
+\item
+  distinguishes ownership, custody, authority, and economic exposure;
+\item
+  names trust assumptions instead of hiding them behind words like ``trusted'' or ``decentralized'';
+\item
+  writes invariants that are specific, falsifiable, and linked to impact;
+\item
+  explains exploitability using capital, timing, liquidity, ordering, reliability, and profit;
+\item
+  produces artifacts another reviewer could use.
+\end{itemize}

@@ -1,0 +1,585 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand*\HyPL@Entry[1]{}
+\HyPL@Entry{0<</S/D>>}
+\@writefile{toc}{\contentsline {part}{I\hspace  {1em}Security Model}{14}{part.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{\numberline {1}Blockchains as Adversarial State Machines}{15}{chapter.1}\protected@file@percent }
+\@writefile{lof}{\addvspace {10\p@ }}
+\@writefile{lot}{\addvspace {10\p@ }}
+\@writefile{toc}{\contentsline {section}{\numberline {1.1}Purpose}{15}{section.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.2}Learning Objectives}{16}{section.1.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.3}The Core Model}{16}{section.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.4}State, State Transitions, and Validity Rules}{18}{section.1.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.4.1}State Is Everything the Rules Need to Remember}{18}{subsection.1.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.4.2}Transitions Are the Only Way State Changes}{18}{subsection.1.4.2}\protected@file@percent }
+\gdef \LT@i {\LT@entry 
+    {1}{234.8775pt}\LT@entry 
+    {1}{234.8775pt}}
+\gdef \LT@ii {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.4.3}Validity Is Not the Same as Safety}{20}{subsection.1.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.4.4}Validity Rules Define Reachable States}{20}{subsection.1.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.4.5}Invariants Are Properties That Must Survive Every Transition}{21}{subsection.1.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.4.6}State Includes the Rules That Can Change the Rules}{21}{subsection.1.4.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.5}Determinism, Replication, and Global Agreement}{22}{section.1.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.5.1}Replication Requires Determinism}{22}{subsection.1.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.5.2}Consensus Orders Inputs; Execution Applies Them}{23}{subsection.1.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.5.3}Blocks Are Commitment Devices}{23}{subsection.1.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.5.4}Global Agreement Is Not Instant Agreement}{24}{subsection.1.5.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.5.5}Determinism Does Not Eliminate Implementation Risk}{25}{subsection.1.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.6}Permissionless Inputs and Adversarial Execution}{26}{section.1.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.6.1}Permissionless Means Attackers Are Normal Users}{26}{subsection.1.6.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.6.2}Attackers Choose Edge Cases, Not Happy Paths}{26}{subsection.1.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.6.3}Public State Changes the Defender's Burden}{27}{subsection.1.6.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.6.4}The Adversary Controls More Than Transaction Parameters}{27}{subsection.1.6.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.6.5}Rejection Is a Security Boundary}{28}{subsection.1.6.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.6.6}Adversarial Execution Includes Honest-Looking Transactions}{29}{subsection.1.6.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.7}Safety, Liveness, and Fault Assumptions}{29}{section.1.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.7.1}Safety: Bad States Must Not Happen}{29}{subsection.1.7.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.7.2}Liveness: Necessary Progress Must Remain Possible}{30}{subsection.1.7.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.7.3}Safety and Liveness Pull Against Each Other}{30}{subsection.1.7.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.7.4}Fault Assumptions Are Part of the Security Model}{31}{subsection.1.7.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.7.5}Byzantine, Rational, and Accidental Faults Are Different}{32}{subsection.1.7.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.7.6}Time and Finality Are Security Parameters}{32}{subsection.1.7.6}\protected@file@percent }
+\gdef \LT@iii {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {section}{\numberline {1.8}Security Failures as Broken State Transitions}{33}{section.1.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.8.1}The Most Important Distinction}{33}{subsection.1.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.8.2}A Taxonomy of Broken Transitions}{33}{subsection.1.8.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.8.3}Valid Exploits Are Still Exploits}{34}{subsection.1.8.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.8.4}The Chain Protects Its Own Rules, Not Your Intent}{35}{subsection.1.8.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.8.5}Reorgs and Ordering Are State-Transition Problems}{36}{subsection.1.8.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.8.6}Security Review Starts With Transition Questions}{36}{subsection.1.8.6}\protected@file@percent }
+\gdef \LT@iv {\LT@entry 
+    {1}{90.34972pt}\LT@entry 
+    {1}{96.34972pt}\LT@entry 
+    {1}{96.34972pt}\LT@entry 
+    {1}{96.34972pt}\LT@entry 
+    {1}{90.34972pt}}
+\@writefile{toc}{\contentsline {section}{\numberline {1.9}Worked Example: A Minimal Escrow State Machine}{37}{section.1.9}\protected@file@percent }
+\gdef \LT@v {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {section}{\numberline {1.10}Practical Discipline: Do Not Start With Bug Names}{39}{section.1.10}\protected@file@percent }
+\gdef \LT@vi {\LT@entry 
+    {1}{234.8775pt}\LT@entry 
+    {1}{234.8775pt}}
+\@writefile{toc}{\contentsline {section}{\numberline {1.11}Review Questions}{40}{section.1.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.12}Applied Exercises}{41}{section.1.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.12.1}Exercise 1: Model a Token Transfer}{41}{subsection.1.12.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.12.2}Exercise 2: Separate Rule Validity From Intent}{41}{subsection.1.12.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.12.3}Exercise 3: Identify Liveness Risk}{41}{subsection.1.12.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.12.4}Exercise 4: Broken Transition Taxonomy}{42}{subsection.1.12.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.13}Key Takeaways}{42}{section.1.13}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.14}Further Reading}{43}{section.1.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{\numberline {2}Assets, Authority, and Trust Boundaries}{44}{chapter.2}\protected@file@percent }
+\@writefile{lof}{\addvspace {10\p@ }}
+\@writefile{lot}{\addvspace {10\p@ }}
+\@writefile{toc}{\contentsline {section}{\numberline {2.1}Purpose}{44}{section.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.2}Learning Objectives}{45}{section.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.3}The Core Distinction}{45}{section.2.3}\protected@file@percent }
+\gdef \LT@vii {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {section}{\numberline {2.4}What Counts as an Asset On-Chain}{46}{section.2.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4.1}Assets Are Enforced Claims Over State}{46}{subsection.2.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4.2}Asset Categories}{46}{subsection.2.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4.3}Native Assets and Contract Assets Differ}{48}{subsection.2.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4.4}An Asset Can Be a Right, Not a Balance}{48}{subsection.2.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4.5}Off-Chain Claims Are Not Made On-Chain by Naming Them}{49}{subsection.2.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4.6}Control Surfaces Are Assets}{50}{subsection.2.4.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.5}Ownership: Keys, Accounts, UTXOs, Objects, and Claims}{51}{section.2.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5.1}Ownership Is a State-Machine Relationship}{51}{subsection.2.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5.2}UTXO Ownership: Spend Conditions, Not Account Balances}{51}{subsection.2.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5.3}Account Ownership: Keys, Code, and Nonces}{52}{subsection.2.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5.4}Contract Ownership Is Just State}{52}{subsection.2.5.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5.5}Token Ownership Is Defined by the Token's Rules}{53}{subsection.2.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5.6}Solana Ownership: Account Owner Program and Signers}{54}{subsection.2.5.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5.7}Move Ownership: Resources and Module Boundaries}{55}{subsection.2.5.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5.8}Legal Ownership and Protocol Control Can Diverge}{55}{subsection.2.5.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.6}Authority: Users, Admins, Validators, Governance, and Custodians}{56}{section.2.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.6.1}Authority Is the Ability to Cause a Transition}{56}{subsection.2.6.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.6.2}User Authority}{57}{subsection.2.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.6.3}Admin Authority}{57}{subsection.2.6.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.6.4}Validator, Miner, Builder, and Sequencer Authority}{58}{subsection.2.6.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.6.5}Governance Authority}{59}{subsection.2.6.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.6.6}Custodial and Operational Authority}{60}{subsection.2.6.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.6.7}Authority Can Be Delegated, Composed, or Hidden}{61}{subsection.2.6.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.7}Trust Boundaries Across On-Chain, Off-Chain, and Human Systems}{62}{section.2.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.7.1}A Trust Boundary Marks a Change in Verification}{62}{subsection.2.7.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.7.2}On-Chain Does Not Mean Trustless}{63}{subsection.2.7.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.7.3}Off-Chain Does Not Mean Insecure}{63}{subsection.2.7.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.7.4}Cross-Chain Systems Create Stacked Trust Boundaries}{64}{subsection.2.7.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.7.5}Human Systems Are Part of the Boundary}{65}{subsection.2.7.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.7.6}Trust Boundaries Should Be Written as Assumptions}{65}{subsection.2.7.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.8}Mapping Who Can Move, Freeze, Mint, Burn, Upgrade, or Censor Assets}{66}{section.2.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.8.1}Authority Mapping Is the Practical Output}{66}{subsection.2.8.1}\protected@file@percent }
+\gdef \LT@viii {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.8.2}The Core Authority Verbs}{67}{subsection.2.8.2}\protected@file@percent }
+\gdef \LT@ix {\LT@entry 
+    {1}{54.21938pt}\LT@entry 
+    {1}{60.21938pt}\LT@entry 
+    {1}{60.21938pt}\LT@entry 
+    {1}{60.21938pt}\LT@entry 
+    {1}{60.21938pt}\LT@entry 
+    {1}{60.21938pt}\LT@entry 
+    {1}{60.21938pt}\LT@entry 
+    {1}{54.21938pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.8.3}Authority Matrix}{68}{subsection.2.8.3}\protected@file@percent }
+\gdef \LT@x {\LT@entry 
+    {1}{114.43875pt}\LT@entry 
+    {1}{120.43875pt}\LT@entry 
+    {1}{120.43875pt}\LT@entry 
+    {1}{114.43875pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.8.4}Example: ERC-20 Token Authority Map}{69}{subsection.2.8.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.8.5}Example: Vault Authority Map}{70}{subsection.2.8.5}\protected@file@percent }
+\gdef \LT@xi {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\gdef \LT@xii {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.8.6}Example: Bridge Authority Map}{71}{subsection.2.8.6}\protected@file@percent }
+\gdef \LT@xiii {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.8.7}Example: Governance Authority Map}{72}{subsection.2.8.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.8.8}Minimal Authority Mapping Template}{72}{subsection.2.8.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.9}Worked Example: Mapping a Tokenized Vault}{73}{section.2.9}\protected@file@percent }
+\gdef \LT@xiv {\LT@entry 
+    {3}{106.90424pt}\LT@entry 
+    {3}{174.26862pt}}
+\gdef \LT@xv {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\gdef \LT@xvi {\LT@entry 
+    {1}{90.34972pt}\LT@entry 
+    {1}{96.34972pt}\LT@entry 
+    {1}{96.34972pt}\LT@entry 
+    {1}{96.34972pt}\LT@entry 
+    {1}{90.34972pt}}
+\gdef \LT@xvii {\LT@entry 
+    {1}{234.8775pt}\LT@entry 
+    {1}{234.8775pt}}
+\@writefile{toc}{\contentsline {section}{\numberline {2.10}Practical Discipline: Replace Nouns With Verbs}{76}{section.2.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.11}Review Questions}{76}{section.2.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.12}Applied Exercises}{77}{section.2.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.12.1}Exercise 1: Authority Map a Token}{77}{subsection.2.12.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.12.2}Exercise 2: Trust Boundary and Custody Review}{77}{subsection.2.12.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.12.3}Exercise 3: Bridge Claim Analysis}{78}{subsection.2.12.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.12.4}Exercise 4: Replace Nouns With Verbs}{78}{subsection.2.12.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.13}Key Takeaways}{79}{section.2.13}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.14}Further Reading}{79}{section.2.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{\numberline {3}Transactions and State Transitions}{80}{chapter.3}\protected@file@percent }
+\@writefile{lof}{\addvspace {10\p@ }}
+\@writefile{lot}{\addvspace {10\p@ }}
+\@writefile{toc}{\contentsline {section}{\numberline {3.1}Purpose}{80}{section.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3.2}Learning Objectives}{80}{section.3.2}\protected@file@percent }
+\gdef \LT@xviii {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {section}{\numberline {3.3}The Core Model}{81}{section.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3.4}Transaction Anatomy Across Chain Models}{82}{section.3.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4.1}Transaction Anatomy Is a Security Interface}{82}{subsection.3.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4.2}UTXO Transactions: Consume Outputs, Create Outputs}{83}{subsection.3.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4.3}Account Transactions: Mutate Account and Contract State}{84}{subsection.3.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4.4}Instruction-Based Transactions: Multiple Operations, Shared Atomicity}{85}{subsection.3.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4.5}Object-Based Transactions: Inputs, Versions, and Effects}{86}{subsection.3.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4.6}Cosmos-Style Transactions: Messages Through an Application Pipeline}{87}{subsection.3.4.6}\protected@file@percent }
+\gdef \LT@xix {\LT@entry 
+    {1}{90.34972pt}\LT@entry 
+    {1}{96.34972pt}\LT@entry 
+    {1}{96.34972pt}\LT@entry 
+    {1}{96.34972pt}\LT@entry 
+    {1}{90.34972pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4.7}Cross-Model Comparison}{88}{subsection.3.4.7}\protected@file@percent }
+\gdef \LT@xx {\LT@entry 
+    {1}{114.43875pt}\LT@entry 
+    {1}{120.43875pt}\LT@entry 
+    {1}{120.43875pt}\LT@entry 
+    {1}{114.43875pt}}
+\@writefile{toc}{\contentsline {section}{\numberline {3.5}Signatures, Nonces, Sequence Numbers, and Replay Prevention}{89}{section.3.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5.1}Signatures Authorize a Specific Message, Not a Vague Intention}{89}{subsection.3.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5.2}Replay Is Reuse of Authority in the Wrong Context}{90}{subsection.3.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5.3}Ethereum Nonces Serialize Account Transactions}{90}{subsection.3.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5.4}Chain IDs and Domain Separation Prevent Cross-Chain Replay}{91}{subsection.3.5.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5.5}UTXO Replay Prevention Comes From Consumption}{92}{subsection.3.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5.6}Solana Recent Blockhashes and Durable Nonces}{92}{subsection.3.5.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5.7}Cosmos Sequence Numbers and Timeout Heights}{93}{subsection.3.5.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5.8}Object Versions and Expiration}{93}{subsection.3.5.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5.9}Replay Protection Must Match the Asset}{94}{subsection.3.5.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3.6}Fees, Gas, Compute Budgets, and Resource Limits}{94}{section.3.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.6.1}Resource Pricing Is Part of Consensus Security}{94}{subsection.3.6.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.6.2}Ethereum Gas}{95}{subsection.3.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.6.3}Solana Compute Budgets and Fees}{95}{subsection.3.6.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.6.4}Cosmos Gas and Local Mempool Fee Policy}{96}{subsection.3.6.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.6.5}UTXO Fees and Transaction Pinning}{97}{subsection.3.6.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.6.6}Resource Limits Create Liveness Risks}{97}{subsection.3.6.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.6.7}Fees Shape Adversarial Strategy}{98}{subsection.3.6.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3.7}Execution Results: Receipts, Logs, Events, and Reverts}{98}{section.3.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.7.1}Inclusion Is Not Execution Success}{98}{subsection.3.7.1}\protected@file@percent }
+\gdef \LT@xxi {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.7.2}Receipts Summarize Execution Outcomes}{100}{subsection.3.7.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.7.3}Logs and Events Are Communication, Not Authority}{100}{subsection.3.7.3}\protected@file@percent }
+\gdef \LT@xxii {\LT@entry 
+    {1}{114.43875pt}\LT@entry 
+    {1}{120.43875pt}\LT@entry 
+    {1}{120.43875pt}\LT@entry 
+    {1}{114.43875pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.7.4}Return Data and Revert Data Matter}{102}{subsection.3.7.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.7.5}Atomicity Is Model-Specific}{102}{subsection.3.7.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.7.6}Simulation Is Not Execution}{103}{subsection.3.7.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3.8}When a Valid Transaction Still Produces an Unsafe State}{104}{section.3.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.8.1}Validity Is Layered}{104}{subsection.3.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.8.2}Successful Execution Can Encode a Failed Assumption}{104}{subsection.3.8.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.8.3}Unsafe State From Correct Ordering Rules}{105}{subsection.3.8.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.8.4}Unsafe State From Partial Mental Models}{106}{subsection.3.8.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.8.5}Unsafe State From Stale Context}{106}{subsection.3.8.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.8.6}Unsafe State From Successful Failure}{107}{subsection.3.8.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.8.7}Transaction Safety Checklist}{108}{subsection.3.8.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3.9}Worked Example: A Swap Transaction}{109}{section.3.9}\protected@file@percent }
+\gdef \LT@xxiii {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {section}{\numberline {3.10}Practical Discipline: Transaction Review Notes}{111}{section.3.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3.11}Review Questions}{112}{section.3.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3.12}Applied Exercises}{112}{section.3.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.12.1}Exercise 1: Transaction Anatomy and Evidence}{112}{subsection.3.12.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.12.2}Exercise 2: Replay Scope}{113}{subsection.3.12.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.12.3}Exercise 3: Event vs State}{113}{subsection.3.12.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.12.4}Exercise 4: Resource Limits and Valid-But-Unsafe Outcomes}{113}{subsection.3.12.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3.13}Key Takeaways}{114}{section.3.13}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3.14}Further Reading}{114}{section.3.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{\numberline {4}Keys, Signatures, and Authorization}{116}{chapter.4}\protected@file@percent }
+\@writefile{lof}{\addvspace {10\p@ }}
+\@writefile{lot}{\addvspace {10\p@ }}
+\@writefile{toc}{\contentsline {section}{\numberline {4.1}Purpose}{116}{section.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.2}Learning Objectives}{117}{section.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.3}The Core Model}{117}{section.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.4}Private Keys, Public Keys, and Address Derivation}{119}{section.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4.1}Private Keys Are Authority Material}{119}{subsection.4.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4.2}Public Keys Verify; Addresses Identify}{120}{subsection.4.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4.3}Key Generation Depends on Entropy}{120}{subsection.4.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4.4}Seed Phrases Are Root Authority}{121}{subsection.4.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4.5}Hierarchical Deterministic Wallets Create Authority Trees}{122}{subsection.4.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4.6}Wallets Are Interfaces to Authority}{123}{subsection.4.4.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4.7}Key Rotation and Revocation Are Hard}{123}{subsection.4.4.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.5}ECDSA, EdDSA, BLS, Schnorr, and Signature Assumptions}{124}{section.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5.1}Digital Signatures Provide Authenticity and Integrity}{124}{subsection.4.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5.2}ECDSA}{125}{subsection.4.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5.3}ECDSA Malleability and Low-s Rules}{125}{subsection.4.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5.4}EdDSA}{126}{subsection.4.5.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5.5}BLS}{127}{subsection.4.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5.6}Schnorr Signatures}{128}{subsection.4.5.6}\protected@file@percent }
+\gdef \LT@xxiv {\LT@entry 
+    {1}{234.8775pt}\LT@entry 
+    {1}{234.8775pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5.7}Signature Assumptions Are Broader Than Algorithms}{129}{subsection.4.5.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.6}Message Signing, Transaction Signing, and Domain Separation}{129}{section.4.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.6.1}Transaction Signing Authorizes a Chain-Level Request}{129}{subsection.4.6.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.6.2}Message Signing Authorizes Off-Chain or Contract-Interpreted Meaning}{130}{subsection.4.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.6.3}EIP-191 and the Problem of Raw Bytes}{130}{subsection.4.6.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.6.4}EIP-712 Typed Data}{131}{subsection.4.6.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.6.5}Permits and Signed Approvals}{132}{subsection.4.6.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.6.6}Contract Signatures and ERC-1271}{133}{subsection.4.6.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.6.7}Domain Separation Checklist}{133}{subsection.4.6.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.7}Multisig, Threshold Signatures, MPC, and Hardware Signing}{134}{section.4.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.7.1}Single-Key Control Is a Concentrated Failure Mode}{134}{subsection.4.7.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.7.2}On-Chain Multisig}{135}{subsection.4.7.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.7.3}Native Multisig and Script Policies}{136}{subsection.4.7.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.7.4}Threshold Signatures}{136}{subsection.4.7.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.7.5}MPC Signing}{137}{subsection.4.7.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.7.6}Hardware Wallets and HSMs}{138}{subsection.4.7.6}\protected@file@percent }
+\gdef \LT@xxv {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.7.7}Choosing the Right Signing Architecture}{139}{subsection.4.7.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.8}Authorization Failures: Replay, Malleability, Confused Signing, and Key Compromise}{140}{section.4.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.8.1}Signature Validity Is Not Authorization Completeness}{140}{subsection.4.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.8.2}Replay Failures}{140}{subsection.4.8.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.8.3}Malleability Failures}{141}{subsection.4.8.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.8.4}Confused Signing}{141}{subsection.4.8.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.8.5}Wrong Signer and Wrong Authority}{142}{subsection.4.8.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.8.6}Stale Authority}{143}{subsection.4.8.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.8.7}Key Compromise}{143}{subsection.4.8.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.8.8}Authorization Review Checklist}{144}{subsection.4.8.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.9}Worked Example: Permit as Delegated Authority}{145}{section.4.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.10}Practical Discipline: Translate Signatures Into Authority}{146}{section.4.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.11}Review Questions}{147}{section.4.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.12}Applied Exercises}{147}{section.4.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.12.1}Exercise 1: Signed-Payload Anatomy}{147}{subsection.4.12.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.12.2}Exercise 2: Replay and Domain-Separation Review}{148}{subsection.4.12.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.12.3}Exercise 3: Compare Signing Arrangements}{148}{subsection.4.12.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.12.4}Exercise 4: Authorization Finding Draft}{148}{subsection.4.12.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.13}Key Takeaways}{149}{section.4.13}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.14}Further Reading}{149}{section.4.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{\numberline {5}Cryptographic Commitments and Proofs}{151}{chapter.5}\protected@file@percent }
+\@writefile{lof}{\addvspace {10\p@ }}
+\@writefile{lot}{\addvspace {10\p@ }}
+\@writefile{toc}{\contentsline {section}{\numberline {5.1}Purpose}{151}{section.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5.2}Learning Objectives}{152}{section.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5.3}The Core Model}{152}{section.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5.4}Hash Functions, Preimages, and Collision Resistance}{154}{section.5.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4.1}A Cryptographic Hash Is Not Just a Checksum}{154}{subsection.5.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4.2}Preimage Resistance}{155}{subsection.5.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4.3}Second-Preimage Resistance}{155}{subsection.5.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4.4}Collision Resistance}{156}{subsection.5.4.4}\protected@file@percent }
+\gdef \LT@xxvi {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4.5}Hash Security Depends on the Application}{157}{subsection.5.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4.6}Hashes Are Identifiers, Not Authority}{157}{subsection.5.4.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4.7}Hash Functions Do Not Fix Bad Encoding}{158}{subsection.5.4.7}\protected@file@percent }
+\gdef \LT@xxvii {\LT@entry 
+    {1}{114.43875pt}\LT@entry 
+    {1}{120.43875pt}\LT@entry 
+    {1}{120.43875pt}\LT@entry 
+    {1}{114.43875pt}}
+\@writefile{toc}{\contentsline {section}{\numberline {5.5}Commitments, Binding Assumptions, and Domain Separation}{159}{section.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.5.1}A Commitment Binds a Claim to Data}{159}{subsection.5.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.5.2}Binding Depends on the Whole Construction}{159}{subsection.5.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.5.3}Domain Separation Prevents Context Confusion}{161}{subsection.5.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.5.4}Canonical Encoding Is Part of the Commitment}{161}{subsection.5.5.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.5.5}Hiding Requires Entropy}{162}{subsection.5.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.5.6}Commitments Can Become Stale}{162}{subsection.5.5.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5.6}Merkle Trees, Patricia Tries, State Roots, and Inclusion Proofs}{163}{section.5.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.6.1}Merkle Trees Compress Many Claims Into One Root}{163}{subsection.5.6.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.6.2}Inclusion Proofs Prove Membership Relative to a Root}{164}{subsection.5.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.6.3}Tree Shape and Leaf Meaning Matter}{165}{subsection.5.6.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.6.4}Patricia Tries Commit to Key/Value State}{166}{subsection.5.6.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.6.5}State Proofs and Storage Proofs}{167}{subsection.5.6.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.6.6}Receipt Proofs and Event Proofs}{168}{subsection.5.6.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.6.7}SSZ Merkleization and Consensus Objects}{168}{subsection.5.6.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5.7}Proof Verification, Proof Forgery Risk, and Trust-Minimized Claims}{169}{section.5.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.7.1}A Proof Is Only as Good as Its Root}{169}{subsection.5.7.1}\protected@file@percent }
+\gdef \LT@xxviii {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.7.2}Proof Verification Is a State Transition}{170}{subsection.5.7.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.7.3}Common Proof Verification Failures}{170}{subsection.5.7.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.7.4}Proof of Inclusion Is Not Proof of Validity}{171}{subsection.5.7.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.7.5}Trust-Minimized Does Not Mean Trust-Free}{172}{subsection.5.7.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.7.6}Proofs Need Freshness and Expiration}{172}{subsection.5.7.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.7.7}Proof Verification Can Be a Denial-of-Service Surface}{173}{subsection.5.7.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.7.8}The Verification Checklist}{173}{subsection.5.7.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5.8}Worked Example: Verifying a Cross-Chain Deposit Claim}{174}{section.5.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5.9}Practical Discipline: Root, Proof, Claim}{176}{section.5.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5.10}Review Questions}{177}{section.5.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5.11}Applied Exercises}{177}{section.5.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.11.1}Exercise 1: Manual Merkle Verification}{177}{subsection.5.11.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.11.2}Exercise 2: Root and Domain Review}{177}{subsection.5.11.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.11.3}Exercise 3: Proof-Verification Pseudocode}{177}{subsection.5.11.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.11.4}Exercise 4: Trust-Minimized Claim Statement}{178}{subsection.5.11.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5.12}Key Takeaways}{178}{section.5.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5.13}Further Reading}{179}{section.5.13}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{\numberline {6}Threat Modeling Blockchain Systems}{180}{chapter.6}\protected@file@percent }
+\@writefile{lof}{\addvspace {10\p@ }}
+\@writefile{lot}{\addvspace {10\p@ }}
+\@writefile{toc}{\contentsline {section}{\numberline {6.1}Purpose}{180}{section.6.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6.2}Learning Objectives}{181}{section.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6.3}The Core Model}{182}{section.6.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6.4}Turning a Protocol Description into a Security Model}{183}{section.6.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.4.1}Start With Scope}{183}{subsection.6.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.4.2}Collect the Actual System, Not the Marketing System}{184}{subsection.6.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.4.3}Extract Security Claims}{185}{subsection.6.4.3}\protected@file@percent }
+\gdef \LT@xxix {\LT@entry 
+    {1}{234.8775pt}\LT@entry 
+    {1}{234.8775pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.4.4}Translate Features Into State Transitions}{186}{subsection.6.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.4.5}Build a System Context Diagram}{187}{subsection.6.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.4.6}Threat Modeling Is Iterative}{188}{subsection.6.4.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6.5}Mapping Actors, Assets, Entry Points, and Privileged Roles}{189}{section.6.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.5.1}Actor Inventory}{189}{subsection.6.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.5.2}Asset Inventory}{191}{subsection.6.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.5.3}Entry Point Inventory}{192}{subsection.6.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.5.4}Privileged Role Inventory}{193}{subsection.6.5.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.5.5}Data and Control Flows}{195}{subsection.6.5.5}\protected@file@percent }
+\gdef \LT@xxx {\LT@entry 
+    {1}{234.8775pt}\LT@entry 
+    {1}{234.8775pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.5.6}The Minimum Map}{196}{subsection.6.5.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6.6}Separating Users, Attackers, Rational Participants, and Trusted Operators}{196}{section.6.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.6.1}Do Not Use One Generic Attacker}{196}{subsection.6.6.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.6.2}Users Can Be Adversarial Without Being ``Hackers''}{197}{subsection.6.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.6.3}Rational Participants Are Not Byzantine Actors}{198}{subsection.6.6.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.6.4}Trusted Operators Are Threat Sources Too}{198}{subsection.6.6.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.6.5}Insiders Have Different Access}{199}{subsection.6.6.5}\protected@file@percent }
+\gdef \LT@xxxi {\LT@entry 
+    {1}{74.30708pt}\LT@entry 
+    {1}{80.30708pt}\LT@entry 
+    {1}{80.30708pt}\LT@entry 
+    {1}{80.30708pt}\LT@entry 
+    {1}{80.30708pt}\LT@entry 
+    {1}{74.30708pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.6.6}Actor Table Template}{200}{subsection.6.6.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6.7}Identifying Trust Assumptions and External Dependencies}{201}{section.6.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.7.1}Assumptions Are Security Debt}{201}{subsection.6.7.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.7.2}Dependency Inventory}{201}{subsection.6.7.2}\protected@file@percent }
+\gdef \LT@xxxii {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.7.3}Safety vs Liveness Assumptions}{202}{subsection.6.7.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.7.4}External Contracts Are Dependencies, Not Background}{203}{subsection.6.7.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.7.5}Human Dependencies Are Real Dependencies}{204}{subsection.6.7.5}\protected@file@percent }
+\gdef \LT@xxxiii {\LT@entry 
+    {1}{62.83861pt}\LT@entry 
+    {1}{68.83861pt}\LT@entry 
+    {1}{68.83861pt}\LT@entry 
+    {1}{68.83861pt}\LT@entry 
+    {1}{68.83861pt}\LT@entry 
+    {1}{68.83861pt}\LT@entry 
+    {1}{62.83861pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.7.6}Assumption Register}{205}{subsection.6.7.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6.8}Mapping Attack Surfaces Across Chain, Contract, Infrastructure, and Human Layers}{206}{section.6.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.8.1}Blockchain Attack Surface Is Layered}{206}{subsection.6.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.8.2}STRIDE as a Prompt, Not a Cage}{206}{subsection.6.8.2}\protected@file@percent }
+\gdef \LT@xxxiv {\LT@entry 
+    {1}{234.8775pt}\LT@entry 
+    {1}{234.8775pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.8.3}Contract and Program Attack Surface}{207}{subsection.6.8.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.8.4}Chain and Ordering Attack Surface}{208}{subsection.6.8.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.8.5}Economic Attack Surface}{209}{subsection.6.8.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.8.6}Infrastructure Attack Surface}{209}{subsection.6.8.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.8.7}Human and Governance Attack Surface}{210}{subsection.6.8.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6.9}Producing a Threat Model That Guides Review Instead of Decorating It}{211}{section.6.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.9.1}The Threat Model Must Produce Work}{211}{subsection.6.9.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.9.2}Prioritize by Impact, Feasibility, and Uncertainty}{212}{subsection.6.9.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.9.3}Turn Threats Into Invariants and Tests}{213}{subsection.6.9.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.9.4}Decide Mitigation, Acceptance, Transfer, or Elimination}{214}{subsection.6.9.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.9.5}Threat Model Deliverable Template}{215}{subsection.6.9.5}\protected@file@percent }
+\gdef \LT@xxxv {\LT@entry 
+    {1}{234.8775pt}\LT@entry 
+    {1}{234.8775pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.9.6}Anti-Patterns}{216}{subsection.6.9.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.9.7}What Good Looks Like}{217}{subsection.6.9.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6.10}Worked Example: Threat Modeling a Lending Market}{217}{section.6.10}\protected@file@percent }
+\gdef \LT@xxxvi {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.10.1}Step 1: Scope}{218}{subsection.6.10.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.10.2}Step 2: Assets}{218}{subsection.6.10.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.10.3}Step 3: Actors}{218}{subsection.6.10.3}\protected@file@percent }
+\gdef \LT@xxxvii {\LT@entry 
+    {3}{81.2265pt}\LT@entry 
+    {3}{245.20271pt}}
+\gdef \LT@xxxviii {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.10.4}Step 4: Entry Points}{219}{subsection.6.10.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.10.5}Step 5: Assumptions}{219}{subsection.6.10.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.10.6}Step 6: Threat Scenarios}{220}{subsection.6.10.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.10.7}Step 7: Review Plan}{221}{subsection.6.10.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6.11}Practical Discipline: The One-Page Threat Model}{222}{section.6.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6.12}Review Questions}{222}{section.6.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6.13}Applied Exercises}{223}{section.6.13}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.13.1}Exercise 1: One-Page Threat Model}{223}{subsection.6.13.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.13.2}Exercise 2: Data and Control Flow}{223}{subsection.6.13.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.13.3}Exercise 3: Attack Tree to Review Plan}{223}{subsection.6.13.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.13.4}Exercise 4: Threat Model Critique}{224}{subsection.6.13.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6.14}Key Takeaways}{224}{section.6.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6.15}Further Reading}{224}{section.6.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{\numberline {7}Invariants and Exploitability}{226}{chapter.7}\protected@file@percent }
+\@writefile{lof}{\addvspace {10\p@ }}
+\@writefile{lot}{\addvspace {10\p@ }}
+\@writefile{toc}{\contentsline {section}{\numberline {7.1}Purpose}{226}{section.7.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7.2}Learning Objectives}{227}{section.7.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7.3}The Core Model}{227}{section.7.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7.4}What an Invariant Is and Why It Finds Deep Bugs}{229}{section.7.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.4.1}Invariants Are Properties, Not Wishes}{229}{subsection.7.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.4.2}Reachability Is the Point}{229}{subsection.7.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.4.3}Inductive Invariants vs Intended Invariants}{230}{subsection.7.4.3}\protected@file@percent }
+\gdef \LT@xxxix {\LT@entry 
+    {1}{154.56912pt}\LT@entry 
+    {1}{160.56912pt}\LT@entry 
+    {1}{154.56912pt}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.4.4}Invariants Can Be About States, Transitions, or Histories}{231}{subsection.7.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.4.5}A Broken Invariant Is an Attack Hypothesis}{231}{subsection.7.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.4.6}Tools Check Properties; People Must Choose Them}{232}{subsection.7.4.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.4.7}The Invariant Quality Test}{233}{subsection.7.4.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7.5}Conservation, Supply, and Asset-Balance Invariants}{234}{section.7.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.5.1}Conservation Is the First Accounting Question}{234}{subsection.7.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.5.2}Exact Conservation vs Bounded Drift}{234}{subsection.7.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.5.3}Total Supply Is Not Enough}{235}{subsection.7.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.5.4}Direct Balance Changes Are a Security Surface}{235}{subsection.7.5.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.5.5}Bridges Need Cross-Domain Conservation}{236}{subsection.7.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.5.6}Conservation Invariants Should Name Units}{237}{subsection.7.5.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.5.7}Common Conservation Failure Modes}{237}{subsection.7.5.7}\protected@file@percent }
+\gdef \LT@xl {\LT@entry 
+    {1}{234.8775pt}\LT@entry 
+    {1}{234.8775pt}}
+\@writefile{toc}{\contentsline {section}{\numberline {7.6}Authorization, Ownership, and Capability Invariants}{238}{section.7.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.6.1}Authorization Is a State Property}{238}{subsection.7.6.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.6.2}Ownership Must Be Bound to the Right Object}{239}{subsection.7.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.6.3}Capabilities Are Assets}{239}{subsection.7.6.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.6.4}Negative Authorization Matters}{240}{subsection.7.6.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.6.5}Cross-Contract Authorization Is Where Bugs Hide}{241}{subsection.7.6.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.6.6}Authorization Invariants Should Include Time}{241}{subsection.7.6.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7.7}Solvency, Collateralization, Reserve, and Share-Price Invariants}{242}{section.7.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.7.1}Solvency Is About Claims vs Recoverable Assets}{242}{subsection.7.7.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.7.2}Lending Markets Need Collateralization Invariants}{243}{subsection.7.7.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.7.3}Lending Invariants Depend on Oracles}{244}{subsection.7.7.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.7.4}Reserve Invariants Separate User Claims from Protocol Equity}{244}{subsection.7.7.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.7.5}Share-Price Invariants Are Subtle}{245}{subsection.7.7.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.7.6}Donation and Inflation Attacks Are Broken Share Invariants}{245}{subsection.7.7.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.7.7}AMM Invariants Are Pricing Rules, Not Magic Shields}{246}{subsection.7.7.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.7.8}Solvency Invariants Must Name Failure Modes}{247}{subsection.7.7.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7.8}Temporal, Liveness, Exit, Withdrawal, and Recovery Invariants}{248}{section.7.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.8.1}Not Every Security Failure Is Theft}{248}{subsection.7.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.8.2}Temporal Properties Need Clocks and Conditions}{249}{subsection.7.8.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.8.3}Exit Invariants Are Security Boundaries}{249}{subsection.7.8.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.8.4}Withdrawal Queues Need Ordering Invariants}{250}{subsection.7.8.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.8.5}Pause and Recovery Controls Need Invariants Too}{251}{subsection.7.8.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.8.6}Liveness Invariants Are Hard to Test}{251}{subsection.7.8.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7.9}Exploitability: Capital, Timing, Liquidity, Reliability, and Profit}{252}{section.7.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.9.1}Vulnerability Is Not the Same as Exploit}{252}{subsection.7.9.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.9.2}Exploitability Has Preconditions}{252}{subsection.7.9.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.9.3}Capital Requirement}{253}{subsection.7.9.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.9.4}Timing and Ordering}{254}{subsection.7.9.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.9.5}Liquidity and Market Depth}{254}{subsection.7.9.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.9.6}Reliability and Repeatability}{255}{subsection.7.9.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.9.7}Profit Is Not the Only Impact}{256}{subsection.7.9.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.9.8}``Not Exploitable'' Must Be Proven Narrowly}{256}{subsection.7.9.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.9.9}Exploitability Worksheet}{257}{subsection.7.9.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7.10}Worked Example: From Protocol Intent to Attack Hypotheses}{258}{section.7.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.10.1}Protocol Description}{258}{subsection.7.10.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.10.2}Step 1: Asset and Share Conservation}{258}{subsection.7.10.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.10.3}Step 2: Deposit Fairness Invariant}{258}{subsection.7.10.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.10.4}Step 3: Empty-Vault Attack Hypothesis}{259}{subsection.7.10.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.10.5}Step 4: Exploitability Evaluation}{260}{subsection.7.10.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.10.6}Step 5: Mitigation Invariants}{261}{subsection.7.10.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7.11}Practical Discipline: Building an Invariant Catalogue}{261}{section.7.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7.12}Review Questions}{263}{section.7.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7.13}Applied Exercises}{264}{section.7.13}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.13.1}Exercise 1: Write Invariants from Intent}{264}{subsection.7.13.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.13.2}Exercise 2: Find the Missing Assumption}{264}{subsection.7.13.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.13.3}Exercise 3: Exploitability Worksheet}{264}{subsection.7.13.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.13.4}Exercise 4: Counterexample to Finding}{265}{subsection.7.13.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7.14}Key Takeaways}{265}{section.7.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7.15}Part I Handoff}{266}{section.7.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7.16}Further Reading}{266}{section.7.16}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{Part I Integrated Lab: Security Model Review}{268}{chapter*.2}\protected@file@percent }
+\gdef \@abspage@last{272}

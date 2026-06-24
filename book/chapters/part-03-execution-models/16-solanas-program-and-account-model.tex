@@ -1,0 +1,490 @@
+\chapter{Solana's Program and Account Model}
+
+\section{Purpose}
+
+\begin{principlebox}
+A Solana program does not hide mutable contract storage behind itself. It executes over accounts supplied by the transaction, and security depends on validating every supplied account.
+\end{principlebox}
+
+Chapters~14 and~15 taught Ethereum as an account-state machine with contract storage behind contract addresses. Solana makes a different architectural choice. Programs are executable accounts, but programs are stateless. Mutable state lives in separate accounts passed into each instruction.\footnote{\href{https://solana.com/docs/core/programs}{Solana Documentation, ``Programs''}.}
+
+That choice changes the review problem. In Ethereum, a reviewer often asks, ``which contract storage changed?'' In Solana, the first question is usually, ``which accounts did the caller supply, and did the program prove they are the right accounts?'' A Solana program can be perfectly typed, syntactically valid, and well organized while still accepting a maliciously substituted account, a wrong token account, a noncanonical PDA, a stale authority, or a writable account that should never have been mutable.
+
+This chapter teaches Solana at the level needed for security review. It is not a complete Anchor tutorial, not a validator internals chapter, and not a full SPL Token chapter. The goal is to build the review habit that Solana demands: reconstruct the account list, identify each account's role, verify signer and writable privileges, verify ownership and data type, verify PDA derivation, reason about CPI privilege propagation, and separate base account ownership from token authority.
+
+\section{Storage, Accounts, and Program Code}
+
+\subsection{Solana's Inverted Storage Model}
+
+Solana stores all state in accounts. The documentation describes an account as the fundamental data unit, keyed by a 32-byte address, with all network state represented as a key-value store.\footnote{\href{https://solana.com/docs/core/accounts}{Solana Documentation, ``Accounts''}.} A program account contains executable code. Data accounts contain mutable state. An instruction names the program to execute and the accounts that program may read or write.
+
+The result is an inverted storage model:
+
+\begin{codeblock}
+Ethereum-style review habit:
+    call contract address
+    contract reads and writes its own storage
+
+Solana-style review habit:
+    call program id
+    transaction supplies accounts
+    program validates accounts
+    program reads and writes supplied data accounts
+\end{codeblock}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=10mm and 16mm]
+\node[security node, text width=31mm] (tx) {Transaction};
+\node[security node, right=of tx, text width=34mm] (ix) {Instruction\\program id\\account indices\\data};
+\node[security node, right=of ix, text width=31mm] (program) {Executable\\program account};
+\node[security node, below=of program, xshift=-28mm, text width=30mm] (a1) {Data account\\state A};
+\node[security node, right=of a1, text width=30mm] (a2) {Data account\\state B};
+\node[security node, right=of a2, text width=30mm] (token) {Token account\\asset state};
+
+\draw[security arrow] (tx) -- (ix);
+\draw[security arrow] (ix) -- (program);
+\draw[security arrow] (ix) -- (a1);
+\draw[security arrow] (ix) -- (a2);
+\draw[security arrow] (ix) -- (token);
+\draw[security arrow] (program) -- (a1);
+\draw[security arrow] (program) -- (a2);
+\draw[security arrow] (program) -- (token);
+\end{tikzpicture}
+}
+\caption{A Solana instruction invokes a program over explicit accounts supplied by the transaction.}
+\end{figure}
+
+This is not a minor implementation detail. It is the center of Solana security. If a lending program expects a market account, a reserve account, an oracle account, a user's obligation account, and token accounts, the transaction supplies all of them. The runtime enforces low-level rules about signatures, mutability, ownership, and lamport balance changes. The program must enforce semantic rules: this reserve belongs to this market, this oracle prices this mint, this token account holds the expected mint, this PDA was derived from the expected seeds, and this authority is still valid.
+
+The strongest Solana reviews therefore begin with an account-role table, not with a vulnerability checklist.
+
+\subsection{Accounts and Modification Rules}
+
+Solana's account-structure documentation names five core fields.\footnote{\href{https://solana.com/docs/core/accounts/account-structure}{Solana Documentation, ``Account Structure''}.} In review notation:
+
+\begin{codeblock}
+account:
+    address       32-byte public key or PDA
+    lamports      native SOL balance in lamports
+    data          byte array: program code or program-defined state
+    owner         program id allowed to modify data and debit lamports
+    executable    true for executable program accounts
+    rent_epoch    deprecated field
+\end{codeblock}
+
+The deprecated \texttt{rent\_epoch} field does not remove the storage-deposit issue. Accounts still need enough lamports for rent exemption when they hold persistent state.
+
+The word \texttt{owner} is dangerous because Solana uses it at more than one layer. At the base account layer, \texttt{owner} means the program that owns the account data. If an account's base owner is the Token Program, the Token Program defines and controls the account data layout. If an account's base owner is a lending program, that lending program defines and controls the account data layout. This is not the same as a user owning assets or a token authority being allowed to transfer tokens.
+
+The runtime enforces several modification rules after instruction execution. Only the account's owner program can modify its data or debit lamports. Any program can credit lamports to a writable account. Read-only accounts cannot be modified. Owner reassignment requires the account to be writable, currently owned by the assigning program, and zero-initialized. The executable flag is restricted, and rent-state transitions are checked.\footnote{\href{https://solana.com/docs/core/accounts/modification-rules}{Solana Documentation, ``Modification Rules''}.}
+
+These runtime rules are necessary, but they do not prove business safety. A program can be the legitimate owner of an account and still apply the wrong state transition because it trusted the wrong account identity. A token account can be legitimately owned by the Token Program and still be the attacker's token account. A PDA can be off-curve and still be derived from unsafe seeds. Solana review lives in the gap between runtime validity and semantic correctness.
+
+\subsection{Program Code and Upgrade Authority}
+
+Solana programs are executable accounts, but program identity is not the same thing as immutable code. Under the upgradeable loader used for ordinary deployed programs, the Program account points to a separate ProgramData account that stores the executable bytecode and upgrade metadata. Solana's program-deployment documentation states that loader-v3 programs can be upgraded when an upgrade authority is set; setting that authority to \texttt{None} makes the program immutable.\footnote{\href{https://solana.com/docs/core/programs/program-deployment}{Solana Documentation, ``Program Deployment''}.}
+
+That fact changes security review. A caller may pin a program ID correctly and still be exposed to future code changes if the program remains upgradeable. A CPI may invoke the expected program ID and still depend on an upgrade authority, release process, verified build, and incident response. A protocol may publish source code and still need evidence that the on-chain ProgramData bytecode matches the reviewed source.
+
+\begin{codeblock}
+program review:
+    program id
+    loader program
+    ProgramData account
+    current upgrade authority
+    whether authority is None
+    deployment slot and recent upgrades
+    verified build or bytecode evidence
+    governance or multisig controlling upgrades
+    user exit window before upgrade effects matter
+\end{codeblock}
+
+The Program account itself is the stable address callers invoke. During an upgrade, new bytes are written through the upgrade mechanism into the ProgramData account, and the upgraded version becomes effective according to the loader's rules. The security implication is simple: the program ID is a routing target; the upgrade authority controls future behavior at that target.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.24\textwidth}>{\RaggedRight\arraybackslash}p{0.34\textwidth}X@{}}
+\toprule
+Fact & What it establishes & What remains to review \\
+\midrule
+Program ID & Which executable account an instruction invokes & Whether the code behind that ID can change \\
+ProgramData account & Where upgradeable program bytecode and metadata live & Whether the bytecode matches reviewed source and expected version \\
+Upgrade authority & Who can replace bytecode for an upgradeable program & Governance, multisig, custody, timelock, monitoring, and exit assumptions \\
+Authority set to \texttt{None} & Program is immutable under the upgradeable loader & Whether the current immutable bytes are the reviewed and intended bytes \\
+Verified build & Evidence that source can reproduce on-chain bytecode & Build inputs, dependency set, compiler version, and provenance \\
+\bottomrule
+\end{tabularx}
+\caption{Solana program review separates invocation identity, bytecode evidence, and upgrade authority.}
+\end{table}
+
+Do not write:
+
+\begin{codeblock}
+The CPI is safe because the program ID is fixed.
+\end{codeblock}
+
+Write:
+
+\begin{codeblock}
+The CPI invokes the expected program ID.
+The program is immutable, or its upgrade authority is controlled by
+the stated governance process with a documented monitoring and exit path.
+The reviewed source matches the on-chain ProgramData bytecode.
+\end{codeblock}
+
+Upgrade authority is therefore the Solana version of a future-transition authority. It can change account validation, PDA derivations, CPI behavior, token handling, fee logic, and emergency controls without changing the program ID that integrations call. If a protocol depends on another program, the dependency map must say whether that program is immutable, upgradeable by a known authority, or upgradeable by an unknown or weakly controlled authority.
+
+\section{Transactions, Instructions, and Validation}
+
+\subsection{Transactions, Instructions, and Account Lists}
+
+A Solana transaction contains signatures and a message. The message contains a header, account addresses, a recent blockhash, and compiled instructions. A transaction may contain multiple instructions, and the network processes them atomically: if any instruction fails, the whole transaction fails and state changes are reverted, though fees are still charged.\footnote{\href{https://solana.com/docs/core/transactions}{Solana Documentation, ``Transactions''}.}
+
+The transaction structure matters because compiled instructions reference accounts by index, not by repeating full addresses inside each instruction.\footnote{\href{https://solana.com/docs/core/transactions/transaction-structure}{Solana Documentation, ``Transaction Structure''}.}
+
+\begin{codeblock}
+transaction:
+    signatures[]
+    message:
+        header
+        account_keys[]
+        recent_blockhash
+        instructions[]
+
+compiled_instruction:
+    program_id_index
+    accounts[]       indices into account_keys
+    data             instruction discriminator and arguments
+\end{codeblock}
+
+The account list is partitioned by signer and writable status. The runtime derives permissions from the message header and account ordering. Version~0 transactions can use Address Lookup Tables to reference more accounts compactly; the validator resolves lookup-table entries into full account keys before execution. Lookup-table accounts can be writable or read-only non-signers, but not signers.\footnote{\href{https://solana.com/docs/core/transactions/versioned-transactions}{Solana Documentation, ``Versioned Transactions''}.}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=9mm and 12mm]
+\node[security node, text width=30mm] (msg) {Message};
+\node[security node, right=of msg, yshift=15mm, text width=34mm] (header) {Header\\signer counts\\read-only counts};
+\node[security node, right=of msg, text width=34mm] (keys) {Account keys\\ordered permissions};
+\node[security node, right=of msg, yshift=-15mm, text width=34mm] (hash) {Recent\\blockhash};
+\node[security node, right=of keys, text width=37mm] (ix) {Instruction\\program index\\account indices\\data};
+
+\draw[security arrow] (msg) -- (header);
+\draw[security arrow] (msg) -- (keys);
+\draw[security arrow] (msg) -- (hash);
+\draw[security arrow] (keys) -- (ix);
+\draw[security arrow] (header) -- (keys);
+\end{tikzpicture}
+\caption{A Solana instruction references the transaction's account list by index. Review requires resolving indices back to roles and permissions.}
+\end{figure}
+
+This creates a concrete review discipline. Do not read an instruction as if its arguments fully describe the call. The call's meaning is split across instruction data, program ID, account indices, account addresses, signer flags, writable flags, account owners, account data, and earlier instructions in the same transaction.
+
+For any nontrivial transaction, the reviewer should reconstruct:
+
+\begin{codeblock}
+for each instruction:
+    invoked program id
+    instruction discriminator or command
+    account indices
+    resolved account addresses
+    signer / non-signer status
+    writable / read-only status
+    account base owner
+    deserialized account type
+    semantic role in the protocol
+\end{codeblock}
+
+That reconstruction prevents a common mistake: reviewing only the program source while ignoring how callers can assemble account lists.
+
+\subsection{Signer, Writable, Owner, and Type}
+
+Solana account validation has four layers that should not be collapsed.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.29\textwidth}X@{}}
+\toprule
+Check & Question & Failure if missing \\
+\midrule
+Signer & Did the account authorize this transaction or PDA signing context? & Anyone can pass an account address and claim it as an authority. \\
+Writable & May this instruction change lamports or data for this account? & A required mutation fails, or a dangerous unnecessary mutation surface is opened. \\
+Base owner & Which program is allowed to modify and interpret this account's data? & Program accepts an attacker-controlled account with spoofed bytes. \\
+Type and relationship & Does the data decode to the expected state, and does it belong to the expected protocol object? & Correctly owned account is substituted from another market, mint, vault, user, or configuration. \\
+\bottomrule
+\end{tabularx}
+\caption{Signer, writable, owner, and type checks answer different security questions. Passing one does not imply the others.}
+\end{table}
+
+The runtime can tell a program whether an account is a signer and whether it was marked writable. It can enforce base ownership for data mutation. It cannot infer the protocol's relationship graph. A reserve account may be owned by the lending program but belong to the wrong market. A user's position account may be well formed but linked to another user. A token account may have the right mint but the wrong authority. A governance account may be legitimate but from the wrong realm.
+
+Anchor makes many account checks explicit through constraints such as \texttt{signer}, \texttt{mut}, \texttt{owner}, \texttt{seeds}, \texttt{bump}, \texttt{has\_one}, address checks, token constraints, mint constraints, and associated-token constraints.\footnote{\href{https://www.anchor-lang.com/docs/references/account-constraints}{Anchor Documentation, ``Account Constraints''}.} These constraints are useful, but they are not a substitute for review. A constraint proves only the condition it states. If the wrong relationship is encoded, or an important relationship is omitted, the program remains unsafe.
+
+\begin{codeblock}
+validate_deposit(ctx, amount):
+    require(ctx.user.is_signer)
+
+    require(ctx.market.owner == this_program_id)
+    require(ctx.reserve.owner == this_program_id)
+    require(ctx.position.owner == this_program_id)
+
+    require(ctx.reserve.market == ctx.market.key)
+    require(ctx.position.user == ctx.user.key)
+    require(ctx.position.reserve == ctx.reserve.key)
+
+    require(ctx.user_token_account.owner == token_program_id)
+    require(token_account.mint == ctx.reserve.deposit_mint)
+    require(token_account.owner == ctx.user.key)
+
+    require(ctx.vault_authority.key == derive_pda("vault", ctx.reserve.key, bump))
+    require(amount > 0)
+\end{codeblock}
+
+The important point is not this exact pseudocode. It is the shape of the reasoning. The reviewer moves from runtime permissions to semantic relationships.
+
+\section{Program-Derived Authority and CPI}
+
+\subsection{Program Derived Addresses}
+
+A Program Derived Address, or PDA, is a deterministic address derived from a program ID and seeds. Solana's documentation states that PDAs are off-curve, so no private key exists for them. Only the program whose ID was used in the derivation can sign for the PDA, and it does so through \texttt{invoke\_signed} during CPI.\footnote{\href{https://solana.com/docs/core/pda}{Solana Documentation, ``Program Derived Addresses''}.}
+
+\begin{codeblock}
+pda = find_program_address(
+    seeds = ["vault", market, mint],
+    program_id = lending_program_id
+)
+
+result:
+    address
+    bump
+\end{codeblock}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=9mm and 12mm]
+\node[security node, text width=28mm] (domain) {Domain seed\\\texttt{"vault"}};
+\node[security node, right=of domain, text width=28mm] (market) {Market\\pubkey};
+\node[security node, right=of market, text width=28mm] (mint) {Mint\\pubkey};
+\node[security node, right=of mint, text width=24mm] (bump) {Bump};
+\node[security node, below=of market, xshift=27mm, text width=34mm] (pid) {Program ID};
+\node[security node, below=of pid, text width=40mm] (pda) {PDA\\off-curve address};
+
+\draw[security arrow] (domain) -- (pid);
+\draw[security arrow] (market) -- (pid);
+\draw[security arrow] (mint) -- (pid);
+\draw[security arrow] (bump) -- (pid);
+\draw[security arrow] (pid) -- (pda);
+\end{tikzpicture}
+\caption{A PDA is derived from seeds, a bump, and the program ID. The seeds define the namespace and authority relationship.}
+\end{figure}
+
+The security of a PDA depends on the derivation being the intended derivation. The address being off-curve is not enough. A reviewer should ask:
+
+\begin{itemize}
+\item Are the seeds domain-separated with a fixed prefix such as \texttt{"vault"} or \texttt{"position"}?
+\item Are all relationship-defining accounts included in the seeds?
+\item Can a user choose seeds that collide semantically with another role?
+\item Is the program using the canonical bump or storing and checking the bump consistently?
+\item Is the PDA's base account owner the expected program when it stores state?
+\item Is the PDA used only for the authority it was designed to represent?
+\end{itemize}
+
+Unsafe PDA design often looks reasonable in code. A program derives a vault authority from a user key but forgets to include the mint. Two vaults for different mints now share authority. A program derives a position from a market but forgets the user. Users collide into a shared state namespace. A program accepts a PDA account but does not recompute it. The caller supplies an arbitrary account and the program treats it as program authority.
+
+\subsection{Cross-Program Invocation}
+
+Cross-Program Invocation, or CPI, is Solana's composability mechanism. One program can invoke an instruction on another program during execution. Solana provides \texttt{invoke} for CPIs without PDA signing and \texttt{invoke\_signed} for CPIs where the calling program signs on behalf of a PDA.\footnote{\href{https://solana.com/docs/core/cpi}{Solana Documentation, ``Cross Program Invocation''}.}
+
+CPIs do not erase account-validation obligations. They multiply them. The caller must pass the callee's required accounts, and signer/writable privileges extend from caller to callee. The callee cannot escalate privileges beyond what it received, and its compute-unit consumption reduces the caller's remaining budget.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=10mm and 14mm]
+\node[security node, text width=30mm] (tx) {Transaction\\account privileges};
+\node[security node, right=of tx, text width=32mm] (a) {Program A\\caller};
+\node[security node, right=of a, text width=32mm] (b) {Program B\\callee};
+\node[security node, below=of a, text width=32mm] (acct) {Shared accounts\\signer/writable flags};
+\node[security node, below=of b, text width=34mm] (pda) {PDA signer\\via seeds};
+
+\draw[security arrow] (tx) -- (a);
+\draw[security arrow] (a) -- node[above]{CPI} (b);
+\draw[security arrow] (acct) -- (a);
+\draw[security arrow] (acct) -- (b);
+\draw[security arrow] (pda) -- (b);
+\draw[security arrow] (a) -- (pda);
+\end{tikzpicture}
+\caption{A CPI passes account privileges onward. \texttt{invoke\_signed} lets the caller authorize a PDA when the correct seeds are supplied.}
+\end{figure}
+
+This means a Solana reviewer has to trace authority across program boundaries:
+
+\begin{codeblock}
+CPI review:
+    which program is being invoked?
+    is the program id fixed or caller-supplied?
+    which accounts are passed to the callee?
+    which accounts are writable?
+    which accounts are signers?
+    is a PDA signing through invoke_signed?
+    do the signer seeds match the intended PDA?
+    can the callee change an account the caller later trusts?
+    does the caller reload or revalidate account data after CPI?
+\end{codeblock}
+
+The last question is easy to miss. If Program A calls Program B and Program B mutates a shared account, Program A's in-memory view may be stale depending on framework and data handling. A post-CPI decision should be based on the current account state, not on a deserialized copy captured before the call.
+
+The most common CPI review failure is treating the callee as a library call. It is not. It is an external program invocation over shared accounts under bounded privileges. It may fail. It may consume compute. It may write to any writable account it owns or is allowed to affect through its own rules. It may be the wrong program if the caller did not pin the program ID.
+
+\section{Token Accounts and Owner Confusion}
+
+Tokens on Solana are represented by token programs, mint accounts, and token accounts. A mint account identifies a token and stores supply, decimals, mint authority, and freeze authority. A token account stores the mint it holds, the account authorized to transfer from it, and the amount.\footnote{\href{https://solana.com/docs/tokens}{Solana Documentation, ``Tokens on Solana''}.}
+
+This creates one of the most important Solana review distinctions:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.23\textwidth}>{\RaggedRight\arraybackslash}p{0.31\textwidth}X@{}}
+\toprule
+Term & Meaning & Review question \\
+\midrule
+Base account owner & Program allowed to modify the account's data. For a token account, this is the Token Program or Token-2022 program. & Is this account actually governed by the expected token program? \\
+Token account owner & Authority field inside token-account data. This authority can transfer tokens from the token account. & Is the expected user, PDA, or delegate authorized over these tokens? \\
+Mint & Token type held by the token account. & Is this the expected asset, with expected decimals and authorities? \\
+Associated Token Account & A deterministic token account address for a wallet and mint. It is still just a token account at a specific address. & Is the protocol requiring the canonical ATA, or merely any valid token account with correct mint and authority? \\
+\bottomrule
+\end{tabularx}
+\caption{Base ownership, token authority, mint identity, and associated-token address are separate facts.}
+\end{table}
+
+The owner confusion is subtle because the same word appears in different places. A token account's base \texttt{owner} should be the Token Program. Its token-account-data \texttt{owner} might be a user's wallet, a vault PDA, a multisig, or another authority. A program that checks only the base account owner has not checked who controls the tokens. A program that checks only the token authority has not checked that the account data is actually token-account data from the expected token program.
+
+The minimum token-account review is:
+
+\begin{codeblock}
+token account validation:
+    base owner == expected token program
+    decoded token account state is initialized
+    token account mint == expected mint
+    token account authority == expected user or PDA
+    amount semantics match the protocol action
+    delegate / close authority / freeze behavior are considered
+\end{codeblock}
+
+Associated Token Accounts reduce address ambiguity, but they are not automatically required by all protocols. Some designs allow any token account controlled by the expected authority. Other designs require the canonical ATA. The security issue is not which design is chosen; it is whether the design is explicit and enforced.
+
+\section{Lifecycle, Reuse, and Resource Limits}
+
+\subsection{Initialization, Reallocation, Closing, and Reuse}
+
+Solana account lifecycle is a security surface because accounts are separate state objects with lamport deposits and raw byte data.
+
+Initialization must prove that an account is the intended new account, not an already initialized state object or an attacker-controlled account with convenient bytes. Reviewers should look for a discriminator, version field, initialization flag, expected owner, expected seeds for PDA accounts, and relationship fields linking the account to its parent objects. Anchor's \texttt{init}, \texttt{seeds}, \texttt{bump}, \texttt{owner}, \texttt{has\_one}, and discriminator-related constraints can express some of these checks, but the protocol still has to encode the right relationships.
+
+Reallocation changes account data length. It may be necessary for dynamic state, but it introduces rent-exempt balance changes, zeroing questions, maximum-growth limits, serialization assumptions, and stale-data risk. A reviewer should ask whether added bytes are initialized before use and whether shrinking leaves meaningful data reachable through another interpretation.
+
+Closing usually transfers remaining lamports to a destination and marks the account unusable by convention or data reset. Closing is not just cleanup. It can refund value to the wrong address, allow state revival if data and ownership are not handled correctly, or break later instructions in the same transaction that expected the account to remain valid.
+
+\begin{failuremodebox}[Lifecycle confusion]
+A program closes a user position by transferring lamports to a destination account supplied by the caller, but it does not require that destination to be the position owner. The attacker cannot steal protocol tokens through the close alone, but can redirect the refundable storage deposit. If the program also fails to clear relationship fields, later logic may misread a closed or reinitialized account.
+\end{failuremodebox}
+
+The review correction is to treat lifecycle transitions as state transitions. Opening, resizing, closing, and reinitializing accounts should have preconditions, postconditions, and forbidden states just like deposits and withdrawals.
+
+\subsection{Resources and Liveness}
+
+Solana's execution model makes resources visible in different places than Ethereum. Transactions have a serialized size limit, recent blockhashes expire, fees include base and optional prioritization components, instructions consume compute units, accounts can be locked for writing, and CPIs consume from the same execution budget.
+
+Solana's fee documentation describes a base fee and optional prioritization fee, with prioritization fee calculated from compute-unit price and compute-unit limit.\footnote{\href{https://solana.com/docs/core/fees}{Solana Documentation, ``Fees''}.}
+
+\[
+\text{prioritization fee}
+= \left\lceil
+\frac{\text{compute unit price} \times \text{compute unit limit}}{1{,}000{,}000}
+\right\rceil
+\]
+
+For security review, the important question is not whether a transaction is cheap in a quiet test. The important question is whether the protocol's required operations remain executable under realistic account counts, CPI depth, compute use, blockhash expiry, signer constraints, and congestion. A liquidation path that needs too many writable accounts may fail when most needed. A withdrawal path that relies on a large account list may become fragile as the protocol grows. A crank or keeper operation may be valid but unprofitable if prioritization fees rise during stress.
+
+These are not merely performance concerns. They affect solvency, liquidation fairness, oracle freshness, governance execution, bridge message delivery, and emergency controls.
+
+\section{Worked Example: PDA Vault Authority}
+
+Consider a protocol that accepts deposits of a token mint into a vault token account. The vault token account is controlled by a PDA authority derived by the protocol program. The program records each user's shares in a position account.
+
+\begin{codeblock}
+accounts for deposit:
+    user                     signer
+    market                   protocol data account
+    reserve                  protocol data account
+    user_position            protocol data account
+    user_token_account       token account
+    vault_token_account      token account
+    vault_authority_pda      PDA
+    deposit_mint             mint account
+    token_program            Token Program
+\end{codeblock}
+
+The deposit has two different authority checks. First, the user must authorize movement from the user's token account. Second, the vault authority PDA must be the authority that will later control the vault token account. Those facts live in different places.
+
+\begin{codeblock}
+deposit validation:
+    require(user.is_signer)
+    require(market.owner == this_program_id)
+    require(reserve.owner == this_program_id)
+    require(user_position.owner == this_program_id)
+
+    require(reserve.market == market.key)
+    require(user_position.user == user.key)
+    require(user_position.reserve == reserve.key)
+
+    require(deposit_mint.key == reserve.deposit_mint)
+
+    require(user_token_account.base_owner == token_program.key)
+    require(user_token_account.mint == deposit_mint.key)
+    require(user_token_account.token_owner == user.key)
+
+    require(vault_token_account.base_owner == token_program.key)
+    require(vault_token_account.mint == deposit_mint.key)
+    require(vault_token_account.token_owner == vault_authority_pda.key)
+
+    require(vault_authority_pda.key ==
+        derive_pda(["vault-authority", reserve.key], this_program_id))
+\end{codeblock}
+
+Then the program performs a CPI to the Token Program to transfer tokens from the user's token account into the vault. The user signature authorizes the debit from the user's token account. A later withdrawal would use \texttt{invoke\_signed} so the program can sign for \texttt{vault\_authority\_pda}.
+
+The weak review says, ``the vault is a PDA, so it is safe.'' The correct review asks whether the vault PDA is the intended PDA, whether the vault token account is actually controlled by that PDA, whether the token mint matches the reserve, whether the user's token account is controlled by the signer, whether the token program ID is fixed, and whether the protocol's internal position state links the user, reserve, and market.
+
+This is why Solana review feels more like evidence assembly than source-code reading. The source code matters, but the security claim is about a relationship among accounts.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why is Solana's program model described as stateless, and where does mutable state live?
+\item What is the difference between a base account owner and a token account owner?
+\item Why is checking \texttt{is\_signer} insufficient to prove that an account has the expected protocol role?
+\item Why is program upgrade authority part of Solana's runtime security model?
+\item What information is split across a Solana transaction message and its compiled instructions?
+\item How do PDAs create program-controlled authority without a private key, and why must PDA seeds be treated as part of the security design?
+\item What privilege rules apply during CPI, and why can CPI still create security risk?
+\item Why are initialization, reallocation, and closing security-relevant state transitions?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Inspect a real Solana transaction in an explorer or local RPC output. Resolve each instruction's program ID, account indices, signer accounts, writable accounts, recent blockhash, instruction data label if available, final transaction status, and whether each invoked program is immutable or has an upgrade authority.
+
+\item Given a deposit instruction for a token vault, build an account-role table with columns for address, role, signer, writable, base owner, decoded type, relationship checks, and failure impact if substituted.
+
+\item For a proposed PDA derived from \texttt{["position", market]} and used as a user position account, identify the missing relationship, propose safer seeds, and explain how the bug could appear in a multi-user market.
+
+\item Analyze a Token Program CPI where a protocol transfers tokens from a vault token account. Identify the vault token account, token mint, base owner, token authority, PDA signer seeds, token program ID, writable accounts, and post-CPI state checks needed before the caller continues.
+\end{enumerate}

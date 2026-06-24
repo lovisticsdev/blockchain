@@ -1,0 +1,509 @@
+\chapter{P2P Networks, Propagation, and Censorship}
+
+\section{Purpose}
+
+\begin{principlebox}
+A blockchain participant does not observe the chain from nowhere. It observes messages, blocks, transactions, proofs, and responses through a particular network path. Security depends on what the participant verifies, what it merely receives, and what the application does when views disagree.
+\end{principlebox}
+
+Chapter 8 explained how blockchains select history. This chapter asks an earlier operational question: what history does a participant actually see?
+
+A blockchain network is not a shared screen. It is a set of nodes that discover peers, exchange messages, validate what they receive, relay some information, discard other information, and expose local views to wallets, applications, bots, validators, bridges, exchanges, and monitoring systems. Blocks and transactions do not appear everywhere at once. They travel through particular peers, RPC providers, relays, indexers, gateways, load balancers, and operator infrastructure.
+
+That makes the network layer part of the security model. A transaction may be valid and still fail to reach block producers. A validator may have valid keys and still miss duties because it received data late. A bridge watcher may run correct code and still act on a stale or censored source-chain view. A wallet may show a user the wrong state because its hosted RPC endpoint is lagging, filtered, or connected to a minority view.
+
+The goal of this chapter is not to survey every blockchain networking protocol. The goal is to train the security habit: never say ``the chain saw it'' when only a specific observer, through a specific path, saw it.
+
+\section{Local Views, Not Global Truth}
+
+\subsection{Messages Before Truth}
+
+A node receives messages before it reaches conclusions. Those messages may include transactions, blocks, headers, attestations, votes, inventory announcements, peer addresses, state proofs, blob references, or protocol-specific data. The node then checks those messages against its local rules and updates its local view.
+
+For review purposes, separate three layers:
+
+\begin{codeblock}
+messages available elsewhere:
+    data that may exist in other peers' views
+
+local view:
+    data this node, RPC endpoint, indexer, watcher, or bot has observed
+
+application action:
+    what the system does because of that local view
+\end{codeblock}
+
+Many bugs collapse those layers. ``We broadcast the transaction'' becomes ``the network has the transaction.'' ``The watcher did not see a conflicting event'' becomes ``no conflict exists.'' ``Provider A says the transaction is pending'' becomes ``the transaction is publicly visible.'' Those are unjustified jumps.
+
+A stronger observation record names the source:
+
+\begin{codeblock}
+Observed object:
+Observer:
+Source node, provider, indexer, or gateway:
+Block hash, height, slot, or checkpoint:
+Commitment or finality level:
+Independent observers that agree:
+Action triggered by the observation:
+Behavior if observers disagree:
+\end{codeblock}
+
+This is deliberately close to the settlement discipline from Chapter 8. The difference is emphasis. Chapter 8 asked when an observed history is settled enough to act on. This chapter asks whether the observation itself is trustworthy enough to count as evidence.
+
+\subsection{Observation Is a Trust Boundary}
+
+In Part I, trust boundaries marked where control or information crossed from one authority to another. Network observation is one of those boundaries. A system that accepts data from an RPC endpoint, hosted indexer, public gateway, private relay, or single self-hosted node has accepted an information authority.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=9mm and 8mm,
+  actor/.style={security node, text width=24mm, minimum height=8mm},
+  infra/.style={security node, text width=28mm, minimum height=8mm},
+  app/.style={security node, draw=securitygreen, text width=30mm, minimum height=8mm}
+]
+\node[actor] (user) {User or\\bot};
+\node[infra, right=of user] (rpc) {RPC\\provider};
+\node[infra, above right=of rpc] (indexer) {Indexer or\\explorer};
+\node[infra, below right=of rpc] (node) {Full node};
+\node[infra, right=of node] (p2p) {P2P\\network};
+\node[app, right=of rpc] (app) {Application\\decision};
+
+\draw[security arrow] (user) -- (rpc);
+\draw[security arrow] (rpc) -- (app);
+\draw[security arrow] (indexer) -- (app);
+\draw[security arrow] (node) -- (rpc);
+\draw[security arrow] (p2p) -- (node);
+\draw[security arrow] (node) -- (p2p);
+
+\node[draw=securityred, dashed, rounded corners=2pt, fit=(rpc) (indexer) (node), inner sep=5pt, label=below:{observation infrastructure}] {};
+\end{tikzpicture}
+\caption{Applications usually act on an infrastructure-mediated view, not on direct omniscient access to the network.}
+\end{figure}
+
+The reviewer should ask:
+
+\begin{itemize}
+\item Which component observed the event?
+\item What did it verify locally?
+\item Which data was accepted from another party?
+\item Are independent observers genuinely independent, or do they share the same upstream provider, cloud, indexer, load balancer, client implementation, or region?
+\item Which actions continue when observation confidence drops?
+\end{itemize}
+
+The last question matters most. A user interface can often degrade gracefully. A bridge release, exchange withdrawal, liquidation, governance execution, oracle publication, or high-value keeper action may need to fail closed.
+
+\section{Node Roles and Verification Boundaries}
+
+\subsection{Node Is Not a Precise Security Role}
+
+The word node is too broad. It can mean a full node, validator, archive node, RPC endpoint, light client, indexer backend, sentry node, relayer node, or explorer infrastructure. These roles can overlap, but they do not provide the same security properties.
+
+Ethereum's documentation, for example, distinguishes execution clients, consensus clients, validators, and node types such as full, archive, and light nodes.\footnote{\href{https://ethereum.org/developers/docs/nodes-and-clients/}{ethereum.org, ``Nodes and clients''}.} Bitcoin's P2P reference distinguishes the protocol messages used for address sharing, inventory announcements, headers, blocks, and transactions.\footnote{\href{https://developer.bitcoin.org/reference/p2p\_networking.html}{Bitcoin Developer Reference, ``P2P Network''}.} The local implementation details differ by chain, but the review question is stable: what does this component verify?
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.15\textwidth}>{\RaggedRight\arraybackslash}p{0.31\textwidth}X@{}}
+\toprule
+Role & Verifies or provides & Hidden dependency \\
+\midrule
+Full node & Blocks and state transitions under local protocol rules & Honest-enough peer connectivity, timely data, correct client software \\
+Validator & Consensus duties such as proposals, votes, attestations, or commits & Network reachability, signing safety, clock and duty correctness \\
+Archive node & Historical state and old query surfaces & Complete storage, correct replay, incident-time availability \\
+RPC endpoint & Query and submission interface backed by nodes & Provider freshness, routing, policy, rate limits, backend consistency \\
+Light client & Reduced verification such as headers, signatures, committees, or proofs & Data availability, server honesty for unverified data, checkpoint assumptions \\
+Indexer & Derived application views from blocks, logs, traces, and receipts & Correct decoding, reorg handling, backfill, database integrity \\
+Gateway & Delivery of content, blobs, proofs, metadata, or frontend assets & Availability, caching, integrity binding, regional access \\
+\bottomrule
+\end{tabularx}
+\caption{A component's security role is defined by what it verifies and what other systems depend on it to report.}
+\end{table}
+
+\subsection{Full Nodes Verify, But They Do Not See Everything}
+
+A full node validates blocks and state transitions according to protocol rules. That is powerful: invalid data can be rejected locally rather than trusted from a hosted service. But a full node is still a local observer. It needs peers. It needs timely propagation. It can be eclipsed, partitioned, overloaded, misconfigured, or affected by client bugs.
+
+Running a full node improves verification. It does not remove network assumptions.
+
+For a full node in a security review, ask:
+
+\begin{itemize}
+\item How does it discover and select peers?
+\item Does it have peer diversity across networks, operators, clients, and regions?
+\item What state does it prune?
+\item Which RPC methods does it expose?
+\item Which application decisions trust this node's latest view?
+\item What happens when this node disagrees with another source?
+\end{itemize}
+
+The same pattern applies to validators. A validator has consensus authority, but that authority is exercised through network messages. If blocks arrive late, votes fail to propagate, relay paths censor, or failover causes double-signing risk, the validator's network design has become a consensus and funds-at-risk issue.
+
+\subsection{Indexers and Gateways Are Derived-View Systems}
+
+Indexers are often treated as performance infrastructure. For security review, treat them as interpretation systems. They transform raw chain data into derived application data. They decode logs, track contract deployments, follow upgrades, handle reorgs, build balances, label addresses, calculate positions, and serve query APIs.
+
+That interpretation can be wrong while the chain itself is correct. An indexer can miss a reorg, decode an event using the wrong ABI, fail to replay after an upgrade, serve stale database replicas, mishandle non-standard token behavior, or show a log as if it were authoritative state.
+
+Gateways have a similar problem. A gateway may serve IPFS content, metadata, proofs, blobs, off-chain messages, or frontend assets. If the client verifies a content hash or proof, the gateway is mostly an availability dependency. If the client accepts the gateway's response as truth, the gateway is part of the trust model.
+
+\section{Propagation and Relay}
+
+\subsection{Peer Discovery Shapes the First View}
+
+A node needs peers before it can receive blocks, transactions, votes, or attestations. Peer discovery is therefore a security surface, not just a startup detail.
+
+Different networks use different mechanisms: DNS seeds, bootnodes, static peer lists, peer exchange, distributed hash tables, Ethereum Node Records, address books, gossip discovery, sentry nodes, or operator-managed connections. Ethereum's networking layer documents separate execution-layer and consensus-layer networking responsibilities, including peer discovery and message propagation.\footnote{\href{https://ethereum.org/developers/docs/networking-layer/}{ethereum.org, ``Networking layer''}.} Ethereum consensus networking also specifies gossip topics and request/response protocols for beacon-chain messages.\footnote{\href{https://ethereum.github.io/consensus-specs/specs/phase0/p2p-interface/}{Ethereum Consensus Specs, ``P2P Interface''}.}
+
+The mechanism changes; the review questions do not:
+
+\begin{itemize}
+\item Where do initial peers come from?
+\item Can an attacker bias the peer set?
+\item How are peers scored, retained, or evicted?
+\item Does the node recover if initial peers are stale or adversarial?
+\item Are peer dependencies concentrated in one hosting provider, ASN, region, client, or operator?
+\end{itemize}
+
+A node whose peers all come from one operational domain has a narrow view even if the chain itself is decentralized.
+
+\subsection{Gossip Is Not Guaranteed Delivery}
+
+Gossip protocols spread messages by forwarding them among peers. They are useful because there is no central broadcaster that reaches every participant in a permissionless network. But gossip is controlled, policy-shaped flooding, not guaranteed delivery.
+
+A transaction can fail to propagate because peers are offline, reject it by policy, rate-limit it, already have a conflicting transaction, consider its fee too low, drop it under load, fail to relay private order flow, or selectively censor it. A block can arrive late because of connectivity, relay topology, bandwidth, validator infrastructure, peer scoring, routing problems, or attack.
+
+For transaction submission, distinguish these states:
+
+\begin{codeblock}
+constructed locally
+signed by the user or authority
+submitted to one endpoint
+accepted by one local node
+seen by independent observers
+visible to likely block producers
+included in a block
+settled under the application's policy
+\end{codeblock}
+
+Those states are not equivalent. A transaction hash returned by one RPC endpoint is not proof that independent peers saw the transaction, that a block producer saw it, or that the network is censoring it if another endpoint does not show it.
+
+\subsection{Mempools Are Local Views}
+
+A mempool is a node's local set of transactions that may be eligible for relay or inclusion. It is not a canonical object. Different nodes can have different mempools because of fees, replacement rules, propagation delay, local policy, spam controls, transaction validity at the current head, private relays, and chain-specific architecture.
+
+This matters for censorship analysis. Non-appearance in one mempool is weak evidence. It may mean deliberate filtering. It may also mean low fee, invalid nonce, replacement conflict, propagation delay, provider policy, private routing, or a stale endpoint.
+
+Chapter 10 will treat order flow and MEV in detail. Here the security lesson is narrower: mempool visibility is evidence about a local observation path, not proof of global inclusion intent.
+
+\subsection{Relay Policy Is Not Consensus Validity}
+
+Consensus rules decide whether a block or transaction is valid under the protocol. Relay policy decides what a node is willing to forward, store, or serve before inclusion. A transaction may be consensus-valid but not relayed by many nodes because of fee thresholds, standardness rules, resource limits, local filters, or provider policy.
+
+This distinction prevents bad diagnoses. If a transaction is valid but not propagating, the cause may be relay policy rather than consensus rejection. If a transaction appears at one provider and not another, the cause may be local mempool policy rather than censorship. If an application depends on fast submission, it must monitor both validity and propagation.
+
+\section{Eclipse, Delay, Partition, and Selective Propagation}
+
+\subsection{Eclipse Attacks Control a Victim's View}
+
+An eclipse attacker surrounds a victim with attacker-controlled or attacker-influenced peers so the victim's network view is filtered through the attacker. The classic Bitcoin eclipse work showed how peer table manipulation and connection control can isolate a node's view of the network.\footnote{Ethan Heilman et al., \href{https://www.usenix.org/conference/usenixsecurity15/technical-sessions/presentation/heilman}{``Eclipse Attacks on Bitcoin's Peer-to-Peer Network,'' USENIX Security 2015}.}
+
+An eclipsed node may still validate messages correctly. That is the unsettling part. The attack does not require forged signatures or invalid blocks. The attacker controls which valid messages arrive and when.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=8mm and 8mm,
+  stage/.style={security node, text width=27mm, minimum height=8mm},
+  attacker/.style={security node, draw=securityred, text width=27mm, minimum height=8mm}
+]
+\node[stage] (victim) {Victim\\node};
+\node[attacker, above right=of victim] (p1) {Attacker\\peer};
+\node[attacker, right=of victim] (p2) {Attacker\\peer};
+\node[attacker, below right=of victim] (p3) {Attacker\\peer};
+\node[stage, right=24mm of p2] (honest) {Honest\\network};
+
+\draw[security arrow] (p1) -- (victim);
+\draw[security arrow] (p2) -- (victim);
+\draw[security arrow] (p3) -- (victim);
+\draw[security arrow, dashed] (honest) -- node[above, font=\small]{delayed or hidden} (p2);
+\end{tikzpicture}
+\caption{In an eclipse attack, the victim's messages pass through a controlled peer set. The victim may verify data correctly and still see the wrong subset of valid data.}
+\end{figure}
+
+The consequences depend on the victim:
+
+\begin{itemize}
+\item A wallet may show stale balances or transaction status.
+\item A validator may miss duties, sign late, or build on an outdated view.
+\item A bridge watcher may accept a source-chain event without seeing a competing branch or reorg.
+\item An exchange monitor may credit deposits based on a view that independent observers reject.
+\item A liquidation bot may act on stale state.
+\end{itemize}
+
+The review question is not only ``can the node be eclipsed?'' It is ``what application action becomes unsafe if this observer has a narrow view?''
+
+\subsection{Delay Can Be Enough}
+
+Permanent censorship is not always necessary. Delay can break systems whose actions depend on time, price, finality, liquidation windows, governance deadlines, or cross-domain sequencing.
+
+A delayed observer may:
+
+\begin{itemize}
+\item miss a liquidation opportunity;
+\item submit a stale oracle update;
+\item release funds before seeing a reorg;
+\item display an outdated withdrawal state;
+\item fail to cancel or replace a risky transaction;
+\item vote, attest, or propose with incomplete information.
+\end{itemize}
+
+Delay attacks are especially dangerous when the application interprets silence as safety. ``We did not observe a conflicting event'' is weak unless the observation path is fresh, diverse, and monitored.
+
+\subsection{Routing and Partition Risk}
+
+Network partitions and routing attacks can separate honest participants without compromising their private keys or clients. Research on Bitcoin routing attacks showed that internet routing can be used to partition or delay cryptocurrency traffic under some conditions.\footnote{Maria Apostolaki, Aviv Zohar, and Laurent Vanbever, \href{https://arxiv.org/abs/1605.07524}{``Hijacking Bitcoin: Routing Attacks on Cryptocurrencies,'' 2017 IEEE Symposium on Security and Privacy}.}
+
+The exact attack surface varies by protocol and deployment, but the lesson is general. Consensus may be decentralized at the protocol layer while the network path is concentrated through a small number of clouds, regions, internet service providers, validators, RPC providers, sentry architectures, relays, or gateways.
+
+A review should identify correlated failure domains:
+
+\begin{itemize}
+\item shared cloud provider;
+\item shared region;
+\item shared upstream RPC vendor;
+\item shared indexer backend;
+\item shared client implementation;
+\item shared validator hosting provider;
+\item shared relay or gateway;
+\item shared operator account or deployment pipeline.
+\end{itemize}
+
+Two providers are not independent if one resells the other, uses the same upstream nodes, shares the same indexing database, or fails under the same routing event.
+
+\subsection{Selective Propagation and Censorship}
+
+Censorship is not one failure mode. Use more precise labels:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.23\textwidth}>{\RaggedRight\arraybackslash}p{0.35\textwidth}X@{}}
+\toprule
+Failure class & What happens & Evidence to collect \\
+\midrule
+Provider rejection & RPC or gateway refuses submission or query & Error logs, provider policy, comparison with self-hosted node \\
+Relay non-propagation & Transaction is accepted locally but not widely relayed & Independent mempool observers, peer logs, fee and nonce checks \\
+Inclusion delay & Transaction reaches producers but is not included promptly & Fee context, block producer behavior, competing transactions \\
+Proposer omission & Specific producers repeatedly omit eligible transactions & Producer records and protocol evidence \\
+Indexer omission & Derived view fails to show canonical data & Direct node query, reorg logs, backfill status, database health \\
+Gateway unavailability & Content or proof delivery fails selectively & Alternative gateways, content hashes, regional probes \\
+\bottomrule
+\end{tabularx}
+\caption{Censorship analysis improves when non-inclusion is classified before conclusions are drawn.}
+\end{table}
+
+This classification matters because the controls differ. Higher fees do not fix provider filtering. More RPC providers do not fix a block producer cartel. A self-hosted node may fix read trust but not force inclusion. A private relay may reduce exposure but may also narrow visibility and introduce relay trust.
+
+\section{RPC, Indexer, and Gateway Trust}
+
+\subsection{RPC Trust Has Read, Write, and Privacy Dimensions}
+
+Third-party node services are convenient, but they centralize part of an application's infrastructure. Ethereum's nodes-as-a-service documentation explicitly frames these services as managed node infrastructure that applications use to read from and write to the blockchain.\footnote{\href{https://ethereum.org/developers/docs/nodes-and-clients/nodes-as-a-service/}{ethereum.org, ``Nodes as a service''}.}
+
+RPC trust is not a single thing:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.18\textwidth}>{\RaggedRight\arraybackslash}p{0.31\textwidth}X@{}}
+\toprule
+Dependency & Security question & Typical failure \\
+\midrule
+RPC read path & Is the returned state fresh, canonical enough, and anchored to the expected block? & Stale balance, wrong block tag, minority fork, load-balanced inconsistency \\
+RPC write path & Was the transaction accepted, propagated, replaced, or filtered? & Dropped submission, duplicate send, nonce race, relay dependency \\
+RPC simulation & Is simulation using the same state and assumptions as execution? & False success, false revert, stale gas estimate, missing pending state \\
+Indexer & Is derived state consistent with canonical blocks and reorg handling? & Phantom event, missed event, stale derived balance, wrong decoded semantics \\
+Gateway & Is delivered data integrity-bound to an on-chain or signed commitment? & Stale frontend, wrong metadata, selective unavailability, cache poisoning \\
+Privacy & What request metadata does the provider learn? & Address clustering, strategy leakage, order-flow exposure \\
+\bottomrule
+\end{tabularx}
+\caption{Hosted infrastructure creates different risks for reads, writes, simulations, derived state, delivery, and privacy.}
+\end{table}
+
+The right design does not blindly avoid hosted infrastructure. It decides which decisions may rely on it.
+
+For example, a frontend display may use indexed data if it labels uncertainty and refreshes safely. An exchange withdrawal decision should not rely only on an indexer's event table. A bridge release should not depend on one hosted RPC and one hosted indexer that share the same upstream data source.
+
+\subsection{Failover Can Create New Bugs}
+
+Redundancy is not automatically safety. A system that switches providers without rules can create inconsistent reads, duplicate writes, nonce races, privacy leaks, stale simulations, accidental minority-fork behavior, or mixed views where an indexer response from one head is combined with an RPC response from another.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=8mm and 9mm,
+  src/.style={security node, text width=25mm, minimum height=8mm},
+  check/.style={security decision, text width=22mm},
+  act/.style={security node, draw=securitygreen, text width=27mm, minimum height=8mm}
+]
+\node[src] (a) {Provider A\\head H1};
+\node[src, below=of a] (b) {Provider B\\head H1};
+\node[src, below=of b] (c) {Local node\\head H1};
+\node[check, right=of b] (agree) {same head\\and policy?};
+\node[act, right=of agree] (act) {Allow safety\\critical action};
+\node[act, below=of act, draw=securityred] (pause) {Pause or\\degrade};
+
+\draw[security arrow] (a) -- (agree);
+\draw[security arrow] (b) -- (agree);
+\draw[security arrow] (c) -- (agree);
+\draw[security arrow] (agree) -- node[above, font=\small]{yes} (act);
+\draw[security arrow] (agree) -- node[right, font=\small]{no} (pause);
+\end{tikzpicture}
+\caption{Failover should be a policy decision based on agreement and action risk, not an automatic switch to any available provider.}
+\end{figure}
+
+For low-risk display, failover can be permissive. For accounting, bridge minting, governance execution, oracle publication, and high-value withdrawals, provider disagreement should usually stop the action until the view is reconciled.
+
+\section{Censorship Detection and Failover Policy}
+
+\subsection{Absence Is Weak Evidence}
+
+Absence of evidence is weak in distributed networks. A transaction missing from one endpoint may be censored, but it may also be invalid, underpriced, replaced, unseen, delayed, rate-limited, privately routed, or hidden by local policy. A block missing from one observer may indicate a partition, but it may also indicate lag, pruning, indexer delay, or a provider backend problem.
+
+Censorship detection requires multiple vantage points and careful classification:
+
+\begin{itemize}
+\item validate the transaction locally;
+\item submit through at least one path whose behavior is logged;
+\item compare independent RPC and self-hosted node observations;
+\item check block hashes and commitment levels, not only heights;
+\item inspect fee, nonce, replacement, and revert reasons;
+\item monitor inclusion by producer, validator, builder, or sequencer where the chain exposes that data;
+\item separate provider refusal from network non-propagation and producer omission.
+\end{itemize}
+
+The output is not absolute certainty. It is a defensible failure classification and an appropriate response.
+
+\subsection{A Network Assumption Register}
+
+The practical artifact for this chapter is a network assumption register:
+
+\begin{codeblock}
+System:
+Component:
+Observed chain or domain:
+Role of this component:
+Data verified locally:
+Data accepted from providers:
+Peer sources:
+RPC providers:
+Indexer providers:
+Gateway dependencies:
+Minimum freshness:
+Required commitment or finality level:
+Independence requirements:
+Censorship detection signals:
+Failover behavior for reads:
+Failover behavior for writes:
+Actions that may continue under degraded view:
+Actions that must stop under disagreement:
+Residual risk:
+\end{codeblock}
+
+This register should exist for high-value observers: bridge watchers, exchange deposit monitors, oracle publishers, validators, liquidation bots, governance executors, wallet backends, and public frontends. Without it, the system may still work, but it does not know what it trusts.
+
+\section{Worked Example: Bridge Watcher With a Narrow View}
+
+A bridge watches Chain A and releases assets on Chain B. Its architecture is:
+
+\begin{itemize}
+\item one Chain A full node operated by the bridge team;
+\item one hosted RPC provider for backup reads;
+\item one hosted indexer for event discovery;
+\item one relayer that submits release transactions on Chain B;
+\item one Chain B RPC provider for submission and monitoring;
+\item one dashboard that uses the same hosted indexer as the release pipeline.
+\end{itemize}
+
+The team says, ``we are safe because we run our own node.'' That claim is incomplete. The full node improves local verification, but the release pipeline still depends on peer freshness, source-chain settlement, event discovery, indexer correctness, backup-provider behavior, Chain B submission, and monitoring independence.
+
+\subsection{Observation Path}
+
+The critical event is a user lock on Chain A. The bridge should release on Chain B only after the event is observed, verified, and settled according to policy.
+
+The observation path is:
+
+\begin{codeblock}
+Chain A peers -> bridge full node -> bridge watcher
+Chain A hosted RPC -> backup reads
+Hosted indexer -> event discovery and dashboard
+Bridge relayer -> Chain B RPC -> Chain B release transaction
+\end{codeblock}
+
+The hidden weakness is that the dashboard and release pipeline share the same indexer. If that indexer misses a reorg or serves stale data, the monitor may confirm the same false view the system acted on.
+
+\subsection{Failure Analysis}
+
+Plausible failures include:
+
+\begin{itemize}
+\item the bridge full node is eclipsed and receives Chain A blocks late;
+\item the hosted indexer records a lock event and fails to roll it back after a reorg;
+\item the backup RPC provider lags behind the source-chain head during congestion;
+\item the relayer submits a Chain B release before the Chain A event reaches the required settlement threshold;
+\item the dashboard uses the same stale indexer and does not alert;
+\item Chain A observers in different regions disagree on head or finality.
+\end{itemize}
+
+None of these require forging a bridge message. They exploit observation, propagation, and settlement assumptions.
+
+\subsection{Corrected Security Rule}
+
+The bridge invariant should be stated in network terms:
+
+\begin{codeblock}
+The bridge must not release or mint assets on Chain B based on a Chain A
+event unless that event is observed through independent network paths,
+verified against Chain A state, and settled according to the bridge's
+source-chain finality policy.
+\end{codeblock}
+
+The failover policy follows from the invariant:
+
+\begin{itemize}
+\item If the primary Chain A node is unavailable, display may degrade, but Chain B releases stop until source-chain settlement can be independently verified.
+\item If the indexer and full node disagree about bridge events, safety decisions use direct node verification and automated release stops until the discrepancy is resolved.
+\item If independent Chain A observers disagree on head, commitment, or finality, releases pause and operators record the canonical-view restoration process.
+\item If Chain B submission fails, the system must distinguish release not submitted, submitted but not propagated, included but not settled, and settled.
+\end{itemize}
+
+The network assumption register for this bridge should include peer diversity for the source node, independent Chain A observers, indexer independence, Chain B submission paths, finality thresholds, dashboard data sources, fail-closed conditions, and residual risk.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why is ``the chain saw it'' usually an imprecise security claim?
+\item What is the difference between data that exists somewhere in the network, a local view, and an application action?
+\item Why does running a full node improve verification without eliminating network assumptions?
+\item How do full nodes, validators, archive nodes, RPC endpoints, light clients, indexers, and gateways differ as security roles?
+\item Why are mempools local views rather than canonical objects?
+\item What is the difference between relay policy and consensus validity?
+\item What does an eclipse attacker control, and why can the victim still appear to be validating correctly?
+\item Why can naive RPC or indexer failover create new security bugs?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Classify the observation path for a wallet that uses one hosted RPC endpoint and one hosted indexer. Identify what the wallet verifies locally, what it trusts, what could be stale, and which user actions should continue or stop when the two sources disagree.
+
+\item A user submits a withdrawal transaction through Provider A. Provider A returns a transaction hash. Ten minutes later, Provider B does not show the transaction as pending. List at least five explanations other than targeted censorship, then write the evidence you would collect to distinguish them.
+
+\item Design a peer and provider diversity policy for an exchange deposit monitor. Include full-node operation, RPC providers, archive dependencies, commitment thresholds, provider-disagreement handling, and actions that fail open or fail closed.
+
+\item Write a network assumption register for the bridge watcher in the worked example. Include observation sources, local verification, external dependencies, independence requirements, failover behavior, censorship signals, and residual risk.
+\end{enumerate}

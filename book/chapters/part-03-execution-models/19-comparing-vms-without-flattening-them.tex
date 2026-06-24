@@ -1,0 +1,297 @@
+\chapter{Comparing Execution Models Without Flattening Them}
+
+\section{Purpose}
+
+\begin{principlebox}
+The portable skill is not memorizing one runtime and translating its bug names everywhere. The portable skill is asking the same first-principles questions while respecting each execution model's state, authority, asset, call, failure, and evidence rules.
+\end{principlebox}
+
+Part~III has compared execution models that are often flattened into one phrase: smart-contract platforms. That phrase is too coarse to guide security review. Bitcoin does not maintain account balances at consensus level. Ethereum does not execute over caller-supplied account lists the way Solana does. Move's type and module system changes what asset safety can mean. Cosmos-style appchains move application logic, governance, and upgrades into the chain itself.
+
+This chapter closes Part~III by building a comparison method. It is not a recap of every detail in Chapters~13--18. It is a compression tool. A reviewer should be able to approach a new chain, runtime, VM, object model, or appchain and ask useful questions without pretending it is secretly Ethereum, secretly Bitcoin, secretly Solana, or secretly Move.
+
+The warning is simple: invariants can translate; implementation threat models usually do not.
+
+\section{Comparison Method}
+
+A comparison chapter should not become a catalogue of platform differences. Its job is to separate questions that travel from answers that do not.
+
+\subsection{The Portable Questions}
+
+The reusable questions from Part~I still hold. The mistake is answering them with the wrong model in mind.
+
+\begin{codeblock}
+execution-model review:
+    what is the state?
+    what counts as an input?
+    who or what authorizes the transition?
+    what asset representation is being changed?
+    what invariant should hold after the transition?
+    what evidence proves the outcome?
+    what can fail even if execution is valid?
+\end{codeblock}
+
+These questions are portable because every blockchain system is a state machine. They are not self-answering. "Who authorized this?" means one thing for a Bitcoin output, another for an Ethereum contract call, another for a Solana PDA, another for a Move capability, and another for a Cosmos governance-controlled module account.
+
+The reviewer should carry questions across systems, not assumptions.
+
+\section{Non-Portable Security Surfaces}
+
+Most bad cross-runtime reviews fail in the same places: they import one model's state, authority, asset, or control-flow assumptions into another model. Those surfaces need explicit comparison.
+
+\subsection{State, Ownership, and Storage Are Not Portable}
+
+Bitcoin's developer documentation describes transactions as spending outputs from earlier transactions and creating outputs that future transactions can spend.\footnote{\href{https://developer.bitcoin.org/devguide/transactions.html}{Bitcoin Developer Guide, ``Transactions''}.} That means the consensus-level state is a set of unspent outputs. An account balance is a wallet reconstruction, not the base machine.
+
+Ethereum documentation describes accounts as entities with addresses and ETH balances, and transactions as signed instructions from accounts.\footnote{\href{https://ethereum.org/developers/docs/accounts/}{ethereum.org, ``Ethereum Accounts''}.} Ethereum's state is account-oriented: contract storage, balances, nonces, and code commitments live behind account addresses.
+
+Solana documentation describes accounts as the fundamental data unit and transactions as messages containing account addresses and instructions.\footnote{\href{https://solana.com/docs/core/accounts}{Solana Documentation, ``Accounts''}.} Solana programs execute over explicit accounts supplied by the transaction. The state question begins with the account list.
+
+Move's model begins from typed values, resources, abilities, modules, and storage. The Move Book explains that only structs with \texttt{key} can be saved directly in global storage.\footnote{\href{https://move-language.github.io/move/structs-and-resources.html}{The Move Book, ``Structs and Resources''}.} Sui then makes objects the primary storage and transaction units. Cosmos appchains compose module stores, contract state, IBC state, params, and governance state.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.16\textwidth}>{\RaggedRight\arraybackslash}p{0.27\textwidth}>{\RaggedRight\arraybackslash}p{0.26\textwidth}>{\RaggedRight\arraybackslash}X@{}}
+\toprule
+Model & State shape & Authority primitive & Evidence focus \\
+\midrule
+Bitcoin & UTXO set: spendable outpoints with values and locking conditions & Satisfaction of a specific output's spend condition & Transaction graph, input outpoints, scripts, witnesses, timelocks, relay policy \\
+Ethereum & Account world state with balances, nonces, code, and contract storage & Sender, caller, contract code, signatures, domains, storage state & Receipt, logs, trace, call frames, storage diffs, gas outcome \\
+Solana & Explicit accounts passed to instructions, plus program-owned account data & Signers, writable flags, account owners, PDAs, CPI privileges & Account list, instruction data, inner instructions, logs, post-state \\
+Move and Sui & Typed resources, modules, capabilities, and objects & Signers, module APIs, abilities, capabilities, object ownership & Resource or object state, events, transaction effects, PTB results \\
+Appchains & Module stores, module accounts, contracts, params, governance, IBC state & Keepers, module authority, governance, contract admin, validator set & App hash, module events, proposals, upgrade plans, IBC proofs \\
+\bottomrule
+\end{tabularx}
+\caption{Execution models differ in state shape, authority primitives, and evidence surfaces.}
+\end{table}
+
+The table is not a taxonomy for memorization. It is a guardrail against false translation. If a finding says "the balance changed," the next question is: balance according to which state model?
+
+\subsection{Authority and Control Flow Are Runtime-Specific}
+
+The word "signer" is useful and dangerous. It invites reviewers to reduce authority to a private-key signature. Part~III should have made that impossible.
+
+In a UTXO system, authority is attached to an output. Spending a coin means satisfying that output's locking condition. A signature may be part of the witness, but the spend condition is the real authority boundary.
+
+In Ethereum, the transaction signer is not always the actor a contract should trust. Contract code sees \texttt{msg.sender}, may see \texttt{tx.origin}, may validate off-chain signatures, may rely on ERC-1271-style contract signatures, and may execute through proxies or delegated account behavior. Chapter~15 added another layer: \texttt{DELEGATECALL} can execute one account's code in another account's storage context.
+
+In Solana, a signer flag proves that an account signed the transaction or that a PDA was signed for through the correct seeds in CPI. It does not prove the account is the expected reserve, vault, mint, oracle, market, authority, or token account. Writable status and base owner are separate facts. Token-account owner is another separate fact.
+
+In Move, a \texttt{signer} proves transaction authority for an address, but module boundaries, abilities, capabilities, and object ownership decide what that signer can actually do. In appchains, governance, module accounts, keepers, upgrade handlers, and contract admins may hold protocol-level authority without looking like ordinary user signers.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.18\textwidth}>{\RaggedRight\arraybackslash}p{0.34\textwidth}>{\RaggedRight\arraybackslash}X@{}}
+\toprule
+Model & Real authority question & False assumption \\
+\midrule
+Bitcoin & Which output condition must be satisfied to spend this outpoint? & The wallet balance owner is the protocol authority. \\
+Ethereum & Which account, call frame, signature domain, and storage context controls this effect? & \texttt{msg.sender} or transaction signer is always the economic actor. \\
+Solana & Did the program validate every supplied account's role, owner, signer and writable status, and PDA derivation? & A signer or token account is automatically the expected authority. \\
+Move and Sui & Which module, capability, object owner, or signer authorizes the operation? & Typed object access proves permission. \\
+Appchains & Which module, governance authority, contract admin, or upgrade handler can change the state? & Authority is only in user transactions. \\
+\bottomrule
+\end{tabularx}
+\caption{Security review should name the authority primitive, not collapse everything into signer language.}
+\end{table}
+
+This is the first habit to carry into Part~IV. Access-control bugs are not one bug class with one implementation shape. They are failures to enforce the authority model of the execution environment.
+
+\subsection{Asset Semantics Are Runtime-Specific}
+
+Asset language is another trap. "Token," "coin," "balance," "share," "voucher," "position," and "ownership" are not portable without interpretation.
+
+Bitcoin value lives in outputs. Ethereum native ETH balance lives on accounts, while ERC-style token balances live in contract storage. Solana token balances live in token accounts whose base account owner, token-account owner, mint, delegate, close authority, and token program identity must be separated. Move can represent valuable claims as resources or objects whose abilities restrict copying, dropping, storing, or transfer. IBC vouchers are representations whose meaning depends on transfer path and denom trace, not just display symbol.
+
+The same economic invariant can therefore require different evidence:
+
+\begin{codeblock}
+economic intent:
+    users who deposit asset A receive shares
+    total redeemable shares should not exceed assets controlled by the protocol
+
+state evidence differs:
+    UTXO: funding outputs and spend paths
+    Ethereum: token balance storage and share supply storage
+    Solana: vault token account, mint, token owner, PDA authority
+    Move: resource or object values and module-controlled mint/burn paths
+    Appchain: bank module balance, contract state, denom trace, governance risk
+\end{codeblock}
+
+The invariant translates. The proof does not.
+
+\subsection{External Control Flow Is Not One Bug Class}
+
+Security writing often treats "external call risk" as if it means "EVM reentrancy." That is too narrow. External control flow exists whenever execution crosses a boundary and later behavior depends on the result.
+
+In the EVM, \texttt{CALL}, \texttt{STATICCALL}, and \texttt{DELEGATECALL} create frames with different context and storage rules. Reentrancy is one consequence. Storage-context confusion through \texttt{DELEGATECALL} is another. Gas griefing and returndata confusion are others.
+
+In Solana, CPI passes account privileges to another program, and \texttt{invoke\_signed} can let a program sign for a PDA. The risk is not EVM-style call-stack reentrancy alone. It is privilege propagation, wrong program IDs, stale account data after CPI, and shared writable account effects.
+
+CosmWasm contracts emit messages and submessages. Reply handlers create callback-style control flow. IBC uses packets, acknowledgements, and timeouts. Move module calls and Sui shared objects create different composition surfaces again. The safe comparison is not "does this have reentrancy?" The safe comparison is "where can control leave, what authority travels with it, what state can change, what result comes back, and what happens on failure?"
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.19\textwidth}>{\RaggedRight\arraybackslash}p{0.30\textwidth}>{\RaggedRight\arraybackslash}X@{}}
+\toprule
+Boundary & What crosses & Review risk \\
+\midrule
+EVM call & Gas, calldata, value, caller context, returndata & Reentrancy, failed call handling, returndata spoofing, gas griefing, storage-context confusion under \texttt{DELEGATECALL} \\
+Solana CPI & Accounts, signer/writable privileges, PDA signer seeds & Wrong program, privilege propagation, stale data, unexpected writable state changes \\
+CosmWasm SubMsg & Message request, reply ID, success or failure result & Reply confusion, premature state update, wrong callback finalization \\
+IBC packet & Application payload, proof, sequence, timeout, acknowledgement & Denom/path confusion, timeout/refund bugs, relayer liveness dependence, app-level authorization errors \\
+Move or Sui call & Typed values, references, objects, capabilities & Over-broad capability, shared-object authorization gap, wrong transfer or ownership assumption \\
+\bottomrule
+\end{tabularx}
+\caption{External control flow should be compared by boundary semantics, not by reusing one runtime's bug label.}
+\end{table}
+
+This table is intentionally operational. In a review, it should become a trace plan.
+
+\section{Evidence and Review Method}
+
+Evidence is the correction against elegant but false analogies. A claim is only as strong as the artifact that can prove it under that execution model.
+
+\subsection{Claim-Specific Evidence}
+
+A finding without evidence is a suspicion. But evidence is model-specific. Ethereum logs do not prove the same thing as Solana inner instructions. A Bitcoin mempool observation is not settlement. An IBC packet proof does not prove that the application payload is economically safe.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}X@{}}
+\toprule
+Claim & Evidence to look for \\
+\midrule
+Bitcoin output was spendable or spent & Outpoint, locking condition, witness, sighash scope, timelock, transaction graph, confirmation and relay context. \\
+Ethereum state changed & Receipt status, trace, call frame, storage slot diff, event logs only as supporting evidence, gas and revert behavior. \\
+Solana instruction used the correct account & Resolved account list, signer and writable flags, account owner, decoded account type, PDA derivation, post-state. \\
+Move asset could not be copied or dropped & Struct abilities, defining module APIs, resource or object state, events, transaction effects. \\
+CosmWasm contract performed external work & Response messages, submessages, reply IDs, state before and after reply, events, host-chain module effects. \\
+IBC transfer represented the intended asset & Client/channel state, port/channel path, denom trace, packet commitment, acknowledgement, timeout and refund path. \\
+Appchain upgrade preserved safety & Governance proposal, upgrade height, handler, store migration, app hash continuity, post-upgrade invariant checks. \\
+\bottomrule
+\end{tabularx}
+\caption{Evidence must match the execution model and the exact security claim.}
+\end{table}
+
+The practical rule is: never cite the convenient artifact if it does not prove the claim. Logs are not state. A transaction hash is not success. A signer is not role validity. A typed object is not ownership proof. A proof of packet delivery is not proof of correct application semantics.
+
+\subsection{Evaluating an Unfamiliar Execution Model}
+
+The point of Part~III is not that this book has now covered every important execution model. It has not. New VMs, rollup environments, account-abstraction systems, parallel execution engines, object stores, appchains, and intent-based systems will keep appearing. The reader needs a way to interrogate them.
+
+Use this worksheet before importing any bug taxonomy:
+
+\begin{codeblock}
+new-runtime worksheet:
+    state shape:
+        what is the durable state unit?
+        who owns or can mutate each unit?
+
+    input format:
+        what does a transaction or message contain?
+        what accounts, objects, resources, proofs, or witnesses are supplied?
+
+    authority:
+        what counts as authorization?
+        are signatures, capabilities, roles, modules, or governance involved?
+
+    asset model:
+        where do native assets live?
+        where do user-defined assets live?
+        how are wrapped, bridged, or voucher assets represented?
+
+    control flow:
+        can execution call out, send messages, yield, callback, or continue later?
+        what authority and state cross that boundary?
+
+    failure behavior:
+        what is atomic?
+        what reverts, rolls back, times out, or persists?
+
+    resources and liveness:
+        what limits execution?
+        what can be censored, delayed, priced out, locked, or halted?
+
+    upgrades:
+        who can change code, params, modules, or state layout?
+        is there an exit window?
+
+    evidence:
+        what artifact proves the state transition and its security meaning?
+\end{codeblock}
+
+This worksheet is deliberately boring. Boring questions prevent expensive mistakes. A reviewer who answers them well can learn a new execution model without pretending it is the last one they studied.
+
+\section{Worked Example: Porting a Vault Across Models}
+
+Take one economic design: users deposit an asset, receive shares, and later redeem shares for assets. The invariant is familiar:
+
+\begin{codeblock}
+vault invariant:
+    redeemable shares must not exceed assets controlled by the vault
+    minting and burning shares must follow the exchange-rate rules
+    only authorized users or protocol paths can change positions
+\end{codeblock}
+
+Now port the vault across execution models.
+
+On Ethereum, the vault may be a contract that holds ERC-style tokens, stores total shares and user balances, and calls token contracts during deposit and withdrawal. Review focuses on token return behavior, approvals, reentrancy, share rounding, storage layout, proxy authority, event-vs-state evidence, and traces.
+
+On Solana, the vault may be a program with a vault state account, user position accounts, vault token accounts, mint accounts, PDA authorities, and Token Program CPIs. Review focuses on account substitution, signer and writable flags, token-account owner confusion, PDA seeds, CPI program IDs, post-CPI reloads, and account lifecycle.
+
+In Move, the vault may use resources, objects, capabilities, or module-controlled share values. Review focuses on abilities, who can create or destroy share values, module APIs, signer vs address, capability lifecycle, object ownership, and whether the economic invariant is preserved by all entry points.
+
+On a CosmWasm appchain, the vault may be a contract inside \texttt{x/wasm}, holding bank-module balances or IBC vouchers. Review focuses on contract admin and migration, storage versioning, submessage replies, host-chain custom messages, denom traces, governance params, appchain upgrades, and relayer liveness.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.18\textwidth}>{\RaggedRight\arraybackslash}p{0.26\textwidth}>{\RaggedRight\arraybackslash}p{0.27\textwidth}>{\RaggedRight\arraybackslash}X@{}}
+\toprule
+Model & Vault state & Authority checks & Primary failure modes \\
+\midrule
+Ethereum & Contract storage and token balances & Sender/caller, approvals, signatures, roles, proxy admin & Reentrancy, bad token semantics, storage collision, rounding, stale approvals \\
+Solana & Program-owned accounts and token accounts & Signers, writable flags, owners, PDA seeds, token authority & Account substitution, wrong mint, stale account data, CPI misuse, lifecycle bugs \\
+Move and Sui & Resources, objects, modules, capabilities & Abilities, module APIs, signer, capability, object owner & Over-broad capability, shared-object authorization, bad exchange-rate logic \\
+CosmWasm appchain & Contract storage, module balances, IBC vouchers & Sender, contract admin, module authority, governance, denom trace & Migration abuse, reply confusion, governance capture, IBC path or timeout risk \\
+\bottomrule
+\end{tabularx}
+\caption{The vault invariant translates, but state representation, authority, and failure modes change.}
+\end{table}
+
+This example is the entire lesson. "A vault" is an economic pattern, not an implementation model. The invariant can be shared. The threat model must be rebuilt.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why is "execution model" a better phrase than "VM" for comparing the systems in Part~III?
+\item Which first-principles questions can be carried across execution models?
+\item Why does the meaning of state differ between Bitcoin, Ethereum, Solana, Move, and appchains?
+\item Why is signer language insufficient for authority review?
+\item Why can the phrase "same token" be misleading across token contracts, token accounts, resources, objects, and IBC vouchers?
+\item How should external control flow be compared across EVM calls, Solana CPI, CosmWasm replies, IBC packets, and Move calls?
+\item Why must evidence be chosen according to the execution model?
+\item What are the minimum questions to ask before reviewing an unfamiliar runtime?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Take an Ethereum vulnerability report involving authorization, external calls, or accounting. Rewrite the core claim for Solana, Move, and CosmWasm. Identify what translates and what breaks.
+
+\item Compare one vault design across Ethereum, Solana, Move or Sui, and a CosmWasm appchain. Produce a table of state, authority, asset custody, external control flow, failure behavior, and evidence.
+
+\item Given a short description of an unfamiliar runtime, fill out the new-runtime worksheet from this chapter. Do not name bug classes until the worksheet is complete.
+
+\item Choose one invariant from Part~I and explain how it would be proven or falsified in three execution models from Part~III.
+\end{enumerate}

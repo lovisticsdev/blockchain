@@ -1,0 +1,384 @@
+\chapter{Keys, Signatures, and Authorization}
+
+\section{Purpose}
+
+\begin{principlebox}
+A signature proves that a signing authority approved specific bytes under a specific verification rule. Authorization is the separate decision that those bytes are allowed to cause a state transition.
+\end{principlebox}
+
+Chapter 3 treated transactions as authority-bearing inputs to a state machine. This chapter studies the mechanism most often used to carry that authority: cryptographic signatures. The security mistake is to collapse two different questions into one. The first question is cryptographic: did this signature verify for this message under this verification rule? The second question is semantic: is this signer allowed to cause this transition over this asset in this state?
+
+A valid signature can authorize the wrong action. It can be replayed in the wrong domain. It can be produced by a stolen key. It can be shown to a user as one action and interpreted by a contract as another. It can be valid after the signer has changed owners, revoked trust, or lost control of the account. It can be aggregated with other signatures while hiding which signers were actually required. None of these failures contradict the mathematics of digital signatures. They come from treating signature verification as a complete authorization model.
+
+For blockchain review, the serious question is:
+
+\begin{codeblock}
+Which authority signed which exact message,
+for which domain,
+for which action,
+against which current state,
+with which replay boundary,
+and what transition is now allowed?
+\end{codeblock}
+
+This chapter is not a full wallet-security chapter and not a cryptography textbook. It gives the reviewer enough structure to reason about keys, addresses, accounts, signature schemes, typed messages, delegated approvals, contract signatures, multisig policies, and common authorization failures. Later chapters will return to custody, wallet UX, operational controls, and formal verification. Here the goal is sharper: translate every signature into the authority it grants.
+
+\section{Keys, Addresses, Accounts, and Wallets}
+
+\subsection{Private Keys Are Authority Material}
+
+A private key is a secret value used to produce signatures. In ordinary authentication systems, a credential may identify a user to a service that can reset, revoke, or override it. In many blockchain systems, the private key is closer to portable authority. Whoever can use it can often move assets, approve spenders, vote, delegate, upgrade contracts, publish oracle reports, operate validators, sign bridge messages, or authorize withdrawals.
+
+Ethereum documentation distinguishes externally owned accounts, which are controlled by private keys, from contract accounts, which are controlled by code.\footnote{\href{https://ethereum.org/developers/docs/accounts/}{ethereum.org, ``Ethereum Accounts''}.} That distinction is Ethereum-specific in form but general in lesson: the reviewer must identify the actual verification mechanism behind an address or account. Sometimes it is one private key. Sometimes it is a script, smart account, module, validator set, threshold protocol, backend service, or governance process.
+
+The practical rule is simple: if the protocol accepts signatures from key K as authority for action A, then control of K is control of A.
+
+That statement is broader than ``control of funds.'' A low-value-looking key may control a proxy admin, a bridge validator role, a price-publisher role, a governance delegation, a session key, or a withdrawal signer. A security review that labels keys only by their storage location misses what matters. The important label is what transition the key can authorize.
+
+\subsection{Public Keys Verify; Addresses Identify}
+
+A public key is verification material. An address is usually a compact identifier derived from, associated with, or assigned to a public key, script, account, object, contract, or program. They are related, but they are not the same thing.
+
+In Ethereum externally owned accounts, an address is derived from a public key by hashing and taking the last 20 bytes.\footnote{\href{https://ethereum.org/developers/docs/accounts/}{ethereum.org, ``Ethereum Accounts''}.} In Bitcoin-style systems, addresses may encode hashes of public keys or scripts. In Solana, ordinary account addresses are public keys, while program-derived addresses do not have private keys and are controlled by program logic. Smart contract wallets may validate signatures using arbitrary code. Object-based systems may attach authority to object ownership or capabilities rather than to an address alone.
+
+The sentence ``this address signed'' is therefore sloppy. Keys sign. Accounts validate. Scripts are satisfied. Programs authorize. Contracts return signature-validity results. Addresses identify things that may be governed by any of those mechanisms.
+
+\subsection{Wallets Are Interfaces, Not Authority}
+
+A wallet is not the same thing as an account. It is software or hardware that helps create, store, derive, display, and use authority. It may generate keys, derive addresses, construct transactions, request signatures, decode messages, switch chains, simulate effects, communicate with a hardware signer, or present dApp permissions.
+
+This distinction matters because a correct key can be used through a dishonest or confused interface. A wallet can ask a user to sign a harmless-looking message that a contract interprets as a permit. A hardware device can protect the private key while showing only a hash. A frontend can display a token symbol supplied by a malicious token contract. A simulation can omit a later effect. A mathematically valid signature can still be a user-side security failure if the signer was induced to approve a different authority than they believed.
+
+Seed phrases and HD wallets make this more serious. BIP-39 defines mnemonic phrases as a way to encode entropy and derive a seed.\footnote{\href{https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki}{BIP-39, ``Mnemonic code for generating deterministic keys''}.} BIP-32 defines hierarchical deterministic wallets that derive trees of keys from a seed, including extended private and public keys.\footnote{\href{https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki}{BIP-32, ``Hierarchical Deterministic Wallets''}.} For this chapter, the key lesson is not wallet operations. It is authority scope: a seed may control many accounts across chains, address types, and derivation paths. An exposed extended public key can also reveal address structure and future receiving addresses, even when it cannot spend by itself.
+
+The review question is not ``where is the wallet?'' It is which root, key, account, script, contract, or policy can authorize the transition.
+
+\section{Signature Verification Is Not Authorization}
+
+\subsection{The Minimal Signature Model}
+
+NIST FIPS 186-5 describes digital signatures as mechanisms for detecting unauthorized modification of data and authenticating the signatory.\footnote{\href{https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.186-5.pdf}{NIST FIPS 186-5, ``Digital Signature Standard''}.} At the level needed for security review, a signature system has three operations:
+
+\begin{codeblock}
+keygen() -> private_key, public_key
+sign(private_key, message) -> signature
+verify(public_key, message, signature) -> true or false
+\end{codeblock}
+
+That model proves a narrow fact. If verification succeeds, the verifier has evidence that the signing authority approved the message under the chosen signature scheme and verification rule. The verifier has not learned that the signer understood the message, that the target contract is honest, that the action is safe, that the message belongs to this chain, that the signature is fresh, or that the signer is the correct authority for the state being changed.
+
+Authorization adds policy.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=9mm and 8mm,
+  compact node/.style={security node, text width=27mm, minimum height=8mm}
+]
+\node[compact node] (payload) {Signed payload};
+\node[compact node, right=of payload] (parse) {Canonical parse};
+\node[compact node, right=of parse] (verify) {Signature verifies};
+\node[compact node, below=of verify] (policy) {Authorization policy};
+\node[compact node, left=of policy] (consume) {Replay guard consumed};
+\node[compact node, left=of consume] (transition) {State transition allowed};
+
+\draw[security arrow] (payload) -- (parse);
+\draw[security arrow] (parse) -- (verify);
+\draw[security arrow] (verify) -- (policy);
+\draw[security arrow] (policy) -- (consume);
+\draw[security arrow] (consume) -- (transition);
+\end{tikzpicture}
+\caption{Signature verification is one step inside authorization, not the whole decision.}
+\end{figure}
+
+\subsection{Complete Authorization Checks}
+
+A signature-gated transition should bind and check the facts that make the authorization safe. The exact fields differ by system, but the structure is stable.
+
+\begin{codeblock}
+authorize(action, signature):
+    signer = recover_or_validate(action.message, signature)
+    require(signer is allowed for action.type)
+    require(action.domain == expected_domain)
+    require(action.verifier == this_verifier)
+    require(action.nonce is unused)
+    require(action.deadline has not expired)
+    require(action.parameters match the requested transition)
+    require(current_state still satisfies signed assumptions)
+    mark action.nonce or action.id as consumed
+    apply transition
+\end{codeblock}
+
+The order is not just programming style. Replay guards must be consumed according to the execution semantics of the system. State assumptions must be checked at submission time, not merely at signing time. The verifier must identify the correct signer, not just any signer. The domain must identify the chain, contract, program, module, version, or source/destination context where the signature is valid.
+
+The smallest useful sentence for a reviewed signature is:
+
+\begin{codeblock}
+This signature allows [verifier] to cause [transition]
+over [asset/state] for [signer] in [domain],
+until [expiry], if [replay and state checks] pass.
+\end{codeblock}
+
+If that sentence cannot be filled in, the authorization model is incomplete.
+
+\section{Signed Payload Anatomy and Domain Separation}
+
+\subsection{Transaction Signing and Message Signing}
+
+A transaction signature usually authorizes a chain-level transaction envelope. For an Ethereum transaction, that envelope includes fields such as nonce, recipient, value, calldata, gas parameters, and chain-specific replay protection. EIP-155 binds Ethereum transaction signing to a chain ID to reduce cross-chain replay.\footnote{\href{https://eips.ethereum.org/EIPS/eip-155}{EIP-155, ``Simple Replay Attack Protection''}.}
+
+Message signing is broader and often riskier. A user may sign a login challenge, permit, order, intent, bridge withdrawal, session-key grant, governance delegation, marketplace listing, or smart-account operation. The message becomes authority only because some verifier later treats it as authority. That verifier may be a contract, backend, bridge committee, orderbook, account-abstraction entry point, or off-chain service.
+
+The raw message \texttt{Withdraw 100} is not enough. It does not say which chain, protocol, verifier, token, account, recipient, nonce, deadline, version, or state assumption applies. The signature may be valid while the authorization is dangerously underspecified.
+
+\subsection{Typed Data Helps, But Does Not Finish the Job}
+
+EIP-191 introduced Ethereum signed-data framing to keep signed data distinct from ordinary transactions.\footnote{\href{https://eips.ethereum.org/EIPS/eip-191}{EIP-191, ``Signed Data Standard''}.} EIP-712 added typed structured data hashing and signing, including a domain separator and structured message hash.\footnote{\href{https://eips.ethereum.org/EIPS/eip-712}{EIP-712, ``Typed structured data hashing and signing''}.} These standards improve inspectability and domain separation. They do not by themselves create replay protection, enforce deadlines, prove user comprehension, or guarantee that a verifier interprets the fields safely.
+
+A reviewer should inspect the signed payload as an authorization object:
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}X>{\RaggedRight\arraybackslash}p{0.28\textwidth}@{}}
+\toprule
+Field & What it should bind & Common failure \\
+\midrule
+Domain & Protocol name, version, chain, rollup, appchain, source, or destination & Signature replays in another context \\
+Verifier & Contract, program, module, smart account, or backend verifier & Honest signature accepted by wrong verifier \\
+Action type & Permit, order, withdrawal, vote, upgrade, session grant, or bridge message & One signature interpreted as another action \\
+Signer and subject & Account granting authority and account or asset affected & Valid signer is not the correct authority \\
+Parameters & Asset, amount, recipient, route, proposal, or order terms & User approves broader action than intended \\
+Replay guard & Nonce, sequence, nullifier, order ID, fill accounting, or consumed message ID & Signature reused after first acceptance \\
+Time and state & Deadline, valid-after, expected price, owner version, or configuration hash & Stale signature accepted after assumptions change \\
+\bottomrule
+\end{tabularx}
+\caption{Signed payload review asks whether the message binds enough facts to authorize only the intended transition.}
+\end{table}
+
+Domain separation is not decorative metadata. It is a safety boundary. A signature over the same semantic action may need different domains for mainnet and testnet, source and destination chains, protocol versions, account modules, bridge lanes, governance instances, and contract upgrades. If the verifier cannot say exactly where a signature is valid, the attacker may get to choose.
+
+\section{Signature Schemes and Review Assumptions}
+
+The signature algorithm matters, but it is only one row in the security model. Reviewers rarely need to rederive elliptic-curve cryptography. They do need to recognize the assumptions that make an integration safe.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.16\textwidth}>{\RaggedRight\arraybackslash}p{0.28\textwidth}X@{}}
+\toprule
+Scheme & Common blockchain use & Review focus \\
+\midrule
+ECDSA & Bitcoin and Ethereum-style account signatures & Nonce generation, low-s rules, recovery checks, message hash, signer comparison \\
+EdDSA & Ed25519-based ecosystems and application signatures & Variant, prehash mode, canonical encoding, public-key validation, domain use \\
+BLS & Validator attestations and aggregated committee signatures & Explicit signer set, proof of possession, subgroup checks, domain, duplicate keys \\
+Schnorr & Bitcoin Taproot and threshold-friendly protocols & Tagged hashing, nonce commitment, participant binding, abort and liveness behavior \\
+\bottomrule
+\end{tabularx}
+\caption{Different signature schemes fail in different integration layers.}
+\end{table}
+
+ECDSA is widely used in Bitcoin and Ethereum. Its most famous implementation hazard is nonce failure: if the per-signature secret nonce is reused or biased enough, private keys can be recovered. ECDSA also has malleability concerns. Ethereum's EIP-2 made high-s transaction signatures invalid while retaining compatibility behavior in the \texttt{ecrecover} precompile.\footnote{\href{https://eips.ethereum.org/EIPS/eip-2}{EIP-2, ``Homestead Hard-fork Changes''}.} Protocols should not track used authorizations by raw signature bytes when a canonical message hash, nonce, or authorization ID is the real object being consumed.
+
+EdDSA, specified for Ed25519 and Ed448 in RFC 8032,\footnote{\href{https://datatracker.ietf.org/doc/html/rfc8032}{RFC 8032, ``Edwards-Curve Digital Signature Algorithm''}.} is often described as deterministic and easier to use than ECDSA. That does not remove integration risk. Reviewers still need to know which variant is used, whether messages are prehashed, whether encodings are canonical, whether public keys are validated according to ecosystem rules, and whether the same key is reused across protocols with different domains.
+
+BLS signatures are valuable because signatures can be aggregated. Ethereum proof of stake uses BLS signatures for validator duties, and the consensus specifications define domain-separated signing roots for those duties.\footnote{\href{https://ethereum.github.io/consensus-specs/specs/phase0/beacon-chain/\#bls-signatures}{Ethereum Consensus Specs, ``Beacon Chain: BLS Signatures''}.} Aggregation is also the source of review risk. A successful aggregate verification does not automatically prove that the intended signer set signed the intended message. The verifier must know which public keys are included, reject invalid keys, handle duplicate keys, use the correct domain, and defend against rogue-key attacks with an appropriate scheme such as proof of possession.\footnote{\href{https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature}{CFRG BLS signature specification}.}
+
+Schnorr signatures, specified for Bitcoin Taproot in BIP-340,\footnote{\href{https://github.com/bitcoin/bips/blob/master/bip-0340.mediawiki}{BIP-340, ``Schnorr Signatures for secp256k1''}.} are attractive because of their simplicity and linearity. That linearity enables multisignature and threshold protocols, but those protocols have their own assumptions. FROST, standardized in RFC 9591, is a two-round Schnorr threshold protocol.\footnote{\href{https://www.rfc-editor.org/rfc/rfc9591.html}{RFC 9591, ``The Flexible Round-Optimized Schnorr Threshold Protocol''}.} In threshold settings, reviewers must ask how keys were generated, how nonces are committed, whether participants are bound to the group public key, whether a coordinator can equivocate, and whether aborting signers can block liveness.
+
+The unifying review habit is to keep going after the scheme name. Ask what the integration assumes about keys, nonces, encodings, domains, signer sets, libraries, and state.
+
+\section{Delegated and Contract-Interpreted Authority}
+
+\subsection{Permits and Signed Approvals}
+
+ERC-2612 permits let ERC-20 approvals be created by signature instead of by a separate on-chain approval transaction.\footnote{\href{https://eips.ethereum.org/EIPS/eip-2612}{ERC-2612, ``Permit Extension for EIP-20 Signed Approvals''}.} This is useful because a signer can grant allowance without first holding the native asset for gas. It is dangerous because the signature grants spending authority.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=10mm and 9mm,
+  compact node/.style={security node, text width=28mm, minimum height=8mm}
+]
+\node[compact node] (alice) {Owner signs permit};
+\node[compact node, right=of alice] (relayer) {Anyone submits permit};
+\node[compact node, right=of relayer] (token) {Token verifies signature};
+\node[compact node, below=of token] (allowance) {Allowance updated};
+\node[compact node, left=of allowance] (spender) {Spender calls transferFrom};
+
+\draw[security arrow] (alice) -- (relayer);
+\draw[security arrow] (relayer) -- (token);
+\draw[security arrow] (token) -- (allowance);
+\draw[security arrow] (allowance) -- (spender);
+\end{tikzpicture}
+\caption{A permit signature does not move tokens immediately; it grants later spending authority.}
+\end{figure}
+
+That distinction is where many users and reviewers get misled. A user may think they signed a swap, login, or harmless approval prompt. The state transition caused by permit submission is not a token transfer. It is an allowance update. The later transfer may happen through a router, malicious spender, compromised integration, or unexpected code path.
+
+A permit review should name the owner, spender, token contract, chain ID, amount, nonce, deadline, verifying contract, and user-facing meaning. It should also ask whether the spender can immediately drain the full allowance, whether the approval is unlimited, whether the UI clearly displays approval authority, and whether later transfer logic is constrained by the action the user believed they were approving.
+
+\subsection{Contract Signatures and Smart Accounts}
+
+Externally owned accounts verify signatures with public-key cryptography. Contract accounts can define their own validation logic. ERC-1271 standardizes a method for contracts to say whether a signature is valid for given data.\footnote{\href{https://eips.ethereum.org/EIPS/eip-1271}{ERC-1271, ``Standard Signature Validation Method for Contracts''}.}
+
+This changes the meaning of signature verification. For a contract account, validity can depend on current owners, modules, guards, thresholds, session keys, recovery state, upgrade history, or arbitrary code. A signature that was valid yesterday may be invalid today after owner rotation. A malicious contract may claim validity for messages no ordinary key signed. A verifier that assumes every account is an ECDSA key may reject legitimate smart accounts or accept the wrong authority.
+
+The rule is that EOA signature validity is mostly cryptographic, while contract-account signature validity is code plus state.
+
+Reviewers must therefore identify the verifier. Is it checking an ECDSA recovered signer, calling contract validation, verifying a multisig threshold, reading a module policy, or trusting a backend assertion? The signature's meaning comes from that verifier.
+
+\section{Distributed Signing Policies}
+
+Single-key control is simple and fragile. Key theft means compromise. Key loss means loss of authority. Coercion, malware, or one mistaken approval may be enough. High-value systems therefore distribute signing authority through on-chain multisigs, script policies, threshold signatures, MPC systems, hardware signing, smart accounts, or hybrids.
+
+The point of this chapter is not to teach custody operations in full. It is to prevent a common category error: treating distributed signing as if it automatically makes authorization safe. Distribution changes the failure model. It does not eliminate one.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.19\textwidth}>{\RaggedRight\arraybackslash}p{0.30\textwidth}X@{}}
+\toprule
+Architecture & What improves & What remains risky \\
+\midrule
+On-chain multisig & Visible threshold policy, owner rotation, modules, timelocks & Contract bugs, bad modules, blind approvals, signer collusion \\
+Script multisig & Native spend conditions, no general contract dependency & Recovery difficulty, fee/size limits, policy inflexibility \\
+Threshold signature & No one participant holds the full key, one on-chain signature & Distributed key generation, nonce misuse, hidden policy, aborts \\
+MPC custody & Institutional workflows, share distribution, policy engines & Vendor risk, opaque failures, compromised coordinator or process \\
+Hardware or HSM & Raw key extraction is harder & Blind signing, supply-chain risk, bad prompts, backup failure \\
+Smart account & Rich validation, recovery, session keys, spending limits & Contract bugs, upgrade risk, module abuse, state-dependent validity \\
+\bottomrule
+\end{tabularx}
+\caption{Signing architecture must be evaluated by authority, compromise, and liveness, not by label.}
+\end{table}
+
+Safe describes smart accounts that can use owner and threshold policies for asset management.\footnote{\href{https://docs.safe.global/home/what-is-safe}{Safe documentation, ``What is Safe?''}.} The same warning applies to Safe, native multisig, MPC, and threshold signatures: the threshold is only meaningful if the holders, devices, recovery process, modules, and approval workflow are independent enough for the threat model. A 3-of-5 multisig where three keys sit on the same laptop is not materially a 3-of-5 human security policy. A threshold key whose coordinator can trick signers into approving different payloads has a protocol problem, not a branding problem.
+
+The useful signing-policy question is which parties, devices, contracts, modules, or shares must cooperate to authorize the transition, and which failures still allow theft, censorship, or permanent loss.
+
+\section{Authorization Failure Modes}
+
+\subsection{Replay}
+
+Replay occurs when a valid authorization is accepted more than once or accepted outside its intended domain. It can happen because a message lacks a nonce, because the verifier does not consume the nonce, because the chain or contract is not bound, because the same bridge message is valid on multiple destinations, because a partial-fill order does not track remaining fill, or because an upgrade changes the verifier while old signatures remain valid.
+
+Replay defense has two parts. The signature must be scoped to the intended domain, and successful use must be consumed or bounded.
+
+\begin{codeblock}
+scope:
+    this chain, verifier, version, action, asset, and destination
+
+consumption:
+    nonce, sequence, order fill, nullifier, or message id is updated
+\end{codeblock}
+
+A nonce without domain is incomplete. A domain without consumption can still replay.
+
+\subsection{Malleability and Ambiguous Identity}
+
+Signature malleability matters when a protocol treats the signature bytes as the identity of an authorization. If another valid encoding exists for the same message, then this pattern is unsafe:
+
+\begin{codeblock}
+used[signature_bytes] = true
+\end{codeblock}
+
+The safer object to consume is the intended authorization:
+
+\begin{codeblock}
+used[signer][nonce] = true
+
+or
+
+used[hash(canonical_authorization)] = true
+\end{codeblock}
+
+The same idea applies beyond ECDSA. If different encodings, message formats, signer-set orderings, or aggregate representations can describe the same semantic authorization, the replay guard should track the canonical authorization, not an incidental byte string.
+
+\subsection{Confused Signing}
+
+Confused signing occurs when a signer approves one thing while believing they are approving another. Stronger cryptography does not solve it. Typed data helps only when the fields are complete and honestly displayed.
+
+The dangerous pattern is familiar: a user signs a permit while believing they are logging in; a multisig signer approves a batch without decoding every call; a hardware wallet shows only a hash; a wallet displays a token symbol from untrusted contract metadata; a governance delegate votes for a proposal without inspecting executable calldata. In each case, the signature can be valid and the authorization can still be socially or operationally compromised.
+
+The review question is whether a reasonable signer could believe the signature is harmless while it grants valuable authority.
+
+\subsection{Wrong Signer, Stale Authority, and Key Compromise}
+
+Many bugs recover a valid signer and then check the wrong relationship. A relayer signature is not user consent. A guardian signature is not owner authority. One multisig owner is not the multisig threshold. A backend approval is not a user's signature. A token owner is not necessarily an approved operator. For smart accounts, ECDSA recovery may not represent the account's current validation policy at all.
+
+Authority can also become stale. A permit may be submitted after trust is revoked. A limit order may be executed after market conditions change. A delegation may outlive a governance version. A contract-wallet signature may remain accepted after owner rotation unless validation state prevents it. Deadlines, cancel functions, versioned domains, revocation registries, fill accounting, and expected-state checks are tools for limiting stale authority.
+
+Key compromise is the final reminder that signature validity is not moral evidence. Once an attacker can sign, the chain usually cannot distinguish attacker signatures from legitimate signatures. The right response depends on what the key controls: funds may need sweeping, approvals revoked, owners rotated, roles removed, oracle publishers disabled, validator duties stopped, bridge committees paused, or deployments inspected. This belongs mostly to operational chapters, but the authorization lesson is immediate: every key should be reviewed according to the blast radius of valid signatures it can produce.
+
+\section{Worked Example: Permit as Delegated Authority}
+
+Consider an ERC-20 token implementing permit:
+
+\begin{codeblock}
+permit(owner, spender, value, deadline, v, r, s)
+\end{codeblock}
+
+Alice signs typed data authorizing a router to spend tokens:
+
+\begin{codeblock}
+domain:
+    name = USDC
+    version = 2
+    chainId = 1
+    verifyingContract = USDC token
+
+message:
+    owner = Alice
+    spender = Router
+    value = 10,000 USDC
+    nonce = 42
+    deadline = Friday 17:00 UTC
+\end{codeblock}
+
+If the token accepts the permit, the immediate state transition is:
+
+\begin{codeblock}
+allowance[Alice][Router] = 10,000 USDC
+nonces[Alice] = 43
+\end{codeblock}
+
+No tokens moved yet. The authority changed. The router can now call \texttt{transferFrom} within the allowance. That may be exactly what Alice intended if the router is the intended contract, the amount is bounded, the deadline is short, the nonce is consumed, and the UI clearly showed an approval. It may be unsafe if the spender is malicious, the value is unlimited, the deadline is far away, the domain is misleading, the UI described the signature as a swap rather than an approval, or the router can spend outside the intended execution path.
+
+The authorization sentence is:
+
+\begin{codeblock}
+This signature allows the USDC contract on Ethereum mainnet
+to set Router's allowance over Alice's USDC to 10,000,
+until the deadline,
+if Alice's permit nonce is still 42.
+\end{codeblock}
+
+That sentence exposes the security model better than saying ``Alice signed.'' It identifies the verifier, asset, transition, domain, expiry, and replay condition. It also shows what the signature does not prove: that Router is safe, that Alice understood the prompt, that the later swap will be fair, or that the spender cannot abuse the allowance before the intended transaction.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why is a private key better understood as authority material than as identity?
+\item What is the difference between a public key, an address, an account, and a wallet?
+\item What does signature verification prove, and what does it fail to prove?
+\item Why does EIP-712 improve signing safety without providing replay protection by itself?
+\item Why is a permit signature more dangerous than it may appear to a user?
+\item How does ERC-1271 change the meaning of signature validity?
+\item What review assumptions differ between ECDSA, EdDSA, BLS, and Schnorr integrations?
+\item Why should replay protection usually consume a nonce, sequence, fill amount, nullifier, or authorization hash rather than raw signature bytes?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item A protocol asks users to sign the message \texttt{Withdraw 100}. Rewrite it as a structured authorization. Include domain, verifier, signer, asset, recipient, amount, nonce, deadline, action type, and any state assumptions that should be bound.
+
+\item Review an ERC-2612 permit request. Identify the immediate state transition, the later authority granted to the spender, the replay guard, the domain separator, the fields the wallet must display, and the worst outcome if the spender is malicious.
+
+\item A protocol's upgrade admin is a 3-of-5 multisig. Map the signers, threshold, owner-rotation authority, modules or guards, timelock, transactions the multisig can execute, and the outcomes of one signer compromise, three-signer collusion, and three-signer unavailability.
+
+\item A validator protocol accepts aggregate BLS signatures from a committee. Explain how the verifier knows which public keys are included, whether proof of possession is required, how duplicate keys are handled, what domain is signed, and what aggregate verification does not prove.
+\end{enumerate}

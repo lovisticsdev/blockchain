@@ -1,0 +1,383 @@
+\chapter{Ethereum's Account Model}
+
+\section{Purpose}
+
+\begin{principlebox}
+Ethereum is a shared account-state machine. A transaction is an ordered attempt to transform account state, not merely a payment, a message, or a function call.
+\end{principlebox}
+
+Chapter~13 used Bitcoin to force a clean break from balance-table thinking. Bitcoin's base state is a set of unspent outputs. Ethereum makes a different choice. Its base execution model is account-oriented: addresses name accounts, accounts hold native balances and execution metadata, contract accounts commit to storage and code, and transactions are processed in a total order against the current world state.
+
+That sounds friendlier to ordinary application developers. It is also where many review mistakes begin. A reviewer sees an address and assumes it is a user. A wallet shows an ETH balance and the reviewer forgets that token balances live in contract storage. A receipt contains an event log and the reviewer treats the log as state. A transaction is included in a block and the reviewer calls it successful even though the application call reverted. A signer is an EOA today and the reviewer writes authorization logic that will age badly as account behavior becomes more programmable.
+
+This chapter teaches Ethereum's account model at the level required for security review. It is not an opcode chapter, not a Solidity storage-layout chapter, and not a complete tracing manual. Those belong in Chapter~15. The goal here is to teach the state and evidence model: what accounts are, what transactions try to change, what receipts prove, what logs do not prove, how calldata is interpreted, how gas affects execution, and which failure modes come specifically from account-based execution.
+
+\section{World State and Account Identity}
+
+\subsection{World State as an Account Map}
+
+Ethereum's formal specification describes the system as a transaction-based state machine, and the world state as a mapping from addresses to account state.\footnote{Gavin Wood, \href{https://ethereum.github.io/yellowpaper/paper.pdf}{``Ethereum: A Secure Decentralised Generalised Transaction Ledger''}.} Ethereum's developer documentation gives the operational version: an account has an address and can hold ETH; accounts are either externally owned accounts or contract accounts.\footnote{\href{https://ethereum.org/developers/docs/accounts/}{ethereum.org, ``Ethereum accounts''}.}
+
+For review purposes, start with this simplified account-state shape:
+
+\begin{codeblock}
+world_state:
+    address -> account
+
+account:
+    nonce
+    balance
+    storage_root
+    code_hash
+\end{codeblock}
+
+The four fields matter because they answer different security questions.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.32\textwidth}X@{}}
+\toprule
+Field & Meaning & Review question \\
+\midrule
+\texttt{nonce} & Number used to order transactions from an account and prevent replay under that account & Has this account already consumed the authorization sequence the protocol relies on? \\
+\texttt{balance} & Native ETH balance, denominated in wei & Can the account pay value or gas, and can native ETH movement affect the protocol? \\
+\texttt{storageRoot} & Commitment to the contract account's persistent storage & Which contract variables, mappings, roles, balances, and flags are part of future behavior? \\
+\texttt{codeHash} & Commitment to executable code associated with the account & What logic controls calls to this account, and has that logic changed through deployment, upgrade, or delegation? \\
+\bottomrule
+\end{tabularx}
+\caption{An Ethereum account is not only an address. Its nonce, ETH balance, storage commitment, and code commitment all affect security review.}
+\end{table}
+
+The world state is not stored as one flat SQL table that reviewers can casually inspect. It is committed through tries and exposed through clients, RPC methods, traces, proofs, archive nodes, indexers, and block explorers. That distinction belongs to Chapters~5, 9, and 12, but the review habit begins here: every claim about an Ethereum account should say which state field, storage slot, receipt, trace, proof, or derived index supports the claim.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=11mm and 16mm]
+\node[security node, text width=31mm] (state) {World state\\address map};
+\node[security node, right=of state, yshift=16mm, text width=35mm] (eoa) {EOA\\nonce\\balance};
+\node[security node, right=of state, yshift=-16mm, text width=35mm] (contract) {Contract account\\nonce\\balance\\storage root\\code hash};
+\node[security node, right=of contract, text width=35mm] (storage) {Persistent\\contract storage};
+\node[security node, below=of storage, text width=35mm] (code) {Executable\\code};
+
+\draw[security arrow] (state) -- (eoa);
+\draw[security arrow] (state) -- (contract);
+\draw[security arrow] (contract) -- (storage);
+\draw[security arrow] (contract) -- (code);
+\end{tikzpicture}
+\caption{Ethereum world state maps addresses to account state. Contract accounts also commit to storage and code.}
+\end{figure}
+
+\subsection{EOAs, Contract Accounts, and Delegated Code}
+
+The traditional Ethereum distinction is simple. An externally owned account is controlled by a private key. A contract account is controlled by code deployed at its address. That distinction remains useful, but it is no longer enough as a security boundary.
+
+An EOA can initiate transactions. A contract account executes code when called and cannot initiate an ordinary transaction by itself. A contract account can still move ETH, call other contracts, emit logs, create contracts, and modify its own storage when execution reaches it through a transaction or another call. That means ``who sent the transaction?'' and ``which code decided the effect?'' are different questions.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.27\textwidth}X@{}}
+\toprule
+Account form & Authority model & Security risk \\
+\midrule
+Ordinary EOA & Private key signs transactions for the account nonce & Key theft, phishing, blind signing, nonce races, weak gas policy \\
+Contract account & Code and storage decide behavior when called & Bugs, upgrade authority, storage corruption, bad external-call assumptions \\
+Contract wallet & Contract code validates owners, modules, thresholds, sessions, or recovery rules & Stale signer assumptions, module abuse, replay across changing validation state \\
+EIP-7702 delegated EOA & EOA can set persistent delegated code behavior under set-code transaction rules until a later authorization clears or replaces it & ``EOA-only'' checks, no-code assumptions, wallet simulation gaps, delegated authority confusion \\
+\bottomrule
+\end{tabularx}
+\caption{Ethereum account review must ask how an address behaves, not only whether it looks like a user address.}
+\end{table}
+
+EIP-7702 is the reason this chapter cannot teach the old simplification as a rule. It defines a set-code transaction type that lets an EOA set a delegation indicator pointing to executable code while preserving the EOA's address and nonce model.\footnote{Vitalik Buterin et al., \href{https://eips.ethereum.org/EIPS/eip-7702}{EIP-7702, ``Set Code for EOAs''}.} The delegation is persistent until another valid authorization clears or replaces it, and processed delegation indicators are not rolled back merely because the transaction's later execution reverts. A reviewer should still understand the EOA/contract distinction, but any security rule that says ``reject contracts by checking code size'' or ``only EOAs can call this function'' should now be treated as fragile design unless the protocol can justify the exact threat model and activation assumptions.
+
+This does not mean every EOA has arbitrary code at all times. It means the account model is moving toward programmable account behavior. Smart-account standards, contract wallets, signature validation through ERC-1271, account-abstraction systems, and EIP-7702-style delegation all push in the same direction: address type is not a complete authority model. Authorization review must identify the verifier, the code path being executed, the delegation state if any, and the storage or account state that path reads.
+
+\section{Transactions, Execution, and Receipts}
+
+\subsection{Transactions as Ordered Account Inputs}
+
+An Ethereum transaction is a signed input to the state machine. It names an account sequence, pays for execution, and either transfers value, creates a contract, calls an account, or uses a newer typed transaction form with additional fields. Ethereum documentation describes transactions as cryptographically signed instructions from accounts.\footnote{\href{https://ethereum.org/developers/docs/transactions/}{ethereum.org, ``Transactions''}.}
+
+At review level, the transaction object answers:
+
+\begin{codeblock}
+transaction:
+    type
+    chain_id
+    nonce
+    signer / sender
+    to
+    value
+    calldata
+    gas_limit
+    fee fields
+    optional access list, blob fields, or delegation fields
+\end{codeblock}
+
+The nonce is account-local. If Alice sends two transactions with nonce~41, at most one can be accepted in a single canonical account history. If Alice sends nonce~42 before nonce~41 lands, transaction~42 cannot execute until the account sequence reaches it. This is why wallets can cancel or replace pending transactions by submitting a different transaction with the same nonce and a higher acceptable fee, but replacement is a policy and propagation question as much as a protocol question. Chapter~10 handled the ordering and mempool side; here the account-model lesson is that nonce sequencing is part of authorization consumption.
+
+Ethereum now uses typed transaction envelopes. EIP-2718 defines the typed transaction envelope pattern.\footnote{Micah Zoltu, \href{https://eips.ethereum.org/EIPS/eip-2718}{EIP-2718, ``Typed Transaction Envelope''}.} Later EIPs define specific transaction types, including access-list transactions, EIP-1559 dynamic-fee transactions, blob transactions, and set-code transactions.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.28\textwidth}X@{}}
+\toprule
+Transaction family & Added review surface & Common mistake \\
+\midrule
+Legacy and replay-protected legacy & Gas price, nonce, value, calldata, chain ID for replay protection & Treating chain ID as optional domain context \\
+Access-list transaction & Declared accounts and storage keys for access-cost accounting & Assuming an access list grants authority rather than affects gas cost \\
+Dynamic-fee transaction & Max fee and priority fee under EIP-1559 & Treating high fee caps as an inclusion guarantee \\
+Blob transaction & Blob fee fields and data-availability payload commitment & Assuming blob data is ordinary contract calldata readable by the EVM \\
+Set-code transaction & Delegation behavior for EOAs under EIP-7702 & Assuming an EOA address cannot execute delegated logic \\
+\bottomrule
+\end{tabularx}
+\caption{Typed transactions change the transaction envelope and evidence surface. They do not remove the need to inspect nonce, sender, target, calldata, value, and fee assumptions.}
+\end{table}
+
+EIP-1559 changed Ethereum fee mechanics by introducing a protocol base fee and user-controlled priority fee.\footnote{Vitalik Buterin et al., \href{https://eips.ethereum.org/EIPS/eip-1559}{EIP-1559, ``Fee market change for ETH 1.0 chain''}.} EIP-2930 introduced optional access lists.\footnote{Vitalik Buterin and Martin Swende, \href{https://eips.ethereum.org/EIPS/eip-2930}{EIP-2930, ``Optional access lists''}.} EIP-4844 introduced blob transactions for rollup data availability.\footnote{Vitalik Buterin et al., \href{https://eips.ethereum.org/EIPS/eip-4844}{EIP-4844, ``Shard Blob Transactions''}.} Those details should not be flattened into ``Ethereum transaction.'' The envelope type tells the reviewer which fields exist and which assumptions the sender made.
+
+\subsection{Validity, Execution, and Receipts}
+
+Inclusion is not success. A transaction can be syntactically valid, have a valid signature, pay gas, appear in a canonical block, consume the account nonce, and still fail at the application level.
+
+A review should separate three layers:
+
+\begin{codeblock}
+transaction included:
+    the chain accepted the transaction object into a block
+
+top-level execution succeeded:
+    receipt status indicates success
+
+intended application effect happened:
+    the expected state change actually occurred
+\end{codeblock}
+
+Since Byzantium, Ethereum receipts include a status code indicating top-level success or failure.\footnote{Nick Johnson, \href{https://eips.ethereum.org/EIPS/eip-658}{EIP-658, ``Embedding transaction status code in receipts''}.} A status of success does not prove the user got the intended economic result. It proves the top-level execution did not revert. The contract may have executed a worse-than-expected swap within the user's slippage limit. It may have transferred an approval rather than an asset. It may have caught a failed subcall and continued. It may have emitted logs that look benign while state moved elsewhere.
+
+A status of failure also needs careful interpretation. A reverted transaction usually consumes nonce and gas, but it rolls back the state changes and logs from the reverted execution. The user may lose fees while the application state remains unchanged. That difference matters during liquidations, auctions, governance execution, emergency pauses, keeper operations, and any workflow that assumes ``I submitted the transaction'' is the same as ``the state changed.''
+
+\begin{codeblock}
+apply_ethereum_transaction(state, tx):
+    verify transaction envelope and signature
+    verify chain_id and account nonce
+    reserve gas and fee payment
+    increment sender nonce
+
+    result = execute message call or contract creation
+
+    if result reverts:
+        roll back execution state changes and logs
+        keep consumed nonce and charged gas
+        write receipt with failure status
+    else:
+        commit execution state changes and logs
+        keep consumed nonce and charged gas
+        write receipt with success status
+
+    pay fees according to protocol rules
+    return next state and receipt
+\end{codeblock}
+
+This pseudocode is deliberately high-level. Chapter~15 will refine the details of call frames, substate, gas accounting, memory, storage, opcodes, and traces. The Chapter~14 lesson is that state effects, receipt evidence, nonce consumption, and fee payment are not the same artifact.
+
+\section{Account Authority, Storage, and Evidence}
+
+\subsection{Calls, Senders, and Account Authority}
+
+Ethereum applications often fail because developers and reviewers collapse several identities into one word: sender.
+
+The transaction has a sender recovered from the signature or account authorization path. A contract call has a direct caller. Solidity exposes the direct caller as \texttt{msg.sender}. It also exposes \texttt{tx.origin}, the original transaction origin, but Solidity's own security guidance warns against using \texttt{tx.origin} for authorization.\footnote{\href{https://docs.soliditylang.org/en/latest/security-considerations.html\#tx-origin}{Solidity documentation, ``Security Considerations: tx.origin''}.}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=12mm and 16mm]
+\node[security node, text width=30mm] (alice) {Alice EOA\\transaction origin};
+\node[security node, right=of alice, text width=32mm] (wallet) {Wallet or router\\direct callee};
+\node[security node, right=of wallet, text width=32mm] (vault) {Vault\\called contract};
+\node[security node, below=of wallet, text width=32mm] (token) {Token\\called by vault};
+
+\draw[security arrow] (alice) -- node[above]{tx} (wallet);
+\draw[security arrow] (wallet) -- node[above]{call} (vault);
+\draw[security arrow] (vault) -- node[right]{call} (token);
+\end{tikzpicture}
+\caption{The transaction origin, direct caller, and account whose assets move may be different parties.}
+\end{figure}
+
+Suppose Alice submits a transaction to a router, the router calls a vault, and the vault calls a token. Inside the vault, \texttt{msg.sender} is the router, not Alice. Inside the token, \texttt{msg.sender} is the vault. The token may move Alice's tokens only if the token's own state says the caller has allowance or the call is otherwise authorized. Alice's transaction signature does not automatically authorize every downstream contract to move every asset she owns.
+
+This is why account-model review must trace authority through state, not through narrative. A user may be the origin. A router may be the caller. A vault may be the spender. A token contract may be the ledger. A permit signature may have changed allowance before the transaction. A contract wallet may validate the signature using current owner state. An EIP-7702 delegated account may make an EOA behave through code for the relevant execution path.
+
+\subsection{Storage, Native Balances, and Token Balances}
+
+ETH balance is an account field. ERC-20 balances are not. They are entries in a token contract's storage, modified by that token contract's rules. The ERC-20 standard defines the ordinary interface for balances, transfers, approvals, allowances, and delegated transfers.\footnote{Fabian Vogelsteller and Vitalik Buterin, \href{https://eips.ethereum.org/EIPS/eip-20}{EIP-20, ``Token Standard''}.}
+
+This distinction is not cosmetic. If a protocol review says ``Alice has 1,000 USDC,'' the base account model does not contain a USDC balance field at Alice's address. The claim means the USDC contract's storage reports a balance for Alice under whatever storage layout and implementation the USDC contract uses. If the token is upgradeable, pausable, blacklisting, rebasing, fee-on-transfer, or backed by off-chain reserves, the balance claim carries more assumptions than the ERC-20 function name suggests.
+
+\begin{codeblock}
+native ETH:
+    world_state[Alice].balance
+
+ERC-20 token:
+    world_state[Token].storage[balance_mapping_slot(Alice)]
+
+allowance:
+    world_state[Token].storage[allowance_mapping_slot(owner, spender)]
+\end{codeblock}
+
+Event logs should not be treated as the source of truth. A token may emit a \texttt{Transfer} log when storage changed, but the log is evidence emitted by execution, not the ledger itself. Indexers often reconstruct balances from logs for performance. That is useful engineering and dangerous as a security shortcut. A reviewer should know whether a balance claim comes from direct contract state, an archive query, a trace, an indexer, or a block explorer's derived database.
+
+Allowances deserve the same care. An \texttt{approve} call does not move tokens. It changes the token contract's authority state. A later \texttt{transferFrom} call can spend under that allowance if the token's rules permit it. Users routinely think they approved a single swap when they actually granted a reusable spending capability to a router. That is not an interface nuisance; it is an account-model authority failure.
+
+\subsection{Calldata, Return Data, Logs, and Reverts}
+
+Ethereum calldata is bytes. ABI decoding gives those bytes meaning. The Solidity ABI specifies how function selectors, arguments, return values, events, and errors are encoded.\footnote{\href{https://docs.soliditylang.org/en/latest/abi-spec.html}{Solidity documentation, ``Contract ABI Specification''}.} Without the ABI, a reviewer can see bytes and a target address, but not safely infer the intended function semantics.
+
+A typical ABI-encoded function call begins with a four-byte selector derived from the function signature, followed by encoded arguments:
+
+\begin{codeblock}
+approve(address spender, uint256 value)
+
+selector = first4(keccak256("approve(address,uint256)"))
+calldata = selector || encode(spender) || encode(value)
+\end{codeblock}
+
+This is enough to identify the called function when the ABI is known or the selector is recognized. It is not enough to prove the contract behaved according to the function name. Function selectors can collide. Proxies can forward calls to implementation contracts. A contract can implement a familiar selector with unexpected behavior. A verified ABI can be stale if the address is a proxy and the implementation changed. A block explorer label can be wrong. A wallet may decode against the wrong ABI.
+
+Return data and revert data also need discipline. A state-changing transaction receipt does not normally include successful return data for ordinary users to rely on after the fact; return data is available to the caller during execution and to off-chain tooling through simulation or traces. Revert data may encode a reason string or custom error, but it is still data returned by execution. A malicious callee can return error-shaped bytes. The ABI specification explicitly warns that error data can bubble up and should not be blindly trusted as proof of origin.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.34\textwidth}X@{}}
+\toprule
+Artifact & What it helps establish & What it does not establish \\
+\midrule
+Transaction object & Sender sequence, target, value, calldata, gas and fee assumptions & That the intended state change succeeded \\
+Receipt status & Whether top-level execution reverted & That the economic result was safe or intended \\
+Logs & Events that survived committed execution & Complete state, internal intent, or off-chain truth \\
+Calldata & Function selector and arguments under an ABI & Correct semantics of the target code \\
+Trace or state diff & Internal calls and concrete state changes, depending on tooling & Finality, user understanding, or future invariant safety \\
+\bottomrule
+\end{tabularx}
+\caption{Ethereum review evidence is distributed across transaction data, receipts, logs, traces, state, and off-chain interpretation.}
+\end{table}
+
+\section{Gas as a Security Boundary}
+
+Gas is not only a fee mechanism. It is an execution budget, a denial-of-service boundary, a liveness assumption, and sometimes an exploitability parameter.
+
+The transaction gas limit bounds how much execution can occur. If execution runs out of gas, the transaction fails and the sender still pays for consumed gas. A contract function that is safe only when gas is cheap or state is small is not reliably safe. A liquidation that becomes unprofitable during congestion may not run. A governance execution that needs too much gas may be unexecutable. A rescue function that loops over an unbounded list may become ceremonial rather than usable.
+
+EIP-1559 separates the base fee burned by the protocol from the priority fee offered to the block producer. The user's \texttt{maxFeePerGas} and \texttt{maxPriorityFeePerGas} express willingness to pay under that market. They do not guarantee inclusion. They also do not guarantee that a transaction will still be valid when included; nonce, state, slippage, deadline, and access assumptions may change first.
+
+Gas refunds are another place old intuition breaks. EIP-3529 reduced gas refunds and removed the old selfdestruct refund.\footnote{Vitalik Buterin and Martin Swende, \href{https://eips.ethereum.org/EIPS/eip-3529}{EIP-3529, ``Reduction in refunds''}.} EIP-6780 changed \texttt{SELFDESTRUCT} behavior so that, except in the same transaction as contract creation, it no longer deletes code and storage as older designs assumed.\footnote{Vitalik Buterin, \href{https://eips.ethereum.org/EIPS/eip-6780}{EIP-6780, ``SELFDESTRUCT only in same transaction''}.} A reviewer should distrust security arguments that rely on obsolete gas-token economics, refund-heavy cleanup, or destroying a contract to remove its state.
+
+At Chapter~14 depth, the gas review questions are:
+
+\begin{codeblock}
+Can the transaction afford execution under stressed fees?
+Can an attacker make the function exceed its gas budget?
+Does failure consume nonce, time, auction position, or user attention?
+Do fee assumptions affect keepers, liquidators, pausers, or governance executors?
+Does the code rely on obsolete refund or selfdestruct behavior?
+\end{codeblock}
+
+Chapter~15 will teach the lower-level mechanics that explain why particular operations cost what they cost. This chapter's point is simpler: gas is part of the security model because it decides whether valid state transitions are economically and operationally reachable.
+
+\section{Worked Example: Approval and Revert Evidence}
+
+Consider this common workflow:
+
+\begin{codeblock}
+1. Alice sends tx A to Token.approve(Router, 1,000 USDC)
+2. Alice sends tx B to Router.swapExactTokensForETH(...)
+3. Router calls Token.transferFrom(Alice, Pool, amount)
+4. Router calls Pool.swap(...)
+\end{codeblock}
+
+Transaction~A does not move USDC. It changes authority state in the token contract. If tx~A succeeds, the token contract should update allowance storage and normally emit an \texttt{Approval} log. Alice's account nonce increments and she pays gas. The durable security effect is that Router can now attempt to spend up to the approved amount under the token's rules.
+
+If tx~B later reverts inside the router, the effects of tx~B roll back, including token transfers and logs from reverted frames. The earlier approval from tx~A does not automatically disappear. Alice may still have granted Router an allowance. A user interface that says ``swap failed'' while leaving a large approval behind has described only the swap execution, not the remaining authority state.
+
+\begin{codeblock}
+Evidence packet for tx A:
+    transaction sender = Alice
+    transaction target = Token
+    calldata selector = approve(address,uint256)
+    spender argument = Router
+    value argument = 1,000 USDC units
+    receipt status = success or failure
+    logs = Approval event if execution committed it
+    state check = allowance[Alice][Router] after settlement
+
+Evidence packet for tx B:
+    transaction sender = Alice
+    transaction target = Router
+    calldata = swap parameters, route, minimum output, deadline
+    receipt status = success or failure
+    state check = token balances and allowance after settlement
+    risk check = whether failed swap left approval authority behind
+\end{codeblock}
+
+A weak review stops at ``the swap reverted, so no harm.'' A stronger review separates the two transactions and asks which account states changed. Did Alice's nonce advance? Did tx~A approve Router? Did tx~B consume gas and fail? Did any state from tx~B survive? Did the allowance remain high enough for a later spend? Does the router have arbitrary transfer authority, or only authority within a constrained execution path?
+
+This is the account model in miniature. The security object is not the user story. It is the ordered sequence of account-state transitions and the evidence each transition leaves behind.
+
+\section{Account-Model Failure Modes}
+
+Ethereum's account model creates recurring failure modes. They are not all EVM bugs. Many are mistakes about what accounts, receipts, logs, and permissions mean.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.28\textwidth}X@{}}
+\toprule
+Failure mode & Review correction \\
+\midrule
+Nonce race & Submitted does not mean executed. Identify which nonce landed, which transaction replaced it, and what state was current at inclusion. \\
+Receipt confusion & Included does not mean successful. Check receipt status and then confirm the actual state change. \\
+Log-as-state error & Event logs are not the ledger. Confirm balances, roles, and allowances against contract state when the claim matters. \\
+EOA-only authorization & No code today does not mean user-only forever. Account for contract wallets, delegated EOAs, and changing validation logic. \\
+Approval residue & A failed action may leave authority behind. Check allowances, permits, and delegated spending state after failure. \\
+Gas liveness failure & Valid code may be unusable under stress. Test execution under large state, congestion, and high-fee conditions. \\
+Wrong sender model & Origin, signer, caller, and spender may differ. Name which account signed, which called, and whose authority moved the asset. \\
+\bottomrule
+\end{tabularx}
+\caption{Account-model bugs often come from confusing state, evidence, authority, and execution status.}
+\end{table}
+
+These failure modes will reappear throughout the book. Chapter~15 will make them sharper by adding call frames, storage layout, delegatecall, creation, tracing, and low-level execution. Part~IV will turn them into contract vulnerability classes. Part~V will show how protocols combine them with economics, oracle trust, liquidation incentives, governance, and cross-contract accounting.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item What are the four core fields of an Ethereum account, and which security question does each field answer?
+\item Why is it incorrect to treat an ERC-20 balance as a native account balance?
+\item What does a transaction receipt status prove, and what does it not prove?
+\item Why can a reverted Ethereum transaction still matter operationally even when application state changes are rolled back?
+\item How do \texttt{msg.sender} and \texttt{tx.origin} differ, and why is that difference dangerous for authorization?
+\item Why are ``EOA-only'' assumptions weaker after contract wallets, ERC-1271-style validation, account abstraction, and EIP-7702?
+\item What information does ABI calldata provide, and why is ABI decoding not the same as proving contract semantics?
+\item Why should gas be treated as a security boundary rather than only as a transaction fee?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Inspect an Ethereum transaction and its receipt using a block explorer or local node. Record transaction type, sender, nonce, target, value, calldata selector, gas limit, fee fields, receipt status, gas used, logs, and the state claim you can and cannot prove from those artifacts.
+
+\item Decode an ERC-20 \texttt{approve} or \texttt{transfer} calldata payload. Identify the selector, arguments, token contract, spender or recipient, amount units, sender nonce, and whether the transaction's receipt confirms a durable state change.
+
+\item Find or construct a reverted transaction example. Write a short memo separating what was consumed, what was rolled back, what the receipt proves, which logs were committed versus visible only in trace or reverted-frame evidence, and what state query would be needed to confirm the final account or contract state.
+
+\item Review a hypothetical access-control rule that allows only EOAs to call a function. Analyze how the rule behaves under contract wallets, ERC-1271 validation, EIP-7702 delegated EOAs, smart-account relayers, and future account-behavior changes. Recommend a more precise authority check.
+\end{enumerate}

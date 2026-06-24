@@ -1,0 +1,368 @@
+\chapter*{Part II Integrated Lab: Chain-Layer Risk Review}
+\addcontentsline{toc}{chapter}{Part II Integrated Lab: Chain-Layer Risk Review}
+
+\begin{labbox}[Chain-Layer Risk Review]
+This lab turns the chain-layer material into one professional review package. The task is not to repeat definitions from Chapters 8--12. The task is to decide whether an application can safely act on chain history, network observations, ordering assumptions, economic incentives, and incident behavior.
+\end{labbox}
+
+\section*{Scenario}
+
+Northstar USD is a bridge-backed stablecoin system. Users lock USDX on Chain A and receive nUSD on Chain B. Users can later burn nUSD on Chain B and receive USDX released on Chain A.
+
+The system has grown quickly:
+
+\begin{itemize}
+\item nUSD outstanding on Chain B: \$180 million.
+\item Average daily mint volume: \$22 million.
+\item Largest historical single mint: \$18 million.
+\item Emergency pause authority: 3 of 5 guardian multisig on Chain B.
+\item Bridge signer threshold: 7 of 10 signatures.
+\item Signer bond: \$4 million per signer, slashable only for objectively false messages.
+\item Current mint policy: mint after 20 Chain A confirmations reported by the bridge watcher.
+\item Current redemption policy: release USDX on Chain A after a Chain B burn is indexed and signed by 7 bridge signers.
+\end{itemize}
+
+Chain A has probabilistic settlement. The team informally says that 20 confirmations is ``final enough.'' Chain B has checkpoint finality and a centralized sequencer. Chain B users can force inclusion through the base layer, but the force-inclusion path may take up to 24 hours.
+
+\section*{Architecture}
+
+The current architecture is:
+
+\begin{codeblock}
+Chain A lock event
+    -> Bridge-owned Chain A full node
+    -> Hosted Chain A RPC provider
+    -> Hosted Chain A indexer
+    -> Bridge watcher
+    -> 7 of 10 signer approvals
+    -> Chain B mint transaction
+    -> Chain B sequencer
+    -> nUSD minted to user
+
+Chain B burn event
+    -> Hosted Chain B RPC provider
+    -> Hosted Chain B indexer
+    -> Bridge watcher
+    -> 7 of 10 signer approvals
+    -> Chain A release transaction
+\end{codeblock}
+
+Known infrastructure facts:
+
+\begin{itemize}
+\item The bridge-owned Chain A full node runs Client Alpha v2.4.
+\item Six of ten signers use the same watcher implementation.
+\item Four signers use the same cloud provider and region.
+\item Three signers use the same custody vendor.
+\item The Chain A hosted RPC and Chain A hosted indexer are sold by different vendors, but both use the same upstream archive-node provider.
+\item The public dashboard reads from the hosted Chain A indexer, not from the bridge-owned full node.
+\item The Chain B emergency pause transaction is normally submitted through one private relay to the Chain B sequencer.
+\item If the private relay fails, the fallback route is public RPC submission to Chain B.
+\end{itemize}
+
+\section*{Event Packet}
+
+During a scheduled Chain A upgrade, the following events occur. Treat this packet as the evidence available to the review team.
+
+\begin{codeblock}
+T-7 days
+    Chain A announces upgrade activation at height H.
+    Client Alpha v2.5 and Client Beta v3.1 are released.
+    Northstar remains on Client Alpha v2.4.
+
+T+0
+    Chain A reaches height H.
+    Client Alpha v2.4 accepts block A-H+1.
+    Client Beta v3.1 rejects block A-H+1.
+
+T+4 minutes
+    Northstar Chain A full node reports head A-X at H+20.
+    Hosted Chain A RPC reports head A-X at H+20.
+    Hosted Chain A indexer reports a USDX lock event D in block H+3.
+    Two public explorers disagree: Explorer 1 follows A-X, Explorer 2 follows A-Y.
+
+T+6 minutes
+    A user requests a $24 million nUSD mint based on lock event D.
+    The bridge watcher requests signer approval.
+    Seven signers approve because their watcher stack sees D at 20 confirmations.
+
+T+8 minutes
+    Chain B mint transaction is sent through the private relay.
+    Chain B sequencer includes the mint.
+    nUSD is minted to the user.
+
+T+11 minutes
+    Chain A core developers announce a client split.
+    They advise applications to pause deposits and wait for branch resolution.
+
+T+13 minutes
+    Northstar guardians submit an emergency pause transaction on Chain B.
+    The private relay returns success but the transaction is not included.
+
+T+18 minutes
+    The pause is resubmitted through public RPC.
+    It enters the public transaction pool.
+    A large nUSD sale begins on Chain B before the pause is included.
+
+T+22 minutes
+    The pause is included on Chain B.
+    Chain A social coordination favors branch A-Y.
+    Lock event D is not present on A-Y.
+\end{codeblock}
+
+\section*{Practical Evidence Packet}
+
+Use these records as the raw material for the review. If two records conflict, do not smooth over the conflict. Name it and decide what the application should do.
+
+\subsection*{Chain A Observation Records}
+
+\begin{codeblock}
+Source A1: Northstar full node
+    client = Client Alpha v2.4
+    chainId = ChainA-main
+    head = A-X at H+20
+    block H+3 = A-X-003
+    lock event D = present
+    node status = healthy
+
+Source A2: hosted Chain A RPC
+    client = Client Alpha v2.4
+    chainId = ChainA-main
+    head = A-X at H+20
+    block H+3 = A-X-003
+    lock event D = present
+    upstream archive provider = ArchiveCo
+
+Source A3: hosted Chain A indexer
+    source = ArchiveCo
+    indexed head = A-X at H+20
+    lock event D = present
+    reorg handling status = no rollback recorded
+
+Source A4: public explorer 1
+    client family = Alpha
+    head = A-X at H+21
+    lock event D = present
+
+Source A5: public explorer 2
+    client family = Beta
+    head = A-Y at H+18
+    block H+3 = A-Y-003
+    lock event D = absent
+\end{codeblock}
+
+\subsection*{Chain B Transaction Records}
+
+\begin{codeblock}
+Mint transaction M
+    submitted through private relay at T+8
+    included by Chain B sequencer at T+8
+    minted amount = 24,000,000 nUSD
+    recipient = requester of lock event D
+
+Pause transaction P1
+    submitted through private relay at T+13
+    relay response = accepted
+    included = no
+    reason given = none
+
+Pause transaction P2
+    submitted through public RPC at T+18
+    public visibility = yes
+    included by Chain B sequencer at T+22
+
+nUSD market activity
+    T+18 to T+22 observed sale volume = 9,500,000 nUSD
+    average realized price = $0.94
+    remaining minted nUSD after sale window = 14,500,000 nUSD
+\end{codeblock}
+
+\subsection*{Signer and Control Records}
+
+\begin{codeblock}
+Signer approvals for mint M:
+    S1 AlphaWatcher cloud-east custody-X
+    S2 AlphaWatcher cloud-east custody-X
+    S3 AlphaWatcher cloud-east custody-X
+    S4 AlphaWatcher cloud-east custody-Y
+    S5 AlphaWatcher cloud-west custody-Z
+    S6 AlphaWatcher cloud-west custody-Z
+    S7 BetaWatcher cloud-west custody-Z
+
+Signer bond:
+    4,000,000 USD-equivalent per signer
+    slashable only for objectively false messages
+    no automatic victim restitution
+
+Guardian pause:
+    threshold = 3 of 5
+    normal route = private relay
+    fallback route = public RPC
+    no forced inclusion policy for emergency pause
+\end{codeblock}
+
+\section*{Required Artifact}
+
+Produce a chain-layer risk review package for Northstar USD. The artifact should be written as if it will be used by engineers, protocol leadership, operations staff, and auditors before the system relaunches.
+
+\begin{artifactbox}[Required Review Package]
+\begin{artifactchecklist}
+\item Application summary and value-at-risk statement.
+\item Chain and domain dependency map.
+\item Critical action inventory for mint, burn, release, pause, oracle or price-dependent actions, and dashboard display.
+\item Settlement and reorg policy for Chain A lock events and Chain B burn events.
+\item RPC, indexer, node, gateway, sequencer, relay, and dashboard dependency map.
+\item Transaction supply-chain analysis for mint, redemption, and emergency pause.
+\item Economic attack feasibility estimate for signer corruption, reorg-assisted minting, pause delay, and sell-before-pause extraction.
+\item Client, fork, upgrade, and incident behavior review.
+\item Practical evidence reconciliation tables for Chain A observations, Chain B transaction status, signer correlation, and emergency pause timing.
+\item Findings memo with severity, evidence, recommendation, owner, and residual risk.
+\end{artifactchecklist}
+\end{artifactbox}
+
+\section*{Required Analysis}
+
+\subsection*{1. Settlement and Reorg Policy}
+
+Define the settlement policy that Northstar should use for:
+
+\begin{itemize}
+\item displaying a Chain A lock event;
+\item allowing internal nUSD mint preparation;
+\item collecting signer approvals;
+\item submitting a Chain B mint;
+\item allowing minted nUSD to become freely transferable;
+\item releasing USDX on Chain A after a Chain B burn.
+\end{itemize}
+
+Your policy must distinguish observation, inclusion, confirmations, application settlement, and irreversible action. A single phrase such as ``20 confirmations'' is not acceptable unless you justify why that threshold matches the asset, value tier, chain conditions, and response capacity.
+
+Include a decision table for T+4, T+6, T+8, T+11, T+13, T+18, and T+22. For each time, state what Northstar knew, what action was allowed under the old policy, what action should have been allowed under your corrected policy, and what evidence was missing.
+
+\subsection*{2. Observation and Dependency Map}
+
+Map every observation path in the scenario. At minimum, identify:
+
+\begin{itemize}
+\item what the bridge-owned Chain A node verifies locally;
+\item what the hosted Chain A RPC provides;
+\item what the hosted Chain A indexer derives;
+\item what the public dashboard can and cannot prove;
+\item what signer watchers observe independently;
+\item what Chain B RPC, indexer, relay, and sequencer components control;
+\item which dependencies are falsely treated as independent.
+\end{itemize}
+
+The output should include a disagreement policy. State exactly what pauses when the Chain A full node, hosted RPC, hosted indexer, public explorers, or signer watchers disagree on head, block hash, event inclusion, state root, or finality status.
+
+Produce an independence analysis. A1, A2, A3, A4, and A5 should not be counted as five independent observations unless you justify their client diversity, upstream data sources, operator independence, and branch behavior.
+
+\subsection*{3. Ordering and Inclusion Analysis}
+
+Analyze the transaction supply chain for three actions:
+
+\begin{itemize}
+\item the Chain B mint transaction;
+\item the Chain A USDX release transaction;
+\item the Chain B emergency pause transaction.
+\end{itemize}
+
+For each action, state who can see it before inclusion, who can delay it, who can include or exclude it, what private routing changes, what fallback exposes, and what maximum delay the application can tolerate before value at risk increases.
+
+The pause transaction deserves special attention. Explain why ``relay returned success'' is not the same as inclusion. Then analyze the T+13 to T+22 window in which the pause is delayed and nUSD is sold before the system stops.
+
+Calculate the realized value from the observed sale window using the provided sale volume and average realized price. Then state what this does and does not prove about total attacker profit.
+
+\subsection*{4. Economic Feasibility}
+
+Do not compare \$180 million of nUSD outstanding to \$40 million of total signer collateral and stop. That is fake analysis.
+
+Compute and discuss:
+
+\begin{itemize}
+\item threshold signer collateral;
+\item maximum value that can be minted or released before response under the current design;
+\item how much value the attacker can realistically sell or borrow against before pause;
+\item whether slashing is objective, timely, and borne by the corrupt decision-makers;
+\item how shared watcher software, cloud hosting, custody, and upstream data providers change the attack cost;
+\item whether bribery, reimbursement, hedging, or short positions change the payoff.
+\end{itemize}
+
+At minimum, compute:
+
+\begin{codeblock}
+threshold signer collateral = signer threshold * signer bond
+observed sale proceeds = sale volume * average realized price
+unsold minted nUSD after pause = minted amount - sale volume
+nominal minted amount versus threshold signer collateral
+\end{codeblock}
+
+Include a sensitivity table with at least four variables:
+
+\begin{codeblock}
+variable:
+    current value:
+    stressed value:
+    effect on attack feasibility:
+    monitor or control:
+\end{codeblock}
+
+\subsection*{5. Client Split and Upgrade Incident Review}
+
+Classify the Chain A event packet. Decide whether it is a reorg, client split, operational disagreement, validity disagreement, rollback, irregular state change, or some combination. Use precise labels.
+
+Your incident review must answer:
+
+\begin{itemize}
+\item which branch Northstar acted on;
+\item which branch later received social support;
+\item whether event D was settled under Northstar's own policy;
+\item whether signers should have approved the mint at T+6;
+\item what evidence should have stopped automatic minting before T+8;
+\item what the pause and resume rules should have been;
+\item what evidence is required before relaunch.
+\end{itemize}
+
+Your classification must use the records, not only the narrative. For example, if you call the event a client split, state which clients split, which branch each observation source followed, and which source should have been sufficient to halt automatic minting.
+
+\section*{Minimum Findings}
+
+Write at least five findings. Each finding must have:
+
+\begin{codeblock}
+Title:
+Severity:
+Affected promise:
+Evidence:
+Attack or failure path:
+Impact:
+Recommendation:
+Residual risk:
+\end{codeblock}
+
+At least one finding must cover each category:
+
+\begin{itemize}
+\item unsafe settlement or reorg policy;
+\item non-independent observation infrastructure;
+\item ordering, inclusion, or pause-delay risk;
+\item economic-security mismatch;
+\item client, upgrade, or incident-response failure.
+\end{itemize}
+
+\section*{Submission Standard}
+
+The final artifact should be specific enough that an engineer can convert it into configuration changes, signer rules, confirmation thresholds, watcher checks, monitor alerts, pause conditions, branch policies, and incident runbooks.
+
+Do not submit generic advice. The following are not acceptable without concrete thresholds and decision rules:
+
+\begin{itemize}
+\item ``use multiple RPC providers'';
+\item ``increase confirmations'';
+\item ``monitor the chain'';
+\item ``improve incident response'';
+\item ``use better MEV protection'';
+\item ``decentralize signers.''
+\end{itemize}
+
+Every control must name what signal it watches, what action it changes, who owns the decision, and what residual risk remains.

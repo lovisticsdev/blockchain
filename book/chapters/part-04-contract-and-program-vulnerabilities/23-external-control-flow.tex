@@ -1,0 +1,613 @@
+\chapter{External Control Flow}
+
+\section{Purpose}
+
+\begin{principlebox}
+External control flow is any point where a contract, program, module, token, or transaction hands execution, authority, value, account privileges, pending state, or result interpretation to something outside its local invariant boundary. Reentrancy is one important consequence. It is not the whole subject.
+\end{principlebox}
+
+Chapter~20 taught that public programs are adversarially callable financial backends. Chapter~21 studied who may cause a transition. Chapter~22 studied what an asset movement actually means. This chapter studies what happens when a transition cannot finish inside one local execution boundary.
+
+That boundary may be an EVM call, delegatecall, token hook, receiver callback, Solana CPI, CosmWasm submessage, reply handler, Sui programmable transaction block, Move module call, or asynchronous message that returns later. The surface differs by runtime. The review question is portable:
+
+\begin{codeblock}
+while this transition is incomplete:
+    what state is exposed?
+    what authority is passed?
+    what asset movement is in progress?
+    what external code can run?
+    what result will be trusted?
+    what must be rechecked before the invariant is restored?
+\end{codeblock}
+
+Solidity's security guidance states the core EVM problem directly: interaction with another contract, including Ether transfer, hands over control and may allow the callee to call back before the interaction is complete.\footnote{\href{https://docs.soliditylang.org/en/latest/security-considerations.html\#reentrancy}{Solidity documentation, ``Security Considerations: Reentrancy''}.} That statement is useful, but too narrow if carried unmodified across execution models. Solana CPI is not simply EVM reentrancy with different syntax. CosmWasm replies are not Solidity fallback functions. Token receiver hooks are not ordinary accounting updates. Sui PTBs are not Ethereum bundles.
+
+The goal of this chapter is to give the reviewer a boundary method. A reviewer should leave able to draw an external-control-flow map, identify exposed invariants, classify reentrancy without folklore, review hooks and callbacks, follow CPI privileges, reason about message replies, and choose defenses that match the actual boundary.
+
+\section{External Control Flow as an Invariant Boundary}
+
+External control flow becomes dangerous when a program crosses a boundary before the relevant invariant is stable. The external actor does not need to violate syntax. It only needs to observe, call back, mutate shared state, consume resources, return misleading data, fail selectively, or cause a later continuation while the local program is still relying on unfinished assumptions.
+
+\subsection{What Leaves the Local Boundary}
+
+Do not start with the bug name. Start with the boundary. A call, CPI, hook, reply, or transaction-composition step can carry more than execution.
+
+\begin{codeblock}
+external_control_boundary:
+    local entry point
+    external target, program, module, token, or message
+    state finalized before the boundary
+    state still provisional during the boundary
+    assets or value moved across the boundary
+    authority, signer status, writable privilege, or capability passed
+    calldata, instruction data, message payload, or object reference passed
+    returndata, reply, event, effect, or acknowledgement trusted
+    failure behavior
+    invariant exposed
+\end{codeblock}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=9mm and 12mm]
+\node[security node, text width=30mm] (entry) {Local entry point};
+\node[security node, right=of entry, text width=33mm] (pre) {Checks and partial state};
+\node[security node, right=of pre, text width=35mm] (boundary) {External boundary};
+\node[security node, below=of boundary, text width=35mm] (external) {External code\\program\\message};
+\node[security node, right=of boundary, text width=34mm] (post) {Return\\reply\\result};
+\node[security node, right=of post, text width=32mm] (restore) {Invariant restored};
+
+\draw[security arrow] (entry) -- (pre);
+\draw[security arrow] (pre) -- (boundary);
+\draw[security arrow] (boundary) -- (external);
+\draw[security arrow] (external) -- (post);
+\draw[security arrow] (post) -- (restore);
+\draw[trust boundary] ($(boundary.north west)+(-0.15,0.12)$) rectangle ($(external.south east)+(0.15,-0.12)$);
+\end{tikzpicture}
+}
+\caption{External control flow is a boundary over execution, state, authority, value, and result interpretation.}
+\end{figure}
+
+The most common weak review says, "There is an external call." That is only a location. The useful review says what leaves the boundary and why that matters. An EVM call may pass value, gas, calldata, caller context, and receive returndata. A Solana CPI may pass signer and writable privileges over a caller-supplied account list. A CosmWasm submessage may carry a reply ID that later determines which pending operation is finalized. A Sui PTB may pass objects and command outputs from one command to the next.
+
+The exposed invariant should be written explicitly:
+
+\begin{codeblock}
+boundary invariant:
+    before crossing:
+        user debt has not been cleared
+        withdrawal amount has been computed
+        assets have not yet left custody
+
+    exposed during crossing:
+        another entry point can observe old debt
+        the receiver can execute code
+        another program can mutate a shared account
+        the reply handler can be invoked for the wrong pending action
+
+    after return:
+        debt must be cleared, assets moved, and accounting rechecked
+\end{codeblock}
+
+This is why external control flow belongs after authorization and token semantics. A callback is dangerous only relative to a state and authority claim. A CPI is dangerous only relative to the accounts and privileges it carries. A receiver hook is dangerous only relative to the asset behavior the protocol accepted.
+
+\subsection{What Must Be Revalidated After Return}
+
+Returning from an external boundary does not mean the world is unchanged. A callee may have called back. A token may have moved less than expected. A Solana callee may have mutated writable accounts. A CosmWasm submessage may have succeeded, failed, or produced a reply that must be correlated with pending state. A read-only call may have returned data computed from a state that was manipulable inside the same transaction.
+
+Post-boundary review should be mechanical:
+
+\begin{codeblock}
+after_external_boundary:
+    check success or failure status
+    decode returndata or reply only after validating source and domain
+    reload or re-query state that may have changed
+    recompute balances or custody deltas
+    verify account, object, or capability relationships still hold
+    clear or finalize pending state exactly once
+    emit evidence only after the state it describes is true
+    restore or check the invariant
+\end{codeblock}
+
+\begin{artifactbox}[External-control-flow map]
+For every external boundary, record what leaves, what can change while control is away, what comes back, and which invariant must be true before the function continues.
+\end{artifactbox}
+
+The important phrase is "must be true before the function continues." A defense that delays reentrancy but then trusts stale returndata is incomplete. A lock that prevents one function from reentering but leaves another function able to observe inconsistent state is incomplete. A CPI that pins the program ID but does not reload changed account data is incomplete. A reply handler that checks the reply ID but does not bind it to the expected sender, amount, or pending operation is incomplete.
+
+\section{EVM Calls and Reentrancy Families}
+
+The EVM is where most readers first learn external-control-flow risk, so it is worth teaching clearly. But the chapter must not stop at the old story: "external call before state update." That story is useful, then quickly insufficient.
+
+\subsection{Calls, Value, Returndata, Fallbacks, and Failure}
+
+At EVM level, \texttt{CALL}, \texttt{STATICCALL}, and \texttt{DELEGATECALL} create new execution frames with different context rules. Chapter~15 already taught the machinery. Here the security question is what the local contract assumes after the call.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.17\textwidth}>{\RaggedRight\arraybackslash}p{0.29\textwidth}X@{}}
+\toprule
+Surface & What crosses & Review risk \\
+\midrule
+\texttt{CALL} & Calldata, gas, value, caller identity, returndata & Callee executes code, may call back, may fail, may return malicious bytes. \\
+\texttt{STATICCALL} & Calldata, gas, read-only execution context, returndata & Callee cannot modify state in that call tree, but can return misleading data, revert, or consume gas. \\
+\texttt{DELEGATECALL} & Code from target executes in caller's storage and context & External code can write caller storage; this is proxy machinery and also a storage-context boundary. \\
+Ether transfer & Native value plus receive or fallback execution when applicable & Recipient code can run; transfer can fail; forced Ether can bypass ordinary receive logic. \\
+Low-level result & Boolean success flag plus returndata & Caller may ignore failure, decode hostile bytes, or treat success as economic safety. \\
+\bottomrule
+\end{tabularx}
+\caption{EVM external calls carry more than control. They carry context, gas, value, storage meaning, and result interpretation.}
+\end{table}
+
+Solidity documents \texttt{receive} and \texttt{fallback} functions as the paths run when Ether or unmatched calldata reaches a contract, depending on calldata and which functions are defined.\footnote{\href{https://docs.soliditylang.org/en/latest/contracts.html\#receive-ether-function}{Solidity documentation, ``Receive Ether Function''}; \href{https://docs.soliditylang.org/en/latest/contracts.html\#fallback-function}{Solidity documentation, ``Fallback Function''}.} Solidity's security guidance also warns that Ether transfer can fail, that \texttt{call} can forward more gas than \texttt{transfer}, and that recipient execution can include callbacks or other state changes.\footnote{\href{https://docs.soliditylang.org/en/latest/security-considerations.html\#sending-and-receiving-ether}{Solidity documentation, ``Security Considerations: Sending and Receiving Ether''}.}
+
+The old "2,300 gas makes this safe" argument should be treated as a historical implementation detail, not a security model. Gas costs can change, the callee may still execute code, transfer can fail, and the right defense is to structure state and authority correctly. Solidity itself warns not to take the stipend assumption for granted because it could change in future hard forks.\footnote{\href{https://docs.soliditylang.org/en/latest/security-considerations.html\#sending-and-receiving-ether}{Solidity documentation, ``Security Considerations: Sending and Receiving Ether''}.}
+
+Low-level calls create another failure class: ignored result. A call that returns \texttt{false} is not the same as a successful transfer. Returndata is not proof that the callee honored an invariant. A caller that decodes arbitrary returndata without checking length, selector, source, and domain is accepting external bytes as truth.
+
+\begin{codeblock}
+unsafe_low_level_call:
+    success, data = target.call(payload)
+    decoded = abi.decode(data, uint256)
+    state.value = decoded
+
+review correction:
+    require(success)
+    require(target is expected target)
+    require(data length and ABI shape are expected)
+    treat decoded value as a claim, not as proof of safety
+\end{codeblock}
+
+\subsection{Single-Function, Cross-Function, Cross-Contract, and Read-Only Reentrancy}
+
+Reentrancy occurs when external control returns into a system before the original operation has finished restoring the relevant invariant. That definition is intentionally broader than one function calling itself.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=9mm and 12mm]
+\node[security node, text width=30mm] (user) {Attacker};
+\node[security node, right=of user, text width=35mm] (vault1) {Vault\\\texttt{withdraw()}};
+\node[security node, right=of vault1, text width=34mm] (recv) {Receiver\\fallback or hook};
+\node[security node, below=of vault1, text width=35mm] (vault2) {Vault\\reentered path};
+\node[security node, right=of vault2, text width=34mm] (bad) {Invariant broken};
+
+\draw[security arrow] (user) -- node[above]{1} (vault1);
+\draw[security arrow] (vault1) -- node[above]{2 value/call} (recv);
+\draw[security arrow] (recv) -- node[right]{3 callback} (vault2);
+\draw[security arrow] (vault2) -- node[above]{4} (bad);
+\end{tikzpicture}
+\caption{Reentrancy is a return into a system while the original transition still exposes an invariant.}
+\end{figure}
+
+The classic single-function form is simple:
+
+\begin{codeblock}
+withdraw():
+    amount = balances[msg.sender]
+    send value to msg.sender        # external control
+    balances[msg.sender] = 0
+\end{codeblock}
+
+The exposed invariant is not "external calls are bad." It is:
+
+\begin{codeblock}
+balance is still recorded as withdrawable
+while value has already been sent or is being sent
+\end{codeblock}
+
+Cross-function reentrancy is more subtle. The callback does not call \texttt{withdraw()} again. It calls another function that reads or mutates related state:
+
+\begin{codeblock}
+withdraw():
+    amount = claimable[msg.sender]
+    token.transfer(msg.sender, amount)    # callback can enter donate()
+    claimable[msg.sender] = 0
+
+donate():
+    require(claimable[msg.sender] > 0)
+    bonus[msg.sender] += f(claimable[msg.sender])
+\end{codeblock}
+
+The second function is not vulnerable by itself. It becomes vulnerable because it observes state that should have been finalized before the external boundary.
+
+Cross-contract reentrancy appears when the reentered function lives in another contract in the same protocol. A vault calls a strategy, the strategy calls a token, the token calls a hook, and the hook reenters a router or accounting contract that shares assumptions with the vault. Solidity's guidance explicitly notes that reentrancy is not only Ether transfer and that multi-contract situations must be considered because the callee may modify another contract the caller depends on.\footnote{\href{https://docs.soliditylang.org/en/latest/security-considerations.html\#reentrancy}{Solidity documentation, ``Security Considerations: Reentrancy''}.}
+
+Read-only reentrancy is a naming trap. A view path may not write state, but it can return a value computed from temporarily inconsistent state. If another protocol reads that value inside the same transaction and uses it for pricing, collateral, shares, or liquidation, a read-only path can become an economic write elsewhere.
+
+\begin{failuremodebox}[Reentrancy is not a function label]
+A function with no direct self-call may still be reentrant through another function, another contract, a token hook, a read-only pricing path, a proxy, or a protocol integration. The finding should name the invariant exposed during the callback.
+\end{failuremodebox}
+
+\section{Hooks and Token-Controlled Execution}
+
+Chapter~22 warned that asset movement is not a simple balance assignment. This chapter adds the control-flow consequence: sometimes asset movement runs external code as part of the movement path.
+
+\subsection{Receiver Hooks and Safe Transfers}
+
+ERC-777 includes sender and recipient hooks. The EIP states that token holders can register hooks to control and reject sends or receives, that \texttt{tokensReceived} lets a contract receive tokens and be notified in one transaction, and that token transfers call \texttt{tokensToSend} and \texttt{tokensReceived} around the balance update.\footnote{\href{https://eips.ethereum.org/EIPS/eip-777}{EIP-777, ``Token Standard''}.} That is a control-flow surface, not only a token feature.
+
+ERC-721 and ERC-1155 safe-transfer paths also introduce receiver callbacks. ERC-721 defines \texttt{onERC721Received} for safe transfers to contracts.\footnote{\href{https://eips.ethereum.org/EIPS/eip-721}{EIP-721, ``Non-Fungible Token Standard''}.} ERC-1155 defines receiver hooks for single and batch transfers and specifies receiver behavior around safe transfers.\footnote{\href{https://eips.ethereum.org/EIPS/eip-1155}{EIP-1155, ``Multi Token Standard''}.}
+
+The security issue is not that hooks exist. Hooks can prevent assets from being stuck, allow contracts to reject unwanted tokens, and improve composability. The issue is accepting hook-enabled assets while pretending transfers are passive.
+
+\begin{codeblock}
+safe_transfer_review:
+    does this transfer call receiver code?
+    is local accounting finalized before the receiver runs?
+    can the receiver call back into this protocol?
+    can the receiver call another protocol that reads this state?
+    is the token state already updated when the hook runs?
+    does the protocol support this asset behavior intentionally?
+\end{codeblock}
+
+For ERC-1155, batch behavior adds another review step. A receiver may see several ID and amount changes at once. A marketplace, vault, or collateral manager must not validate one ID while assuming the rest of the batch is irrelevant. For NFTs, receiver hooks can trigger logic during mint, transfer, auction settlement, collateral deposit, or liquidation receipt.
+
+\subsection{Transfer Hooks, Callback Targets, and Side Effects}
+
+Token-controlled execution is not limited to Ethereum standards. Solana Token Extensions, also known as Token-2022, include optional mint and account extensions. The Solana documentation lists extensions such as transfer fees, CPI guard, permanent delegates, pausable mints, and transfer hooks; it notes that transfer hooks require a CPI to a program implementing the transfer-hook interface.\footnote{\href{https://solana.com/docs/tokens/extensions}{Solana documentation, ``Token Extensions''}.}
+
+That means a Solana program supporting Token-2022 mints must ask whether the token movement itself can invoke another program, require extra accounts, or fail under extension policy. A program that validates the mint but ignores enabled extensions may accept an asset whose transfer path has more control flow than expected.
+
+Callback targets should be treated as adversarial unless the protocol proves otherwise. An AMM callback, flash-loan callback, receiver hook, token transfer hook, oracle callback, or message reply is often the mechanism that makes a protocol composable. It is also the mechanism that lets the counterparty run code in the middle of your transition.
+
+\begin{artifactbox}[Hook support decision]
+For each supported asset or integration, decide whether hooks and callbacks are unsupported, supported with pre-finalized state, or supported through an adapter that isolates the callback from protocol-critical state.
+\end{artifactbox}
+
+The cleanest design is often not "guard everything." It is to avoid hook-bearing assets where the protocol cannot model them, or to isolate them behind adapters whose state machine makes the callback explicit.
+
+\section{CPI, Messages, Replies, and Runtime-Specific Boundaries}
+
+Chapter~19 warned against flattening external control flow into one EVM-shaped bug class. This section applies that warning. The portable question is where control leaves and what must be true when it returns. The answers differ sharply.
+
+\subsection{Solana CPI Privilege Propagation and Account Revalidation}
+
+Solana CPI lets one program invoke another. Solana's CPI documentation states that \texttt{invoke} performs a CPI without PDA signing, \texttt{invoke\_signed} performs a CPI with PDA signing, signer and writable privileges extend from caller to callee, privileges cannot be escalated beyond what was passed, and the callee consumes from the caller's compute budget.\footnote{\href{https://solana.com/docs/core/cpi}{Solana documentation, ``Cross Program Invocation''}.} The CPI privilege documentation further summarizes that writable privilege cannot escalate, signer privilege requires the account to already be a signer or be a PDA authorized through \texttt{invoke\_signed}, and privilege reduction is allowed.\footnote{\href{https://solana.com/docs/core/cpi/cpi-execution}{Solana documentation, ``CPI Execution and Privileges''}.}
+
+Those rules are low-level protections, not full protocol safety. The caller still chooses which accounts to pass. The calling program still has to validate every account's semantic role before handing it to another program.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=9mm and 12mm]
+\node[security node, text width=31mm] (tx) {Transaction\\account privileges};
+\node[security node, right=of tx, text width=30mm] (caller) {Program A\\caller};
+\node[security node, right=of caller, text width=30mm] (callee) {Program B\\callee};
+\node[security node, below=of caller, text width=34mm] (shared) {Shared accounts\\signer/writable};
+\node[security node, below=of callee, text width=34mm] (state) {Mutated account\\post-CPI state};
+
+\draw[security arrow] (tx) -- (caller);
+\draw[security arrow] (caller) -- node[above]{CPI} (callee);
+\draw[security arrow] (shared) -- (caller);
+\draw[security arrow] (shared) -- (callee);
+\draw[security arrow] (callee) -- (state);
+\draw[security arrow] (state) -- (caller);
+\end{tikzpicture}
+\caption{Solana CPI passes privileges over explicit accounts. The caller must validate before CPI and revalidate after CPI.}
+\end{figure}
+
+The CPI review questions are direct:
+
+\begin{codeblock}
+cpi_boundary_review:
+    which program id is invoked?
+    is the program id fixed, allowlisted, or caller-supplied?
+    which accounts are passed to the callee?
+    which are writable?
+    which are signers?
+    does invoke_signed authorize a PDA?
+    are signer seeds domain-separated and target-specific?
+    can the callee mutate an account the caller later trusts?
+    does the caller reload or revalidate account data after CPI?
+    does the CPI share a compute budget that can be exhausted?
+\end{codeblock}
+
+Common failures:
+
+\begin{itemize}
+\item The caller accepts a caller-supplied program ID and invokes a malicious program.
+\item The caller passes an over-privileged writable account to a callee.
+\item The caller signs for a PDA with seeds that are too broad or not tied to the intended market, mint, or vault.
+\item The caller validates an account before CPI, then uses stale deserialized data after the callee changes it.
+\item The caller assumes no reentrancy-like behavior because Solana does not mirror EVM call semantics, while still exposing shared writable state or privileged accounts.
+\end{itemize}
+
+The right language is not "Solana reentrancy." The right language is "CPI boundary with privilege propagation and stale account assumptions." That gives engineers a concrete fix: pin program IDs, narrow account privileges, validate semantic relationships, domain-separate PDA seeds, and reload or revalidate after CPI.
+
+\subsection{CosmWasm Submessages, Reply IDs, and Pending State}
+
+CosmWasm contracts follow an actor model: contracts communicate by messages rather than directly mutating each other's storage.\footnote{\href{https://book.cosmwasm.com/actor-model/contract-as-actor.html}{CosmWasm Book, ``Contract as an actor''}.} That reduces some direct shared-state risks. It does not remove external control flow. It changes its shape.
+
+A CosmWasm contract can emit messages and submessages. A submessage can request a reply on success, error, or always, and the reply carries an ID and result.\footnote{\href{https://docs.rs/cosmwasm-std/latest/cosmwasm_std/struct.SubMsg.html}{\texttt{cosmwasm\_std} documentation, ``SubMsg''}.} The CosmWasm Book shows reply handling through the contract's \texttt{reply} entry point, where the reply ID identifies the response.\footnote{\href{https://book.cosmwasm.com/actor-model/contract-as-actor.html\#reply-handling}{CosmWasm Book, ``Reply handling''}.}
+
+The risk is usually not that a callee directly reenters the same storage frame. The risk is pending-state confusion:
+
+\begin{codeblock}
+execute_withdraw(amount):
+    pending[id] = {
+        user,
+        amount,
+        recipient,
+        expected_denom
+    }
+    emit SubMsg(bank_send, id, reply_on_success)
+
+reply(id, result):
+    pending = pending[id]
+    if result is success:
+        finalize withdrawal for pending.user
+    delete pending[id]
+\end{codeblock}
+
+That shape can fail several ways:
+
+\begin{itemize}
+\item The contract reuses reply IDs.
+\item Pending state is not bound to the user, asset, recipient, amount, or expected message.
+\item A failure reply clears state that should remain recoverable.
+\item A success reply is treated as proof of an application-level effect it does not prove.
+\item Migration or admin action changes the meaning of pending state before the reply arrives.
+\end{itemize}
+
+The review habit is to write the pending-operation record before reading the code:
+
+\begin{codeblock}
+pending_operation:
+    id
+    initiator
+    expected message type
+    target contract or module
+    asset or denom
+    amount
+    recipient
+    timeout or expiry
+    success behavior
+    failure behavior
+    cancellation or recovery path
+\end{codeblock}
+
+If the code stores only \texttt{id} and \texttt{amount}, the reviewer should ask what stops the reply from finalizing the wrong operation.
+
+\subsection{Transaction Composition in Move and Sui}
+
+Move-family systems reduce some risks through resources, abilities, module boundaries, and object ownership. They do not remove composition risk. Composition changes who can assemble calls, which objects or capabilities are passed, and what intermediate results later commands use.
+
+Sui documentation describes programmable transaction blocks as groups of commands that complete a transaction; PTBs can call multiple Move functions and manage objects and coins in a single transaction without publishing a new package.\footnote{\href{https://docs.sui.io/develop/transactions/ptbs/prog-txn-blocks}{Sui documentation, ``Programmable Transaction Blocks''}.} That means a user can compose a sequence of operations across packages and objects. A module that assumes it is called only in a simple one-step user flow may be wrong.
+
+Review questions for Move and Sui control flow:
+
+\begin{codeblock}
+move_sui_boundary_review:
+    which objects, references, or capabilities are passed?
+    are they owned, shared, immutable, or wrapped?
+    can another command use an output before the transaction ends?
+    does a function expose a capability or object in a broader scope?
+    does the module rely on a caller sequence it does not enforce?
+    are shared objects read or mutated by other commands in the same transaction?
+\end{codeblock}
+
+The mistake is to say, "Move prevents reentrancy, so external control flow is solved." Move prevents some classes of invalid asset manipulation. It does not prove that a module's public APIs cannot be composed into an unintended sequence, that a capability is scoped correctly, or that a shared object cannot be used in a harmful transaction composition.
+
+\section{Defensive Patterns and Their Limits}
+
+Defenses should match the boundary. A pattern that solves one external-control-flow shape may be irrelevant or harmful for another.
+
+\subsection{Checks-Effects-Interactions, Pull Payments, and Locks}
+
+The checks-effects-interactions pattern is still important. Solidity's documentation presents it as a pattern where checks happen first, state effects are written before external interactions, and only then are external calls made.\footnote{\href{https://docs.soliditylang.org/en/latest/security-considerations.html\#use-the-checks-effects-interactions-pattern}{Solidity documentation, ``Use the Checks-Effects-Interactions Pattern''}.}
+
+But it should not be treated as a spell. CEI helps when the invariant can be restored before the external call. It is weaker when:
+
+\begin{itemize}
+\item another function reads a related invariant not finalized by the local effects;
+\item the protocol spans several contracts and not all effects are local;
+\item the external call is needed to know the correct effect;
+\item a read-only path returns temporarily manipulated data;
+\item a reply or asynchronous message completes later; or
+\item the issue is not reentry, but stale account data, wrong program ID, or reply confusion.
+\end{itemize}
+
+Pull payments avoid pushing value into an untrusted receiver during another transition. OpenZeppelin's v4 security documentation describes \texttt{PullPayment} as a pattern where the paying contract records credit and the receiver withdraws later, and lists \texttt{ReentrancyGuard} as a modifier preventing certain nested calls.\footnote{\href{https://docs.openzeppelin.com/contracts/4.x/api/security}{OpenZeppelin Contracts v4 documentation, ``Security''}.} Pull payments are useful because they separate accounting from receiver execution. They do not remove the need to secure the withdrawal path itself.
+
+Locks and reentrancy guards are useful when applied to the right scope. A single global lock can be too broad, blocking legitimate flows and creating availability problems. A function-level lock can be too narrow, missing cross-function or cross-contract paths. A per-resource lock can be better when the invariant is local to one vault, market, position, or asset.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.16}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.20\textwidth}>{\RaggedRight\arraybackslash}p{0.28\textwidth}X@{}}
+\toprule
+Defense & Protects against & Limit \\
+\midrule
+Checks-effects-interactions & Reentry into state that can be finalized before the external call & Does not solve cross-contract state, stale reads, async replies, or wrong target trust. \\
+Pull payment & Receiver execution during another transition & Withdrawal path still needs guard, accounting, and liveness review. \\
+Global lock & Nested calls into the guarded contract & May be too broad, can block legitimate composition, and may miss related contracts. \\
+Per-resource lock & Reentry against one market, asset, account, or position & Requires correct resource identity and all related entry points using the same lock. \\
+State machine & Premature or repeated finalization & Requires complete states, forbidden transitions, and recovery paths. \\
+\bottomrule
+\end{tabularx}
+\caption{External-control-flow defenses must match the invariant boundary they protect.}
+\end{table}
+
+\subsection{Program ID Pinning, Account Reloads, and Reply Correlation}
+
+Non-EVM boundaries need non-EVM defenses.
+
+For Solana CPI:
+
+\begin{codeblock}
+solana_controls:
+    pin or allowlist callee program ids
+    pass only accounts the callee needs
+    avoid unnecessary writable privileges
+    verify signer and PDA seeds
+    verify account owner, type, mint, and relationship
+    reload or revalidate account data after CPI
+    check token extension behavior before support
+    bound compute use and failure behavior
+\end{codeblock}
+
+For CosmWasm messages and replies:
+
+\begin{codeblock}
+cosmwasm_controls:
+    allocate unique reply ids
+    store pending operation records
+    bind id to sender, asset, amount, target, and expected message
+    handle success and failure deliberately
+    preserve recoverability on partial failure
+    version pending state across migration
+    delete or finalize pending state exactly once
+\end{codeblock}
+
+For Move and Sui composition:
+
+\begin{codeblock}
+move_sui_controls:
+    keep capabilities narrowly scoped
+    avoid returning privileged objects unless intended
+    bind capability to target object or market
+    enforce sequence assumptions inside module state
+    validate shared-object state at the point of use
+    test multi-command transaction compositions
+\end{codeblock}
+
+The defense mindset is the same across models: remove ambient trust from the boundary. Do not trust a target because it was supplied. Do not trust a callback because it arrived. Do not trust a reply because the ID exists. Do not trust an account because it was writable. Do not trust a view result because it was read-only. Prove the relationship the transition needs.
+
+\section{Worked Example: Withdraw Before State Finalization}
+
+Consider a vault with deposits, shares, and withdrawals. The intended invariant is:
+
+\begin{codeblock}
+vault invariant:
+    user shares represent a claim on vault assets
+    a withdrawal burns or reserves shares before assets leave custody
+    the same shares cannot authorize two withdrawals
+    total shares and tracked assets remain consistent
+\end{codeblock}
+
+The unsafe EVM-style withdrawal is familiar:
+
+\begin{codeblock}
+withdraw(shares):
+    assets = convertToAssets(shares)
+    token.transfer(msg.sender, assets)      # external control
+    shareBalance[msg.sender] -= shares
+    totalShares -= shares
+\end{codeblock}
+
+The exposed state is clear. While the token transfer or receiver hook runs, the user's shares still exist. If the receiver can call back into \texttt{withdraw}, or into another function that uses the same share-balance state, the same shares may support a second action.
+
+A corrected shape is:
+
+\begin{codeblock}
+withdraw(shares):
+    require(shares > 0)
+    assets = convertToAssets(shares)
+    shareBalance[msg.sender] -= shares
+    totalShares -= shares
+    token.transfer(msg.sender, assets)
+    require(post-transfer custody and accounting still match)
+\end{codeblock}
+
+That is better, but not universally complete. If the token is hook-enabled, the hook can still call other functions that observe global vault state. If \texttt{convertToAssets} uses a price read from another protocol that can be manipulated during the same transaction, the burn-before-transfer fix does not solve the pricing boundary. If the token transfer can return false or transfer less than expected, Chapter~22 still matters. If the vault is upgradeable, Chapter~25 still matters.
+
+For Solana, the same economic bug has a different shape:
+
+\begin{codeblock}
+withdraw accounts:
+    user signer
+    vault_state writable
+    user_position writable
+    vault_token_account writable
+    user_token_account writable
+    vault_authority_pda signer via invoke_signed
+    token_program
+
+unsafe sequence:
+    read user_position.shares
+    CPI to token_program transfer from vault to user
+    later decrement user_position.shares
+    continue using pre-CPI vault_state copy
+\end{codeblock}
+
+The issue is not fallback reentry. The CPI passes privileges to the Token Program over writable accounts and may interact with token-extension behavior. The program must burn or reserve shares before the CPI, pin the token program, verify the mint and token-account authority, use correct PDA seeds, and reload or revalidate account state after CPI if any shared account could have changed.
+
+For CosmWasm, an asynchronous variant looks like this:
+
+\begin{codeblock}
+execute_withdraw(shares):
+    assets = convert_to_assets(shares)
+    pending[id] = { user, shares, assets, denom, recipient }
+    emit SubMsg(bank_send(recipient, assets), id, reply_on_success)
+
+reply(id, success):
+    pending = pending[id]
+    if success:
+        burn pending.shares
+    delete pending[id]
+\end{codeblock}
+
+This reverses the EVM correction in a different way. The assets are sent before the shares are burned. If the send succeeds but reply handling fails, or if pending state is confused, the vault may lose assets without finalizing the share burn. A safer shape reserves or burns the shares before emission, records a recoverable pending state, and defines exactly what happens on success, failure, timeout, and migration.
+
+\begin{codeblock}
+safer_async_shape:
+    reserve shares and prevent reuse
+    store pending operation with user, shares, amount, denom, recipient
+    emit submessage with unique reply id
+    on success: finalize reserved burn and clear pending
+    on failure: release reservation or enter recoverable failure state
+    on migration: preserve pending schema and recovery path
+\end{codeblock}
+
+The finding should name the shared invariant:
+
+\begin{codeblock}
+finding:
+    withdrawal crosses an external boundary before the share claim is
+    consumed or reserved.
+
+invariant violated:
+    the same share balance can authorize more than one asset movement,
+    or assets can leave custody without a corresponding share-state update.
+
+evidence:
+    transfer, CPI, hook, or submessage occurs before share burn/reservation;
+    callback, account mutation, reply confusion, or failure path can occur
+    while the old share claim remains usable.
+
+recommendation:
+    finalize or reserve the claim before the external boundary;
+    revalidate post-boundary state;
+    isolate hook-bearing assets or unsupported callbacks;
+    bind replies and pending operations explicitly;
+    test the exploit trace under the runtime's actual control-flow rules.
+\end{codeblock}
+
+The same invariant failed in three execution models. The exploit mechanics did not. That is the chapter's main lesson.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why is external control flow better defined as an invariant boundary than as an external-call label?
+\item What information belongs in an external-control-flow map?
+\item Why is reentrancy not limited to a function calling itself?
+\item How can a read-only path participate in a harmful reentrancy pattern?
+\item Why do token receiver hooks and transfer hooks belong in external-control-flow review rather than only token review?
+\item What makes Solana CPI risk different from EVM reentrancy?
+\item Why must CosmWasm reply IDs be bound to pending operation state?
+\item What are the limits of checks-effects-interactions and generic reentrancy guards?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item Choose one function, instruction, or execute message that crosses an external boundary. Build an external-control-flow map that names what leaves, what can change, what returns, and which invariant is exposed.
+
+\item Analyze an EVM withdrawal, swap, claim, or liquidation path that performs an external call. Classify any reentrancy risk as single-function, cross-function, cross-contract, read-only, or not exploitable. Support the classification with an invariant and a trace.
+
+\item Review a Solana CPI path involving a token transfer. Identify the callee program ID, writable accounts, signer accounts, PDA seeds, token mint, token-account authority, possible token extensions, and the post-CPI account data that must be reloaded or revalidated.
+
+\item Review a CosmWasm submessage and reply design. Write the pending-operation record it should store, then identify what can go wrong if the reply ID is reused, the result is misinterpreted, or failure clears state without a recovery path.
+\end{enumerate}

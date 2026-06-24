@@ -1,0 +1,401 @@
+\chapter{Cryptographic Commitments and Proofs}
+
+\section{Purpose}
+
+\begin{principlebox}
+A proof does not prove truth in the abstract. It proves that a specific claim is consistent with a specific commitment root under specific verification rules and assumptions.
+\end{principlebox}
+
+Chapter 1 gave us the state-machine frame. Chapter 2 identified assets and authority. Chapter 3 explained transactions as state-transition requests. Chapter 4 separated signature verification from authorization. Chapter 5 studies the other compact object that appears everywhere in blockchain security: the commitment.
+
+A block hash commits to a block. A transaction hash commits to transaction bytes. A Merkle root commits to many leaves. A state root commits to a state data structure. A receipt root commits to execution receipts and logs. A rollup output root commits to a claimed rollup state. A data-availability commitment may support a claim that data can be reconstructed. A zero-knowledge verifier may check a proof against public inputs that are themselves commitments.
+
+These mechanisms are powerful because they let a verifier reason about a large body of data through a small root and a small proof. They are dangerous when the proof is treated as magic. A Merkle proof does not prove that a bridge deposit is safe to mint. A storage proof does not prove that a value is current. A transaction hash does not prove that a transaction succeeded. A receipt proof does not prove that the emitting contract was the intended one. A valid proof against an attacker-chosen root proves almost nothing useful.
+
+The reviewer should translate every proof into this sentence:
+
+\begin{codeblock}
+Given this root,
+under these verification rules,
+this proof supports this claim,
+for this domain and time,
+subject to these assumptions.
+\end{codeblock}
+
+If any part of that sentence is unknown, the proof system is not yet a security system. It is an expensive way to create misplaced confidence.
+
+\section{Commitments as Claims About Data}
+
+\subsection{The Basic Model}
+
+A commitment is a compact value derived from data. An opening or proof is evidence that a claim is consistent with the committed data. At the level needed for protocol review, the model is:
+
+\begin{codeblock}
+commit(data) -> root
+prove(claim, data) -> proof
+verify(root, claim, proof, rules) -> true or false
+\end{codeblock}
+
+The word \emph{rules} is essential. A Merkle proof under one tree construction is not automatically a proof under another. A storage proof under Ethereum's execution-layer trie rules is not an SSZ proof. A hash commitment over packed bytes is not the same as a commitment over typed, length-delimited fields. A proof verifier must reproduce the producer's commitment rules exactly.
+
+Commitment systems are usually discussed through two security properties. Binding means that after committing, the committer cannot open the commitment to a different value. Hiding means that before opening, the verifier cannot learn the committed value. Blockchain systems often need binding more than hiding. A block hash, transaction root, or state root is usually not meant to keep data secret. It is meant to make later substitution infeasible.
+
+Hiding still matters in commit-reveal auctions, sealed votes, randomness beacons, and private order schemes. But a hash does not hide a small value by itself. If a commitment is \texttt{H("yes")} or \texttt{H(42)}, an attacker can hash likely values and compare. Hiding requires unpredictable secret material and a domain-bound commitment:
+
+\begin{codeblock}
+commitment = H(
+    "sealed-bid-v1" ||
+    chain_id ||
+    auction_contract ||
+    bidder ||
+    bid_amount ||
+    random_256_bit_salt
+)
+\end{codeblock}
+
+The salt is not decoration. If the committed value has low entropy, the salt supplies the search space that prevents brute force.
+
+\subsection{Commitments Are Not Authority}
+
+Hashes and roots are often used as identifiers: transaction hash, block hash, code hash, content hash, proposal hash, storage root, state root. An identifier points to evidence. It does not itself grant authority, prove success, prove freshness, or prove finality.
+
+A transaction hash identifies transaction bytes. To prove that a transfer happened, a verifier needs inclusion, canonical chain context, execution result, state or receipt evidence, and a settlement threshold appropriate to the relying system. A code hash identifies bytes. It does not prove that the code is safe, initialized correctly, controlled by the expected admin, or still deployed at the expected address. A root commits to data. It does not explain what the relying protocol is allowed to do with that data.
+
+This is the conceptual bridge from Chapter 4: signatures and commitments are both evidence. Neither replaces the protocol's authorization and state-transition logic.
+
+\section{Hashes and Encoded Meaning}
+
+\subsection{Hash Properties in Review Terms}
+
+A cryptographic hash function maps input bytes to a fixed-length digest. NIST FIPS 180-4 specifies the SHA-1 and SHA-2 family of secure hash algorithms.\footnote{\href{https://csrc.nist.gov/pubs/fips/180-4/upd1/final}{NIST FIPS 180-4, ``Secure Hash Standard (SHS)''}.} The reviewer does not need to memorize every compression function detail. The reviewer does need to know which property a protocol is relying on.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.34\textwidth}X@{}}
+\toprule
+Property & Review meaning & Failure mode \\
+\midrule
+Preimage resistance & Given a digest, finding an input that hashes to it should be infeasible & Hashlocks, address derivation, or commitments can be guessed or opened by attackers \\
+Second-preimage resistance & Given one committed input, finding a different input with the same digest should be infeasible & A committed transaction, artifact, leaf, or block body can be replaced \\
+Collision resistance & Finding any two different inputs with the same digest should be infeasible & Attacker prepares two meanings for one digest and reveals whichever is useful \\
+Deterministic verification & Anyone can recompute the digest from the same bytes & Verifiers disagree because input bytes, encoding, or rules differ \\
+\bottomrule
+\end{tabularx}
+\caption{Hash properties matter only relative to the protocol's use of the digest.}
+\end{table}
+
+The birthday bound means collision search is generically easier than preimage search: an n-bit digest gives roughly \(2^n\) preimage work and roughly \(2^{n/2}\) collision work in the generic model. That does not mean collisions are practical for modern 256-bit hashes. It means a protocol designer must know which property is being invoked.
+
+A hash is not encryption. It does not authenticate who created the input. It does not prove that the input is safe. It does not prove that the input is current. It proves only that these bytes hash to this digest, assuming the hash function and encoding are correct.
+
+\subsection{Canonical Encoding and Domain Separation}
+
+Hash functions process bytes. They do not know the data model. If two different meanings serialize to the same bytes, the hash binds the bytes but not the intended meaning.
+
+\begin{codeblock}
+H("ab" || "c") == H("a" || "bc")
+
+Both sides hash the bytes:
+    "abc"
+\end{codeblock}
+
+The fix is not to use a stronger hash. The fix is to commit to unambiguous bytes: type tags, length prefixes, fixed-width fields where appropriate, version tags, canonical integer representation, explicit list and map ordering, and domain separators.
+
+Domain separation prevents a commitment meant for one context from being valid in another. A bridge message should bind source chain, source bridge, destination chain, destination bridge, token, recipient, amount, nonce, message type, and version. A Merkle tree should distinguish leaves from internal nodes when the construction requires it. A typed signature should bind chain, verifying contract, action type, signer, nonce, and deadline. A proof should bind the root to the chain, fork, contract, epoch, or version that gives it meaning.
+
+The safer commitment shape is:
+
+\begin{codeblock}
+message_hash = H(
+    "bridge-message-v1" ||
+    source_chain_id ||
+    source_bridge_address ||
+    destination_chain_id ||
+    destination_bridge_address ||
+    token_address ||
+    recipient ||
+    amount ||
+    nonce
+)
+\end{codeblock}
+
+The primitive supplies computational hardness. Encoding and domain separation supply meaning.
+
+\section{Merkle Commitments and Inclusion Proofs}
+
+\subsection{One Root, Many Leaves}
+
+A Merkle tree hashes leaves into parent nodes until one root remains. The root commits to the leaves, their values, and, depending on construction, their order or position. The proof for one leaf contains enough sibling data to recompute the root without transmitting the whole tree. Certificate Transparency uses Merkle hash trees for inclusion and consistency proofs.\footnote{\href{https://datatracker.ietf.org/doc/html/rfc6962}{RFC 6962, ``Certificate Transparency''}.} Bitcoin uses Merkle trees so lightweight clients can verify transaction inclusion in a block using Merkle branches and block headers.\footnote{\href{https://bitcoin.org/bitcoin.pdf}{Satoshi Nakamoto, ``Bitcoin: A Peer-to-Peer Electronic Cash System''}.}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=9mm and 8mm,
+  merkle node/.style={security node, text width=19mm, minimum height=7mm},
+  proof node/.style={security node, draw=securitygreen, text width=19mm, minimum height=7mm}
+]
+\node[merkle node] (d0) {data0};
+\node[merkle node, right=of d0] (d1) {data1};
+\node[proof node, right=of d1] (d2) {data2};
+\node[proof node, right=of d2] (d3) {data3};
+
+\node[merkle node, above=of d0, xshift=13mm] (p0) {P0};
+\node[proof node, above=of d2, xshift=13mm] (p1) {P1};
+\node[proof node, above=of p0, xshift=39mm] (root) {root};
+
+\draw[thick] (d0) -- (p0);
+\draw[thick] (d1) -- (p0);
+\draw[thick] (d2) -- (p1);
+\draw[thick] (d3) -- (p1);
+\draw[thick] (p0) -- (root);
+\draw[thick] (p1) -- (root);
+\end{tikzpicture}
+\caption{A proof for data2 includes the leaf, sibling data3, sibling subtree P0, and position information.}
+\end{figure}
+
+For the highlighted leaf, the verifier does not need data0 or data1. It needs the sibling hash for data3, the sibling subtree P0, the position bits, and the root it is checking against.
+
+\begin{codeblock}
+L0 = H("leaf" || data0)
+L1 = H("leaf" || data1)
+L2 = H("leaf" || data2)
+L3 = H("leaf" || data3)
+
+P0 = H("node" || L0 || L1)
+P1 = H("node" || L2 || L3)
+
+root = H("node" || P0 || P1)
+\end{codeblock}
+
+\subsection{Verification Requires Shape and Position}
+
+A Merkle proof is not just a bag of sibling hashes. It is a path through a specific tree construction.
+
+\begin{codeblock}
+verify_merkle(root, leaf_data, siblings, positions):
+    h = H("leaf" || canonical_encode(leaf_data))
+
+    for each sibling, position in path:
+        if position == "left":
+            h = H("node" || sibling || h)
+        else:
+            h = H("node" || h || sibling)
+
+    return h == root
+\end{codeblock}
+
+If position information is missing, the verifier may accept reordered paths. If leaf and internal nodes share the same encoding, a value may be interpreted as a node. If duplicate leaves are allowed without index binding, a proof of value may not prove the intended occurrence. If a verifier sorts pairs while the producer used ordered pairs, the verifier is checking a different tree.
+
+An inclusion proof proves that a leaf is included in the committed data structure represented by a root. It does not prove that the root is canonical, that the root is final, that the leaf is semantically valid, that the transaction succeeded, that the event came from the correct contract, or that the same claim has not already been consumed. Those are protocol checks outside the Merkle path.
+
+\section{Blockchain Roots and Proof Types}
+
+Blockchains place commitments at many layers. Ethereum execution blocks include roots such as \texttt{stateRoot}, \texttt{transactionsRoot}, and \texttt{receiptsRoot}.\footnote{\href{https://ethereum.org/developers/docs/blocks/}{ethereum.org, ``Blocks''}.} Ethereum's execution-layer state uses a modified Merkle Patricia Trie.\footnote{\href{https://ethereum.org/developers/docs/data-structures-and-encoding/patricia-merkle-trie/}{ethereum.org, ``Merkle Patricia Trie''}.} The consensus layer uses Simple Serialize and SSZ merkleization for consensus objects.\footnote{\href{https://ethereum.github.io/consensus-specs/ssz/simple-serialize/}{Ethereum Consensus Specs, ``SimpleSerialize (SSZ)''}.}
+
+Those details matter when reviewing a concrete system, but Chapter 5's first-principles lesson is more portable: a proof is tied to its data structure and root source.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.23\textwidth}>{\RaggedRight\arraybackslash}p{0.36\textwidth}X@{}}
+\toprule
+Proof type & What it can prove & What remains outside the proof \\
+\midrule
+Inclusion proof & A leaf, item, transaction, receipt, or value appears under a root & Whether the root is canonical, final, fresh, and from the expected domain \\
+Absence proof & A key or item is absent under a structure that supports nonmembership & Whether absence at that root is still relevant when used \\
+Consistency proof & One committed tree is an append-only extension of another & Whether the log or chain policy is acceptable \\
+State or storage proof & Account or storage data is committed by a state root & Meaning of the slot, root finality, currentness, and action safety \\
+Receipt or event proof & A receipt or log is committed by a receipt root & Emitting contract, event semantics, replay protection, and settlement \\
+Validity or ZK proof & A statement is satisfied under a verifier and public inputs & Correct statement, circuit, setup assumptions, public-input meaning, and integration logic \\
+\bottomrule
+\end{tabularx}
+\caption{Different proof types answer different questions and leave different assumptions outside the proof.}
+\end{table}
+
+EIP-1186 specifies \texttt{eth\_getProof}, an RPC method for retrieving account and storage proofs against Ethereum state.\footnote{\href{https://eips.ethereum.org/EIPS/eip-1186}{EIP-1186, ``RPC-Method to get Merkle Proofs - eth\_getProof''}.} A storage proof does not simply say ``slot equals value.'' It says that, under a particular account proof and storage proof, a slot had a value under a specific state root. The verifier still needs to know which block header supplied the state root, whether that header is trusted, what chain it belongs to, what the slot means, and whether the proof is fresh enough for the action being taken.
+
+\begin{codeblock}
+storage proof inputs:
+    trusted block header
+    stateRoot from header
+    account address
+    storage slot key
+    claimed storage value
+    account proof
+    storage proof
+
+verification:
+    verify account proof under stateRoot
+    extract account storageRoot
+    verify storage slot proof under storageRoot
+    interpret the slot under the expected contract schema
+\end{codeblock}
+
+Receipt and event proofs have a similar structure. A receipt proof may show that a receipt was committed by \texttt{receiptsRoot}; the verifier must still check the emitting contract, event signature, event fields, source chain, source block finality, destination domain, and consumed message state. Events are evidence. State and verified transition rules decide authority.
+
+\section{Verifying Proofs Safely}
+
+\subsection{Root, Proof, Claim, Action}
+
+When a smart contract, bridge, rollup, wallet, or backend verifies a proof and acts on it, proof verification becomes part of the state machine. The verifier is not a passive observer. It may mint assets, release withdrawals, accept governance votes, update oracle state, or settle a cross-domain message.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=9mm and 8mm,
+  compact node/.style={security node, text width=27mm, minimum height=8mm}
+]
+\node[compact node] (root) {Root accepted};
+\node[compact node, right=of root] (proof) {Proof verifies};
+\node[compact node, right=of proof] (claim) {Claim interpreted};
+\node[compact node, below=of claim] (checks) {Freshness and replay checks};
+\node[compact node, left=of checks] (action) {State transition};
+\node[compact node, left=of action] (record) {Consumption recorded};
+
+\draw[security arrow] (root) -- (proof);
+\draw[security arrow] (proof) -- (claim);
+\draw[security arrow] (claim) -- (checks);
+\draw[security arrow] (checks) -- (action);
+\draw[security arrow] (action) -- (record);
+\end{tikzpicture}
+\caption{Proof verification gates a later state transition, so root trust and post-proof checks are part of security.}
+\end{figure}
+
+The minimum verifier shape is:
+
+\begin{codeblock}
+verify_and_apply(root, proof, claim):
+    require(root is from expected domain)
+    require(root is canonical and final enough)
+    require(root is fresh enough for this action)
+    require(verify(root, claim, proof, rules))
+    require(claim has expected semantic meaning)
+    require(claim.id has not been consumed)
+    mark claim.id as consumed
+    apply the authorized transition
+\end{codeblock}
+
+This structure is intentionally broader than cryptography. A proof against an untrusted root is useless. A proof against a stale root may be dangerous. A proof from the wrong chain or contract can be a replay. A proof that is valid but interpreted as the wrong action is a semantic bug. A proof that is too expensive to verify can become a liveness failure.
+
+\subsection{Trust-Minimized Does Not Mean Trust-Free}
+
+A proof can reduce trust in one party while leaving other assumptions intact. A storage proof can remove the need to trust an RPC provider for a storage value. The relying system still assumes correct header acceptance, source-chain finality, trie verification, slot interpretation, freshness, and destination-chain replay protection.
+
+A light client can reduce reliance on a full node. It still trusts whatever consensus evidence the light-client protocol uses: proof of work, validator signatures, a sync committee, fraud proofs, validity proofs, or another mechanism. A ZK proof can reduce the need to re-execute computation. It still trusts the statement, circuit, verifier, public inputs, and any setup assumptions.
+
+Precise phrasing matters:
+
+\begin{codeblock}
+This system verifies storage membership against finalized Ethereum headers,
+so it does not trust an RPC provider for the storage value.
+It still assumes correct Ethereum finality, header verification,
+MPT verification, slot interpretation, freshness, and replay protection.
+\end{codeblock}
+
+That is the standard the rest of the book should use. Do not say ``trustless'' when the real claim is narrower.
+
+\section{Failure Modes}
+
+Most commitment and proof bugs are not failures of SHA-256 or Keccak. They are failures at the boundary between bytes, roots, domains, state, and actions.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.23\textwidth}>{\RaggedRight\arraybackslash}p{0.37\textwidth}>{\RaggedRight\arraybackslash}X@{}}
+\toprule
+Failure & Mistake & Result \\
+\midrule
+Wrong root & Proof verifies against attacker-supplied, stale, or unaccepted root & False claim accepted \\
+Wrong domain & Proof from one chain, fork, contract, or version is accepted in another & Cross-domain replay \\
+Wrong contract & Event data is checked without checking the emitter & Fake deposits, oracle reports, or messages \\
+Wrong encoding & Verifier hashes different bytes from the producer & False rejection or false acceptance \\
+Missing position or key & Value is proved without index, key, or path semantics & Mislocated or duplicate claim accepted \\
+Missing finality & Proof from a reorgable block is accepted & Unbacked mint, release, or settlement \\
+Missing replay guard & Same proof or message is accepted twice & Double mint, double withdrawal, duplicate vote \\
+Malformed proof parser & Invalid nodes, noncanonical encodings, or oversized paths are accepted & Proof forgery or denial of service \\
+Valid proof, wrong action & Proof establishes one fact, protocol performs a stronger action & Correct cryptography causes unsafe transition \\
+\bottomrule
+\end{tabularx}
+\caption{Proof failures usually appear in root choice, interpretation, freshness, or action logic.}
+\end{table}
+
+The last row is the one reviewers should stare at. A proof of event inclusion is not proof that minting is safe. A proof of storage membership is not proof that the value is current. A proof of a vote commitment is not proof that the voter was eligible unless eligibility is also bound or checked. A proof answers a claim. The protocol decides whether that claim is enough to change state.
+
+Proof verification can also be a denial-of-service surface. Attackers may submit large proofs, malformed encodings, deep trie paths, duplicate nodes, stale-root proofs, or proofs that fail late after expensive work. On-chain verifiers need bounded proof sizes, canonical parsing, early rejection, maximum path lengths, careful memory use, and failure behavior that does not let attackers cheaply block honest users.
+
+\section{Worked Example: Cross-Chain Deposit Claim}
+
+Suppose a destination-chain bridge wants to mint wrapped tokens after a user deposits assets into a source-chain bridge. A naive design lets a trusted relayer submit a user, amount, and source transaction hash, then mints if the relayer is approved. That is not proof-based security. It trusts the relayer to report the truth.
+
+A proof-based design changes the relayer's role. The relayer supplies data, not truth:
+
+\begin{codeblock}
+relayer submits:
+    source block header
+    receipt proof
+    transaction or receipt index
+    log index
+    deposit event fields
+\end{codeblock}
+
+The destination bridge verifies the claim before minting:
+
+\begin{codeblock}
+verify bridge deposit:
+    accept source header only if final enough
+    read receiptsRoot from the accepted header
+    verify receipt proof against receiptsRoot
+    verify log index inside the receipt
+    require emitter == expected source bridge
+    require event signature == Deposit(...)
+    require event includes destination chain and destination bridge
+    require event includes token, recipient, amount, and nonce
+    require token mapping is valid
+    require nonce is unconsumed for source chain and source bridge
+    mark nonce consumed
+    mint wrapped asset to recipient
+\end{codeblock}
+
+The improved design removes trust in the relayer for the deposit data. It does not remove every assumption. The bridge still trusts source-chain finality, the source bridge contract, the header-acceptance mechanism, receipt-proof verification, event semantics, token mapping, destination-chain execution, and replay protection.
+
+Now consider common bugs. If the event omits the destination chain, the same source event may be replayed elsewhere. If the verifier checks event topics but not the emitting contract, a fake contract can emit the same event. If the source block is not final enough, a reorg can remove the deposit after minting. If the nonce is global rather than scoped by source chain and source bridge, messages can collide or replay across lanes. If the source bridge is upgradeable without delay, a valid proof may prove an event emitted by maliciously upgraded logic. If proof verification is too expensive during congestion, honest withdrawals may be stuck even though the proof system is cryptographically sound.
+
+The security conclusion is not ``the receipt proof verifies.'' The conclusion is more precise:
+
+\begin{codeblock}
+This bridge mints only when a finalized source header commits
+to a receipt from the expected source bridge,
+containing a deposit event for this destination,
+whose scoped nonce has not been consumed.
+\end{codeblock}
+
+That statement names the root, proof, claim, domain, finality assumption, replay rule, and action. That is the level of precision proof-based systems require.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item What does a cryptographic proof prove, and why is that different from proving truth in the abstract?
+\item Explain binding and hiding. Which one matters most for ordinary block, transaction, and state roots?
+\item Why does a hash commitment to a low-entropy value fail to hide the value?
+\item What is the difference between preimage resistance, second-preimage resistance, and collision resistance in review terms?
+\item Why are canonical encoding and domain separation part of commitment security?
+\item What does a Merkle inclusion proof prove, and what does it not prove?
+\item Why is a valid proof against an untrusted or stale root dangerous?
+\item Why does proof verification become part of the state machine when it gates minting, withdrawal, voting, or settlement?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item A protocol commits to a bridge message as \texttt{H(recipient || amount || nonce)}. Rewrite the commitment so it binds source chain, source bridge, destination chain, destination bridge, token, recipient, amount, nonce, message type, and version. Explain why each field matters.
+
+\item Write pseudocode for verifying a four-leaf Merkle proof. Your verifier must use leaf/internal-node domain tags, sibling hashes, and position bits. Then explain what breaks if position bits are omitted.
+
+\item A protocol receives a proof that an Ethereum storage slot had value \texttt{100} at block \texttt{B}. Identify the root being used, the account proof, the storage proof, the block-header trust assumption, the freshness assumption, and one action that would be unsafe if the proof is stale.
+
+\item A destination bridge mints wrapped tokens from a source-chain receipt proof. Produce a review checklist covering root source, finality, proof structure, emitting contract, event fields, destination domain, token mapping, replay protection, and the mint action after verification.
+\end{enumerate}

@@ -1,0 +1,334 @@
+\chapter{Assets, Authority, and Trust Boundaries}
+
+\section{Purpose}
+
+\begin{principlebox}
+An asset is a claim over state. Authority is the power to change that claim. A trust boundary begins wherever the system relies on something it cannot verify locally.
+\end{principlebox}
+
+Chapter 1 treated blockchains as adversarial state machines. Chapter 2 asks which parts of the machine matter economically, who can move them, who can change the rules around them, and where the system stops verifying and starts trusting.
+
+Most weak security reviews fail here. They say that users own funds, that the DAO controls the treasury, that the token is backed, that the oracle is trusted, or that the bridge verifies messages. Those statements are too soft to review. They hide the actual state, transitions, authorities, and assumptions.
+
+For this book, a claim about ownership or security is not meaningful until it can identify the asset at stake, where it is represented in state, which transition can change it, and which authority can cause that transition.
+
+That discipline prevents a common error in blockchain security: treating economic language as if it were a security model. A user may own vault shares but depend on an upgrade key, a withdrawal queue, an oracle reporter, a strategist, and a token issuer. A wrapped token may look like a normal balance while depending on source-chain finality, bridge verification, relayer liveness, and destination-chain replay protection. A governance token may be both a financial asset and a key to rewriting the protocol.
+
+The purpose of this chapter is to make those relationships explicit.
+
+\section{Assets Are Claims Over State}
+
+\subsection{The Claim Is What Future Transitions Recognize}
+
+An on-chain asset is not a small object sitting inside an address. It is a claim recognized by a state-transition system. The claim matters because future transitions treat it as spendable, transferable, redeemable, slashable, vote-bearing, withdrawable, or otherwise effective.
+
+A Bitcoin coin is spendable because an unspent transaction output exists and a future transaction can satisfy its spending condition. A wallet balance is a view over such outputs, not the primary object itself. Bitcoin's double-spend problem is therefore not merely about signatures; it is about which spend becomes part of the accepted history.\footnote{Satoshi Nakamoto, \href{https://bitcoin.org/bitcoin.pdf}{``Bitcoin: A Peer-to-Peer Electronic Cash System''}.}
+
+ETH is spendable because Ethereum account state records a balance and the protocol accepts a valid transaction that debits it. ERC-20 balances are different: they are contract state, modified by that token contract's rules. The ERC-20 standard defines functions such as \texttt{balanceOf}, \texttt{transfer}, \texttt{transferFrom}, \texttt{approve}, and \texttt{allowance}, but it does not make every token economically or operationally identical.\footnote{Fabian Vogelsteller and Vitalik Buterin, \href{https://eips.ethereum.org/EIPS/eip-20}{``ERC-20: Token Standard''}.}
+
+The same pattern applies beyond tokens. A vault share is a claim on vault accounting. A bridge receipt is a claim that some source-domain event should be honored elsewhere. A governance vote is a claim over future execution. A withdrawal queue entry is a claim to be served later. A signature may be a claim that an action is authorized.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.23\textwidth}>{\RaggedRight\arraybackslash}p{0.33\textwidth}X@{}}
+\toprule
+Asset type & State representation & Review question \\
+\midrule
+UTXO & Unspent output plus spending condition & What condition must be satisfied, and has the output already been spent? \\
+Account balance & Protocol account state & Who can authorize a debit, and what replay protection applies? \\
+Contract token & Contract storage and transfer rules & Which functions can move, mint, burn, pause, or freeze balances? \\
+Vault share & Share balance plus vault accounting & What assets back the share, and can accounting be manipulated? \\
+Bridge claim & Message, proof, receipt, or wrapped balance & Which source-domain fact is trusted, and under what finality assumption? \\
+Governance power & Token balances, delegation, quorum, proposal state & Who can convert votes into executable calls? \\
+Off-chain claim & On-chain record tied to legal or custodial process & What can the chain enforce, and what remains outside it? \\
+\bottomrule
+\end{tabularx}
+\caption{Asset analysis starts with the state representation and the future transitions it enables.}
+\end{table}
+
+The table is not a taxonomy game. It is a guardrail against shallow review. If a reviewer cannot identify the state representation, the reviewer does not yet know what the asset is.
+
+\subsection{Control Surfaces Are Assets}
+
+Attackers often target control before targeting balances. A role, key, signer policy, upgrade path, or governance position may be economically equivalent to the assets it can affect.
+
+Examples include upgrade authority, mint authority, pause authority, blacklist authority, oracle update authority, bridge validator keys, relayer keys, sequencer control, timelock proposer roles, multisig signer sets, deployment keys, backend withdrawal signers, package-publishing accounts, and frontend domains.
+
+If a protocol holds \$10 million and a single key can upgrade the implementation to transfer those funds, that key is not a minor operational detail. It is a concentrated claim over the protocol's future state. Security analysis should treat it as an asset.
+
+\section{Authority Is Power Over Transitions}
+
+\subsection{Authority Is a Verb}
+
+Authority is not status. It is the ability to cause a transition the system will accept.
+
+The word ``owner'' is often less useful than the verbs behind it. Can this actor move assets? Mint claims? Burn claims? Freeze accounts? Pause withdrawals? Upgrade code? Replace an oracle? Change a validator set? Censor exits? Observe private order flow? Recover assets through an override?
+
+This is the practical rule:
+
+\begin{codeblock}
+Replace nouns with verbs.
+
+"Owner" becomes: can call transferOwnership, set fees, pause, upgrade, or withdraw?
+"Guardian" becomes: can pause deposits only, or can also pause exits?
+"DAO" becomes: can pass proposals that call arbitrary targets after a delay?
+"Oracle" becomes: can update a price that changes borrowing, liquidation, or redemption?
+\end{codeblock}
+
+Nouns make authority sound stable. Verbs reveal power.
+
+\subsection{Explicit, Delegated, and Hidden Authority}
+
+Explicit authority is easy to see in code or protocol rules:
+
+\begin{codeblock}
+caller == owner
+hasRole(MINTER_ROLE, caller)
+threshold signatures >= 3 of 5
+proposal succeeded and timelock elapsed
+signature verifies for this domain and nonce
+\end{codeblock}
+
+Delegated authority is one step removed. ERC-20 allowances let a spender move another user's tokens. NFT operator approvals let an operator transfer many tokens. Governance delegation gives another actor vote power. Session keys, account-abstraction modules, and permit signatures can authorize actions without the user sending the final transaction directly.
+
+Hidden authority is more dangerous because it is often omitted from diagrams. A frontend constructs the transaction users sign. An indexer decides which positions a UI shows. A backend signer authorizes withdrawals. A relayer decides whether a message is submitted. A sequencer decides ordering. A deployment pipeline can ship new code. A proxy admin can replace the rules.
+
+Classify authority by effect. User authority asks what any valid user can do, including a malicious or compromised user. Role authority asks which transitions an owner, admin, minter, pauser, or upgrader unlocks. Delegated authority asks whether an allowance, operator approval, vote delegation, permit, or session key can be abused, replayed, left stale, or misunderstood. Governance authority asks who can turn votes into executable calls. Operational authority asks which off-chain process can cause or mislead on-chain action. Ordering authority asks who can include, exclude, delay, reorder, or observe transitions.
+
+Authority is often a graph, not a direct edge. A vault may be owned by a timelock, whose proposer is a governor, whose voting power comes from delegated tokens, some of which sit on exchanges, while a guardian can cancel proposals and a proxy admin can upgrade the governor itself. The correct question is not ``who is the owner?'' It is ``which path can reach the transition that changes the asset?''
+
+\section{Ownership, Custody, Control, and Exposure}
+
+\subsection{Do Not Flatten Control Layers}
+
+Ownership is overloaded. In ordinary speech it may mean legal title, moral entitlement, possession, custody, control, or economic exposure. In security review those meanings must be separated.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.36\textwidth}X@{}}
+\toprule
+Term & Meaning in review & Example failure \\
+\midrule
+Protocol authority & Ability to cause an accepted state transition & A compromised admin upgrades a vault to malicious logic \\
+Custody & Control of signing material or an operational signing process & A custodian loses hot-wallet keys \\
+Legal title & Off-chain entitlement recognized by agreement or law & A token holder cannot redeem because issuer terms or custody fail \\
+Economic exposure & Who gains or loses from a state change & LPs absorb bad debt after oracle manipulation \\
+Possession of a claim & Holding a token, share, ticket, or message in state & A user holds a withdrawal ticket that no process will execute \\
+User interface control & Ability to shape what a user sees or signs & A frontend tricks users into granting approvals \\
+\bottomrule
+\end{tabularx}
+\caption{Security review must separate control categories that product language often merges.}
+\end{table}
+
+This separation matters because the same person may not occupy every category. A user may have legal entitlement to assets held by an exchange, while the exchange controls the withdrawal keys. A stablecoin holder may own an on-chain balance, while redemption depends on issuer solvency, reserve custody, banking access, and legal terms. A DAO treasury may be socially associated with token holders, while on-chain execution depends on quorum, delegation, a timelock, and a multisig emergency path.
+
+Do not say ``the user owns the asset'' when the accurate statement is ``the user has economic exposure, but withdrawal requires a custodian, oracle, queue processor, and unpaused exit path.''
+
+\subsection{Execution Models Use Ownership Differently}
+
+Different execution models encode authority differently. Chapter 2 should not become a full survey of them, but the distinction matters enough to state.
+
+In a UTXO system, ownership means the ability to satisfy a spending condition for an unspent output. In an account-based system, an externally owned account may be controlled by a private key, while a contract account is controlled by code and state. Ethereum documentation distinguishes externally owned accounts from contract accounts and also distinguishes accounts from wallets, which are interfaces for controlling accounts.\footnote{\href{https://ethereum.org/developers/docs/accounts/}{ethereum.org, ``Ethereum Accounts''}.}
+
+Solana uses the word ``owner'' for the program authorized to modify account data, which is not the same as saying a user owns an account in ordinary language.\footnote{Solana Foundation, \href{https://solana.com/docs/core/accounts}{``Accounts''}.} Move systems use modules, resources, abilities, and capabilities to constrain creation, copying, storage, and destruction of values.\footnote{The Move Book, \href{https://move-book.com/reference/abilities/}{``Abilities''}.}
+
+The point is not that one model is safer by default. The point is that security review must use the ownership semantics of the machine being reviewed. If the model says ``account owner,'' ask whether that means signer, program, contract field, module authority, legal owner, or UI-level wallet control.
+
+\section{Trust Boundaries}
+
+\subsection{A Boundary Begins Where Local Verification Ends}
+
+A trust boundary is crossed when one component relies on a claim, actor, data source, or process that it cannot fully verify for itself.
+
+A contract accepting an oracle price crosses a trust boundary. A bridge accepting a source-chain message crosses a trust boundary. A wallet showing a simulation crosses a trust boundary between the user and the wallet. A protocol relying on a multisig not to abuse an upgrade key crosses a trust boundary. A UI relying on an indexer crosses a trust boundary. A token claiming off-chain reserves crosses a boundary between on-chain accounting and legal or custodial reality.
+
+At each boundary, ask what is being trusted, who can lie or fail, who verifies the claim, which transition depends on it, what happens if the claim is false, whether the system can fail closed, and whether users can observe danger before they are harmed.
+
+On-chain does not mean trustless. A contract can be transparent and still rely on an upgrade admin, a registry, a privileged role, an oracle, a token implementation, a timelock, or governance voters. Off-chain does not mean insecure. An off-chain service may be acceptable if it cannot forge state transitions, if users can bypass it, if multiple providers can check each other, or if the on-chain verification step constrains its power.
+
+Location is the wrong classification. Authority and failure impact are the right classifications.
+
+\subsection{Write Assumptions, Not Slogans}
+
+A trust-boundary statement should be concrete enough to attack.
+
+Do not stop at ``the oracle is trusted.'' Say what the lending market assumes: the oracle price stays within a stated distance of executable market price, updates within a stated time window, and cannot be manipulated cheaply enough to create bad debt.
+
+Do not stop at ``the bridge verifies messages.'' Say that the destination contract accepts messages signed by a particular threshold, such as 13 of 19 bridge validators, and that if that threshold colludes or is compromised it can mint unbacked wrapped assets unless another control intervenes.
+
+Do not stop at ``the token is backed 1:1.'' Say that the token contract records transferable balances while redemption depends on issuer solvency, reserve custody, banking access, legal enforceability, and the issuer honoring redemptions.
+
+The reviewable statements are less marketable. They are also useful.
+
+\section{Mapping Assets and Authority}
+
+\subsection{The Authority Map Is the Practical Output}
+
+An authority map is a structured answer to one question: who can do what to which asset, through which transition, under which assumptions, and with what failure impact?
+
+The map does not prove safety. It prevents hidden authority from staying hidden.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.18\textwidth}>{\RaggedRight\arraybackslash}p{0.30\textwidth}X@{}}
+\toprule
+Verb & Meaning & Example risk \\
+\midrule
+Move & Transfer or redirect an asset & Unauthorized withdrawal or malicious strategy allocation \\
+Approve & Delegate movement or operation rights & Infinite allowance, stale approval, operator abuse \\
+Mint or burn & Create or destroy claims & Inflation, unbacked wrapped assets, forced redemption \\
+Freeze or pause & Prevent movement or stop transitions & Censorship or trapped funds \\
+Upgrade or configure & Change future rules, dependencies, or parameters & Malicious implementation, unsafe collateral factor, bad oracle \\
+Settle & Finalize a claim, message, withdrawal, or liquidation & Premature bridge release, wrong finality assumption \\
+Censor or order & Exclude, delay, or reorder transitions & Broken exits, liquidation manipulation, MEV extraction \\
+Observe & See private or pending intent & Order-flow leakage, targeted frontrunning \\
+Recover & Override normal rules after failure & Admin theft disguised as recovery \\
+\bottomrule
+\end{tabularx}
+\caption{Authority mapping replaces vague ownership language with concrete powers over transitions.}
+\end{table}
+
+A useful map records the asset or state affected, its representation, the relevant transition, the authority required, the current authority holder, delegation paths, delay or timelock, observability, revocation path, recovery path, and worst-case impact.
+
+The shortest usable template is:
+
+\begin{codeblock}
+Asset or state:
+Representation:
+Transition:
+Authority required:
+Current holder:
+Delegation path:
+Delay or timelock:
+Can users observe before harm?
+Can the authority be revoked or recovered?
+Worst-case failure:
+\end{codeblock}
+
+If this feels tedious, that is usually evidence it is doing useful work. Severe failures often sit behind the row nobody wanted to fill in.
+
+\section{Worked Example: Tokenized Vault}
+
+Suppose a protocol describes itself this way:
+
+\begin{quote}
+Users deposit USDC. The vault mints shares. A strategist allocates USDC into yield strategies. An oracle reports strategy value. Users withdraw USDC by burning shares. Governance can upgrade the vault after a 48-hour timelock. A guardian can pause deposits and withdrawals immediately.
+\end{quote}
+
+The marketing summary is:
+
+\begin{quote}
+Users own vault shares backed by USDC and strategies.
+\end{quote}
+
+That sentence is not false, but it is not a security model. A security model names the claims, authorities, and trust boundaries.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{0.18\textwidth}>{\RaggedRight\arraybackslash}p{0.22\textwidth}>{\RaggedRight\arraybackslash}p{0.20\textwidth}X@{}}
+\toprule
+Asset or control surface & Representation & Authority & Failure impact \\
+\midrule
+Deposited USDC & Vault token balance & Vault logic, USDC token rules & Funds frozen, swept, misaccounted, or blocked by issuer controls \\
+Vault shares & Share balances and exchange-rate accounting & Deposit, withdraw, mint, burn logic & Dilution or unfair redemption \\
+Strategy position & External strategy balance or accounting & Strategist, vault, governance & Loss or illiquidity \\
+Oracle value & Reported price or strategy valuation & Oracle, reporter, keeper, governance & Overvalued shares or insolvency \\
+Withdrawal queue & Queue state and processor logic & User, vault, keeper, guardian & Stuck exits, griefing, unfair ordering \\
+Emergency pause & Pause flags & Guardian or governance & Incident containment or trapped users if exits pause \\
+Upgrade path & Proxy implementation and admin path & Governance, timelock, proxy admin & Rule replacement after delay or bypass \\
+\bottomrule
+\end{tabularx}
+\caption{A vault review should map assets and control surfaces together.}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=10mm and 10mm,
+  compact node/.style={security node, text width=24mm, minimum height=7mm}
+]
+\node[compact node] (vault) {Vault\\contract};
+\node[compact node, left=of vault] (wallet) {Wallet /\\frontend};
+\node[compact node, left=of wallet] (user) {User};
+\node[compact node, above=of vault] (shares) {Share\\token};
+\node[compact node, below=of vault] (usdc) {USDC\\token};
+\node[compact node, right=of vault] (strategy) {Strategy};
+\node[compact node, above=of strategy] (oracle) {Oracle /\\reporter};
+\node[compact node, below=of strategy] (gov) {Governance /\\timelock};
+\node[compact node, below=of wallet] (guardian) {Guardian};
+\node[compact node, right=of usdc] (issuer) {USDC\\issuer};
+
+\draw[security arrow] (user) -- (wallet);
+\draw[security arrow] (wallet) -- (vault);
+\draw[security arrow] (vault) -- (shares);
+\draw[security arrow] (vault) -- (usdc);
+\draw[security arrow] (vault) -- (strategy);
+\draw[security arrow] (oracle) -- (vault);
+\draw[security arrow] (gov) -- (vault);
+\draw[security arrow] (guardian) -- (vault);
+\draw[security arrow] (issuer) -- (usdc);
+
+\node[draw=securityblue, dashed, rounded corners=2pt, fit=(vault)(shares)(usdc)(strategy), inner sep=7pt, label={[securityblue]above:On-chain protocol boundary}] {};
+\node[draw=securityred, dashed, rounded corners=2pt, fit=(wallet)(oracle)(gov)(guardian)(issuer), inner sep=7pt, label={[securityred]below:Trusted interface and authority boundary}] {};
+\end{tikzpicture}
+\caption{The vault's apparent asset claim crosses wallet, oracle, governance, guardian, strategy, and issuer boundaries.}
+\end{figure}
+
+The diagram makes an important point: the share holder's position is not secured only by the share token. It depends on the vault's accounting, the token's transfer behavior, strategy liquidity, oracle correctness, governance delay, guardian scope, and whether withdrawals remain available when danger is observable.
+
+A concise trust-boundary statement would be:
+
+\begin{codeblock}
+Vault shares represent a pro-rata claim on vault assets if deposits and
+withdrawals account for nonstandard USDC behavior, strategy valuations
+are not overstated, withdrawal processing remains live, and no privileged
+authority upgrades, pauses, or reconfigures the system in a way that
+prevents fair exit.
+\end{codeblock}
+
+That statement is not yet a proof. It is a map of what must be reviewed.
+
+The first invariants follow naturally:
+
+\begin{codeblock}
+Shares should not be minted for assets the vault did not actually receive.
+Withdrawals should not pay more than the user's fair share.
+Strategy value used for share pricing should not exceed realizable value.
+No privileged role should be able to seize assets without an explicit trust assumption.
+Users should be able to exit before delayed malicious upgrades execute, unless the system clearly says they cannot.
+\end{codeblock}
+
+This is the difference between describing a product and reviewing a system.
+
+\section*{Review Questions}
+
+\begin{enumerate}
+\item Why is an on-chain asset better understood as a claim over state than as an object inside an address?
+\item Give three examples of valuable assets or control surfaces that are not simple token balances.
+\item What is the difference between protocol authority, custody, legal title, and economic exposure?
+\item Why can the word ``owner'' mislead reviewers across EVM, UTXO, Solana, and Move-style systems?
+\item Why are allowances, operator approvals, upgrade keys, oracle keys, and governance votes forms of authority?
+\item What makes a trust-boundary statement stronger than saying ``the component is trusted''?
+\item Why does a wrapped token depend on more than the destination-chain token contract?
+\item What information belongs in an authority map?
+\end{enumerate}
+
+\section*{Applied Exercises}
+
+\begin{enumerate}
+\item \textbf{Token authority map.} Model a token with transfers, allowances, minting, burning, pausing, and upgradeability. Produce an authority map with asset or state affected, transition, required authority, current authority holder, delay or timelock, observability, and worst-case failure. Identify which authority is economically equivalent to control over the whole token.
+
+\item \textbf{Trust-boundary rewrite.} Rewrite each claim as a concrete trust-boundary statement: ``the oracle is trusted,'' ``the token is backed by reserves,'' ``the bridge verifies messages,'' and ``governance controls the treasury.'' Each rewrite must name the trusted actor or component, the transition that depends on it, the assumed property, and the failure impact if the assumption is false.
+
+\item \textbf{Custody and exposure analysis.} A user has 100 tokens displayed in a centralized exchange account. The exchange controls the on-chain wallet keys and processes withdrawals through an internal approval system. Identify the user's asset or claim, the protocol authority, the custody dependency, the legal or operational trust boundary, and the failure impact if withdrawals are paused.
+
+\item \textbf{Vault review.} For a vault with deposits, shares, a strategist, an oracle, a withdrawal queue, a guardian, and an upgrade path, produce an asset/control map and three trust-boundary statements. Then write two invariants that should hold across deposits and withdrawals.
+\end{enumerate}

@@ -1,0 +1,72 @@
+\usepackage{iftex}
+
+\ifPDFTeX
+  \usepackage[T1]{fontenc}
+  \usepackage[utf8]{inputenc}
+\else
+  \usepackage{fontspec}
+  \defaultfontfeatures{Ligatures=TeX}
+  \setmainfont{Latin Modern Roman}
+  \setsansfont{Latin Modern Sans}
+  \setmonofont{Latin Modern Mono}
+\fi
+
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{setspace}
+\usepackage{etoolbox}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{makecell}
+\usepackage{ragged2e}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric, calc, fit}
+\usepackage[most]{tcolorbox}
+\usepackage{xcolor}
+\usepackage{fancyvrb}
+\usepackage{listings}
+\usepackage{csquotes}
+\usepackage[hidelinks]{hyperref}
+\usepackage{bookmark}
+
+\setlist[itemize]{leftmargin=*, itemsep=0.25em}
+\setlist[enumerate]{leftmargin=*, itemsep=0.25em}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.35em plus 0.1em minus 0.05em}
+\onehalfspacing
+
+% Temporary Pandoc compatibility layer. Remove these once all converted
+% chapters have been rewritten as authored LaTeX source.
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\providecommand{\real}[1]{#1}
+\providecommand{\passthrough}[1]{#1}
+\newcounter{none}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  breakatwhitespace=false,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false
+}
+
+\definecolor{securityblue}{HTML}{1F4E79}
+\definecolor{securitygray}{HTML}{F4F6F8}
+\definecolor{securityred}{HTML}{8A1F11}
+\definecolor{securitygreen}{HTML}{1F6F43}
+
+\hypersetup{
+  pdftitle={Blockchain Security from First Principles},
+  pdfauthor={},
+  pdfsubject={Blockchain security},
+  pdfkeywords={blockchain security, smart contracts, consensus, cryptography, DeFi}
+}

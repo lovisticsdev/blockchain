@@ -1,0 +1,1868 @@
+\chapter{Cryptographic Commitments and Proofs}
+
+\section{Purpose}
+
+Chapter 1 treated blockchains as replicated state machines. Chapter 2
+identified assets and authority. Chapter 3 showed how transactions carry
+inputs into execution. Chapter 4 studied keys, signatures, and authorization. Chapter 5 studies the cryptographic
+mechanism that lets participants make compact claims about large bodies
+of data:
+
+\begin{quote}
+A cryptographic commitment lets a system bind itself to data without
+always revealing or transmitting all of that data.
+\end{quote}
+
+This is one of the quiet foundations of blockchain security.
+
+A block hash commits to a block. A transaction hash commits to a
+transaction. A Merkle root commits to a set or sequence of leaves. An
+Ethereum \passthrough{\lstinline!state\_root!} commits to the post-block
+world state. A \passthrough{\lstinline!receipts\_root!} commits to
+receipts and logs. A bridge proof may claim that some event, storage
+slot, or message was included in a source chain. A rollup output root
+may commit to an L2 state. A data-availability commitment may claim that
+data exists and can be sampled or reconstructed. A ZK verifier may check
+a proof against public inputs that are themselves commitments.
+
+These commitments are powerful because they let a verifier check a small
+proof against a small root instead of downloading and trusting
+everything.
+
+But they are also dangerous when misunderstood.
+
+A proof does not mean ``this is true'' in the abstract. It means:
+
+\begin{lstlisting}
+Given this commitment root,
+and this verification algorithm,
+and these cryptographic assumptions,
+this claim is consistent with the data committed by that root.
+\end{lstlisting}
+
+That sentence should feel precise. Precision is the point.
+
+\section{Learning Objectives}
+
+By the end of this chapter, you should be able to:
+
+\begin{itemize}
+\tightlist
+\item
+  Explain preimage resistance, second-preimage resistance, and collision
+  resistance in security-review terms.
+\item
+  Distinguish hashes, commitments, digests, identifiers, fingerprints,
+  and proofs.
+\item
+  Explain why canonical encoding and domain separation are necessary for
+  safe commitments.
+\item
+  Describe Merkle trees, Merkle Patricia tries, state roots, transaction
+  roots, receipt roots, and inclusion proofs.
+\item
+  Explain what a proof actually proves and what it does not prove.
+\item
+  Identify proof-verification bugs involving wrong roots, stale roots,
+  malformed proofs, replay, ambiguous encodings, and false trust
+  assumptions.
+\item
+  Write a trust-minimized claim in the form: root, proof, verification
+  algorithm, domain, finality, and security assumption.
+\end{itemize}
+
+\section{The Core Model}
+
+A commitment system has three pieces:
+
+\begin{lstlisting}
+Data:
+  The thing being committed to.
+
+Commitment:
+  A compact value derived from the data.
+
+Opening or proof:
+  Evidence that a specific claim is consistent with the commitment.
+\end{lstlisting}
+
+For a simple hash commitment:
+
+\begin{lstlisting}
+commitment = H(encoded_data)
+
+proof = encoded_data
+
+verify:
+  H(encoded_data) == commitment
+\end{lstlisting}
+
+For a Merkle inclusion proof:
+
+\begin{lstlisting}
+commitment = merkle_root(all_leaves)
+
+claim = leaf i has value v
+
+proof = sibling hashes along the path from leaf i to root
+
+verify:
+  recompute root from v, i, and proof
+  check recomputed_root == commitment
+\end{lstlisting}
+
+For a blockchain state proof:
+
+\begin{lstlisting}
+commitment = state_root in a block header
+
+claim = account or storage key has value v
+
+proof = trie nodes needed to verify that key/value path
+
+verify:
+  recompute path under the trie rules
+  check resulting root == state_root
+  check state_root is from an acceptable block
+\end{lstlisting}
+
+The proof never floats in empty space. It is always relative to a root
+and a verification rule.
+
+
+A minimal Merkle proof diagram should show the claim, the siblings, and the root:
+
+\begin{lstlisting}
+            root
+           /    \
+        h01      h23
+       /  \      /  \
+     h0   h1   h2   h3
+
+claim:
+  h2 is included
+
+proof:
+  sibling h3
+  sibling h01
+
+verify:
+  h23   = H(h2 || h3)
+  root' = H(h01 || h23)
+  accept if root' == root
+\end{lstlisting}
+
+The security question is therefore:
+
+\begin{lstlisting}
+Which root is trusted?
+Why is that root trusted?
+What exact claim is proved against it?
+Which algorithm verifies the proof?
+Which assumptions would make the proof invalid, stale, or irrelevant?
+\end{lstlisting}
+
+\section{Hash Functions, Preimages, and Collision Resistance}
+
+\subsection{A Cryptographic Hash Is Not Just a Checksum}
+
+A cryptographic hash function maps arbitrary-length input to a
+fixed-length output.
+
+\begin{lstlisting}
+digest = H(message)
+\end{lstlisting}
+
+NIST's Secure Hash Standard specifies SHA-family algorithms that
+generate message digests, and NIST SP 800-107 Rev.~1, used here as
+legacy terminology guidance, describes a hash function as mapping a bit
+string of arbitrary length to a fixed-length bit string.\footnote{NIST,
+  ``FIPS 180-4: Secure Hash Standard'',
+  https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.180-4.pdf.}
+\footnote{NIST, ``SP 800-107 Revision 1: Recommendation for Applications
+  Using Approved Hash Algorithms'', legacy guidance whose supplementary
+  material has moved to NIST hash-function resources,
+  https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-107r1.pdf.}
+
+For blockchain security, the important practical properties are:
+
+\begin{itemize}
+\tightlist
+\item
+  Determinism: the same input gives the same output.
+\item
+  Preimage resistance: given a digest, it should be infeasible to find
+  an input that hashes to it.
+\item
+  Second-preimage resistance: given one input, it should be infeasible
+  to find a different input with the same digest.
+\item
+  Collision resistance: it should be infeasible to find any two
+  different inputs with the same digest.
+\item
+  Efficient verification: anyone can recompute and compare.
+\end{itemize}
+
+These properties let a small digest act as a compact fingerprint for
+much larger data.
+
+But a cryptographic hash is not encryption. It does not hide low-entropy
+data. It does not authenticate who produced the data. It does not prove
+that the data is meaningful, safe, fresh, or final.
+
+It proves only a relationship:
+
+\begin{lstlisting}
+This input hashes to this output.
+\end{lstlisting}
+
+Everything else comes from context.
+
+\subsection{Preimage Resistance}
+
+Preimage resistance means that given a hash output, an attacker should
+not be able to find an input that produces it.
+
+\begin{lstlisting}
+Given y = H(x),
+it should be infeasible to find any x' such that H(x') == y.
+\end{lstlisting}
+
+NIST SP 800-107 Rev.~1 describes preimage resistance as the property
+that, given a randomly chosen hash value, finding an input that maps to
+it is computationally infeasible. For an L-bit hash function, expected
+preimage strength is generally L bits.\footnote{NIST, ``SP 800-107
+  Revision 1: Recommendation for Applications Using Approved Hash
+  Algorithms'', legacy guidance whose supplementary material has moved
+  to NIST hash-function resources,
+  https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-107r1.pdf.}
+
+In blockchain systems, preimage resistance appears in:
+
+\begin{itemize}
+\tightlist
+\item
+  Hashlocks.
+\item
+  Commit-reveal schemes.
+\item
+  Address derivation.
+\item
+  Transaction and block identifiers.
+\item
+  Content-addressed storage.
+\item
+  Proof-of-work puzzles.
+\item
+  Merkle roots and trie node references.
+\end{itemize}
+
+Security review question:
+
+\begin{lstlisting}
+Is the committed input unpredictable enough that attackers cannot brute-force it?
+\end{lstlisting}
+
+This question matters because preimage resistance of the hash function
+is not enough if the input space is tiny.
+
+Example:
+
+\begin{lstlisting}
+commitment = H("yes")
+\end{lstlisting}
+
+This hides nothing. An attacker can hash \passthrough{\lstinline!"yes"!}
+and \passthrough{\lstinline!"no"!} and compare. A hash commitment to a
+low-entropy value needs a secret salt or nonce if hiding matters.
+
+Better:
+
+\begin{lstlisting}
+commitment = H("vote-v1" || voter || proposal_id || vote || random_256_bit_salt)
+\end{lstlisting}
+
+The hash function may be strong, but the protocol must give it enough
+entropy and context.
+
+\subsection{Second-Preimage Resistance}
+
+Second-preimage resistance means that after seeing a specific input, an
+attacker should not be able to find a different input with the same
+digest.
+
+\begin{lstlisting}
+Given x,
+it should be infeasible to find x' != x such that H(x') == H(x).
+\end{lstlisting}
+
+This property matters when a commitment has already been made to a known
+object.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  Replacing a transaction with a different transaction that has the same
+  transaction ID.
+\item
+  Replacing a block body while preserving a block commitment.
+\item
+  Replacing a contract artifact while preserving an expected source
+  hash.
+\item
+  Replacing a leaf value while preserving a Merkle root.
+\end{itemize}
+
+If second-preimage resistance fails, a commitment no longer binds the
+committer to the original data.
+
+Security review question:
+
+\begin{lstlisting}
+Can the prover substitute a different object while preserving the committed digest?
+\end{lstlisting}
+
+Usually the answer should be ``computationally infeasible.'' But that
+answer depends on the correct hash function, correct encoding, correct
+domain separation, and no exploitable ambiguity in what is being hashed.
+
+\subsection{Collision Resistance}
+
+Collision resistance means that an attacker should not be able to find
+any two different inputs with the same digest.
+
+\begin{lstlisting}
+Find x != x' such that H(x) == H(x').
+\end{lstlisting}
+
+NIST SP 800-107 Rev.~1 states that for an L-bit hash function, the
+expected collision-resistance strength is L/2 bits because of
+birthday-bound attacks; for SHA-256, this corresponds to an expected
+128-bit collision strength.\footnote{NIST, ``SP 800-107 Revision 1:
+  Recommendation for Applications Using Approved Hash Algorithms'',
+  legacy guidance whose supplementary material has moved to NIST
+  hash-function resources,
+  https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-107r1.pdf.}
+
+Collision resistance matters when attackers can choose both inputs.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  A malicious builder creates two different payloads with the same
+  commitment.
+\item
+  A contract accepts one document during review and a different document
+  during execution.
+\item
+  Two typed messages collide because encoding is ambiguous.
+\item
+  A Merkle tree allows a leaf to be interpreted as an internal node.
+\end{itemize}
+
+Collision attacks are not the only hash risk, but they are central to
+binding commitments. If an attacker can produce two valid openings for
+one commitment, the commitment is not binding.
+
+\subsection{Hash Security Depends on the Application}
+
+The same hash function may be used for different security goals.
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Use
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Needed property
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Failure mode
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Hashlock & Preimage resistance & Attacker claims without knowing
+secret \\
+File fingerprint & Second-preimage resistance & Attacker swaps file for
+another with same hash \\
+Digital signature prehash & Collision and second-preimage resistance &
+Attacker signs one message, substitutes another \\
+Merkle root & Collision and second-preimage resistance & Attacker proves
+false membership \\
+Commit-reveal & Binding and possibly hiding & Attacker changes value or
+brute-forces committed value \\
+Content addressing & Second-preimage resistance & Wrong content served
+under expected address \\
+Proof-of-work & Preimage-style search difficulty under target & Attacker
+finds cheap block headers below target \\
+\end{longtable}
+}
+
+This is why ``we hash it'' is not a security argument. You must say
+which property the protocol needs and why the construction gives it.
+
+\subsection{Hashes Are Identifiers, Not Authority}
+
+Hashes often act as identifiers:
+
+\begin{itemize}
+\tightlist
+\item
+  Transaction hash.
+\item
+  Block hash.
+\item
+  Code hash.
+\item
+  Storage root.
+\item
+  Content hash.
+\item
+  Proposal hash.
+\item
+  Message hash.
+\end{itemize}
+
+But an identifier does not by itself authorize anything. A transaction
+hash identifies a transaction. It does not prove that the transaction is
+final, successful, economically safe, or submitted by the correct user
+unless the verifier checks the surrounding evidence.
+
+Bad:
+
+\begin{lstlisting}
+The transaction hash proves the transfer happened.
+\end{lstlisting}
+
+Better:
+
+\begin{lstlisting}
+The transaction hash identifies a transaction. To prove the transfer happened, verify that the transaction is included in the canonical chain, executed successfully, emitted or caused the expected state change, and is final enough for the relying system.
+\end{lstlisting}
+
+Hashes are pointers into evidence. They are not the evidence by
+themselves.
+
+\subsection{Hash Functions Do Not Fix Bad Encoding}
+
+Hash functions process bytes. They do not understand your data model.
+
+If two different meanings serialize to the same bytes, the hash cannot
+save you.
+
+Example of ambiguous concatenation:
+
+\begin{lstlisting}
+H("ab" || "c") == H("a" || "bc")
+\end{lstlisting}
+
+Both hash the same bytes:
+
+\begin{lstlisting}
+"abc"
+\end{lstlisting}
+
+Safe encodings include:
+
+\begin{itemize}
+\tightlist
+\item
+  Length prefixes.
+\item
+  Type tags.
+\item
+  Version tags.
+\item
+  Fixed-width fields where appropriate.
+\item
+  Canonical serialization.
+\item
+  Domain separators.
+\item
+  Explicit chain and contract identifiers.
+\end{itemize}
+
+The security property is not:
+
+\begin{lstlisting}
+H(data) is collision resistant.
+\end{lstlisting}
+
+It is:
+
+\begin{lstlisting}
+H(canonical_encode(domain, type, version, fields)) binds to exactly one meaning.
+\end{lstlisting}
+
+Many proof and signature bugs are encoding bugs wearing cryptographic
+clothing.
+
+\section{Commitments, Binding Assumptions, and Domain Separation}
+
+\subsection{A Commitment Binds a Claim to Data}
+
+A commitment is a compact value that binds the committer to data.
+
+In cryptography, commitment schemes are usually discussed through two
+properties:
+
+\begin{itemize}
+\tightlist
+\item
+  Binding: after committing, the committer cannot open the commitment to
+  a different value.
+\item
+  Hiding: before opening, the verifier cannot learn the committed value.
+\end{itemize}
+
+Blockchain commitments often care primarily about binding and
+verifiability. Hiding may or may not be required.
+
+Examples:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Commitment
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Usually hiding?
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Usually binding?
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Opening/proof
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+\passthrough{\lstinline!H(transaction)!} & No & Yes, assuming hash
+security and canonical encoding & Transaction bytes \\
+Block hash & No & Yes & Block header/body validation \\
+Merkle root & No & Yes & Merkle path \\
+State root & No & Yes & Trie proof and state-transition validation \\
+Commit-reveal vote hash & Should be & Should be & Vote plus salt \\
+KZG commitment & Not necessarily & Yes under algebraic assumptions &
+Evaluation proof \\
+\end{longtable}
+}
+
+The important lesson:
+
+\begin{lstlisting}
+Commitment does not automatically mean secrecy.
+\end{lstlisting}
+
+A Merkle root commits to leaves. It usually does not hide them if the
+leaves are public or guessable. A hash of a small value is easy to
+brute-force. A public transaction hash does not hide the transaction
+once the transaction is known.
+
+\subsection{Binding Depends on the Whole Construction}
+
+Binding is not supplied by the hash function alone. It depends on:
+
+\begin{itemize}
+\tightlist
+\item
+  The cryptographic primitive.
+\item
+  The exact bytes committed.
+\item
+  Canonical serialization.
+\item
+  Domain separation.
+\item
+  Tree construction rules.
+\item
+  Verification rules.
+\item
+  The root source.
+\item
+  Finality assumptions.
+\end{itemize}
+
+Suppose a bridge accepts:
+
+\begin{lstlisting}
+message_hash = H(amount || recipient || nonce)
+\end{lstlisting}
+
+Questions:
+
+\begin{itemize}
+\tightlist
+\item
+  Is \passthrough{\lstinline!amount!} fixed-width?
+\item
+  Is \passthrough{\lstinline!recipient!} fixed-width?
+\item
+  Is \passthrough{\lstinline!nonce!} fixed-width?
+\item
+  Is the source chain included?
+\item
+  Is the destination chain included?
+\item
+  Is the bridge contract included?
+\item
+  Is the message type included?
+\item
+  Is the token address included?
+\item
+  Is the version included?
+\end{itemize}
+
+If not, the hash may be binding bytes but not binding the intended
+meaning.
+
+The better construction is closer to:
+
+\begin{lstlisting}
+message_hash = H(
+  "bridge-message-v1" ||
+  source_chain_id ||
+  source_bridge_address ||
+  destination_chain_id ||
+  destination_bridge_address ||
+  token_address ||
+  recipient ||
+  amount ||
+  nonce
+)
+\end{lstlisting}
+
+This is not merely cleaner. It prevents cross-protocol and cross-domain
+confusion.
+
+\subsection{Domain Separation Prevents Context Confusion}
+
+Domain separation means that commitments for one purpose cannot be
+validly interpreted as commitments for another purpose.
+
+At minimum, domain separation asks:
+
+\begin{lstlisting}
+What protocol is this for?
+What chain or domain is this for?
+What contract, program, or module is this for?
+What version is this for?
+What type of object is this?
+What operation is this authorizing or proving?
+\end{lstlisting}
+
+Without domain separation, the same hash or signature may be reusable in
+another context.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  A message signed for chain A is accepted on chain B.
+\item
+  A withdrawal proof for token X is accepted for token Y.
+\item
+  A vote commitment is interpreted as an order commitment.
+\item
+  A Merkle leaf in one tree type is interpreted as an internal node in
+  another.
+\item
+  A bridge message for one destination contract is replayed into
+  another.
+\item
+  A testnet signature works on mainnet.
+\end{itemize}
+
+Domain separation is not optional ceremony. It is how a protocol says:
+
+\begin{lstlisting}
+This commitment means this one thing here, and not something else somewhere else.
+\end{lstlisting}
+
+\subsection{Canonical Encoding Is Part of the Commitment}
+
+If two honest implementations encode the same object differently, they
+will compute different commitments. If two different objects encode to
+the same bytes, the commitment is ambiguous.
+
+Canonical encoding requires:
+
+\begin{itemize}
+\tightlist
+\item
+  One field order.
+\item
+  One integer representation.
+\item
+  One byte-order convention.
+\item
+  One string normalization policy, or no strings where bytes are
+  expected.
+\item
+  One rule for optional fields.
+\item
+  One rule for empty values.
+\item
+  One rule for lists, maps, and sorting.
+\item
+  One versioning scheme.
+\end{itemize}
+
+Ethereum uses Recursive Length Prefix encoding in its execution-layer
+trie construction, and the Ethereum consensus specs define Simple
+Serialize for consensus-layer objects and merkleization.\footnote{ethereum.org,
+  ``Merkle Patricia Trie'',
+  https://ethereum.org/developers/docs/data-structures-and-encoding/patricia-merkle-trie/.}
+\footnote{Ethereum Consensus Specs, ``SimpleSerialize (SSZ)'',
+  https://ethereum.github.io/consensus-specs/ssz/simple-serialize/.}
+
+Security consequences:
+
+\begin{itemize}
+\tightlist
+\item
+  A proof verifier must decode exactly according to the committed
+  format.
+\item
+  A bridge verifier must not accept ``equivalent'' but noncanonical
+  encodings.
+\item
+  A signature verifier must bind the same bytes the user reviewed.
+\item
+  A client implementation must not disagree with other clients about
+  serialization.
+\end{itemize}
+
+If serialization is ambiguous, the cryptography is standing on wet
+ground.
+
+\subsection{Hiding Requires Entropy}
+
+A hash commitment hides only if the committed value is hard to guess.
+
+Unsafe:
+
+\begin{lstlisting}
+commitment = H(bid_amount)
+\end{lstlisting}
+
+If bid amounts are predictable, every bidder can brute-force likely
+values.
+
+Better:
+
+\begin{lstlisting}
+commitment = H("sealed-bid-v1" || auction_id || bidder || bid_amount || salt)
+\end{lstlisting}
+
+The salt must be unpredictable and large enough. A four-digit salt is
+not enough. A 256-bit random salt is usually the kind of magnitude
+expected for high-value commitments.
+
+Hiding analysis asks:
+
+\begin{lstlisting}
+Can an attacker enumerate possible committed values?
+Is there a random salt?
+Is the salt secret until reveal?
+Is the salt unique?
+Is the commitment bound to this auction, bidder, chain, and contract?
+Can revealing in one context leak or authorize in another?
+\end{lstlisting}
+
+Commit-reveal protocols fail surprisingly often because the commit phase
+binds too little or hides too little.
+
+\subsection{Commitments Can Become Stale}
+
+A commitment may be correct and still unsafe to rely on.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  A state root from an old block proves an old balance, not the current
+  balance.
+\item
+  A transaction inclusion proof from an unfinalized block may disappear
+  in a reorg.
+\item
+  A bridge proof may be valid for a source-chain event that is not final
+  enough.
+\item
+  A rollup output root may be disputed during a challenge window.
+\item
+  A price commitment may be stale even if correctly signed.
+\item
+  A proof from a pre-upgrade contract may not mean the same thing after
+  upgrade.
+\end{itemize}
+
+Every commitment has a time and domain.
+
+Security review asks:
+
+\begin{lstlisting}
+At what block, slot, epoch, version, or state root is this claim true?
+Is that root final enough?
+Is the relying protocol allowed to use old data?
+Does the commitment expire?
+Can a fresher contradictory commitment exist?
+\end{lstlisting}
+
+Freshness is not a cryptographic property. It is a protocol property.
+
+\section{Merkle Trees, Patricia Tries, State Roots, and Inclusion Proofs}
+
+\subsection{Merkle Trees Compress Many Claims Into One Root}
+
+A Merkle tree hashes leaves into parent nodes until one root remains.
+
+Simple binary example:
+
+\begin{lstlisting}
+L0 = H("leaf" || data0)
+L1 = H("leaf" || data1)
+L2 = H("leaf" || data2)
+L3 = H("leaf" || data3)
+
+P0 = H("node" || L0 || L1)
+P1 = H("node" || L2 || L3)
+
+root = H("node" || P0 || P1)
+\end{lstlisting}
+
+The root commits to all leaves and their positions. A proof for
+\passthrough{\lstinline!data2!} needs:
+
+\begin{lstlisting}
+data2
+L3
+P0
+position information: right child of P1, P1 right child of root
+\end{lstlisting}
+
+The verifier recomputes:
+
+\begin{lstlisting}
+L2 = H("leaf" || data2)
+P1 = H("node" || L2 || L3)
+root' = H("node" || P0 || P1)
+accept if root' == root
+\end{lstlisting}
+
+RFC 6962, the Certificate Transparency specification, uses Merkle hash
+trees to let clients verify that data is included in a log and to check
+consistency between tree sizes.\footnote{IETF, ``RFC 6962: Certificate
+  Transparency'', https://datatracker.ietf.org/doc/html/rfc6962.}
+Bitcoin uses Merkle trees so a lightweight client can verify that a
+transaction is included in a block without downloading the full
+block.\footnote{Satoshi Nakamoto, ``Bitcoin: A Peer-to-Peer Electronic
+  Cash System'', https://bitcoin.org/bitcoin.pdf.}
+
+For security analysis, the important feature is:
+
+\begin{lstlisting}
+A small proof can connect one leaf to one trusted root.
+\end{lstlisting}
+
+\subsection{Inclusion Proofs Prove Membership Relative to a Root}
+
+An inclusion proof proves:
+
+\begin{lstlisting}
+This leaf is included in the committed data structure represented by this root.
+\end{lstlisting}
+
+It does not prove:
+
+\begin{itemize}
+\tightlist
+\item
+  The root is canonical.
+\item
+  The root is final.
+\item
+  The leaf is semantically valid.
+\item
+  The leaf has not been superseded.
+\item
+  The transaction succeeded.
+\item
+  The event means what the verifier thinks it means.
+\item
+  The same claim has not already been consumed elsewhere.
+\end{itemize}
+
+Those facts require additional checks.
+
+For a Bitcoin SPV-style payment check, a Merkle branch can show
+transaction inclusion in a block. But the verifier still needs the block
+header chain and enough confirmation confidence. The Bitcoin
+whitepaper's simplified payment verification section relies on block
+headers and proof-of-work chain evidence, not a Merkle proof
+alone.\footnote{Satoshi Nakamoto, ``Bitcoin: A Peer-to-Peer Electronic
+  Cash System'', https://bitcoin.org/bitcoin.pdf.}
+
+For a bridge, an event proof can show that an event log was included in
+a source-chain receipt trie. But the bridge still needs:
+
+\begin{itemize}
+\tightlist
+\item
+  Correct source chain.
+\item
+  Correct source contract.
+\item
+  Correct event signature and fields.
+\item
+  Correct block header.
+\item
+  Correct finality threshold.
+\item
+  Correct replay protection.
+\item
+  Correct destination-chain message handling.
+\end{itemize}
+
+The Merkle proof is one piece.
+
+\subsection{Tree Shape and Leaf Meaning Matter}
+
+Merkle verification must match the exact tree construction.
+
+Important questions:
+
+\begin{itemize}
+\tightlist
+\item
+  Are leaves ordered?
+\item
+  Is the tree binary, sparse, Patricia, or another structure?
+\item
+  Are internal nodes domain-separated from leaves?
+\item
+  Are leaf values hashed before insertion?
+\item
+  Are duplicate leaves allowed?
+\item
+  What happens with an odd number of leaves?
+\item
+  Does the proof include positions, or does the verifier sort pairs?
+\item
+  Does membership include an index?
+\item
+  Are absence proofs supported?
+\item
+  Is the proof for a set, sequence, map, or key/value store?
+\end{itemize}
+
+A proof for ``leaf value X exists somewhere'' is weaker than a proof for
+``leaf value X exists at index i.'' A proof for ``key k maps to value
+v'' is different from a proof for ``value v appears somewhere.''
+
+Security failure example:
+
+\begin{lstlisting}
+Verifier accepts sorted pair hashing.
+Protocol intended ordered leaves.
+Attacker reorders siblings and proves a different position.
+\end{lstlisting}
+
+Another:
+
+\begin{lstlisting}
+Verifier hashes raw leaf bytes.
+Internal node bytes can be shaped like leaf bytes.
+Attacker exploits leaf/internal ambiguity.
+\end{lstlisting}
+
+Domain tags such as \passthrough{\lstinline!"leaf"!} and
+\passthrough{\lstinline!"node"!} are a simple defense in many
+constructions. More generally, the committed encoding must make each
+node type unambiguous.
+
+\subsection{Patricia Tries Commit to Key/Value State}
+
+A Merkle tree is good for proving that a leaf appears in a sequence or
+set. A blockchain state often needs a map:
+
+\begin{lstlisting}
+key -> value
+\end{lstlisting}
+
+Ethereum uses a modified Merkle Patricia Trie for execution-layer state.
+Ethereum.org describes Ethereum's state as encoded into a special
+Merkle-tree-like structure, where a root value can prove facts about the
+data, and explains that Ethereum's structure is a modified
+Merkle-Patricia trie designed for efficient state retrieval.\footnote{ethereum.org,
+  ``Merkle Patricia Trie'',
+  https://ethereum.org/developers/docs/data-structures-and-encoding/patricia-merkle-trie/.}
+
+At a high level:
+
+\begin{lstlisting}
+state root
+  commits to account trie
+
+account trie entry
+  commits to account fields, including storage root
+
+storage root
+  commits to contract storage trie
+\end{lstlisting}
+
+Ethereum blocks contain commitments such as:
+
+\begin{itemize}
+\tightlist
+\item
+  \passthrough{\lstinline!stateRoot!}: root of the final state after
+  applying transactions.
+\item
+  \passthrough{\lstinline!transactionsRoot!}: root of the transaction
+  trie.
+\item
+  \passthrough{\lstinline!receiptsRoot!}: root of the receipts trie.
+\end{itemize}
+
+Ethereum.org's block documentation lists these roots in block and
+execution-payload structures, and notes that clients re-execute
+transactions to ensure the new state matches the block's state root; the
+Yellow Paper formalizes the block/state-transition framing and trie-root
+fields.\footnote{ethereum.org, ``Blocks'',
+  https://ethereum.org/developers/docs/blocks/.} \footnote{Gavin Wood,
+  ``Ethereum: A Secure Decentralised Generalised Transaction Ledger'',
+  https://ethereum.github.io/yellowpaper/paper.pdf.}
+
+This gives us the state-machine connection:
+
+\begin{lstlisting}
+parent_state_root
++ ordered transactions
++ execution rules
+= new_state_root
+\end{lstlisting}
+
+If a block claims a \passthrough{\lstinline!stateRoot!}, honest
+validators re-execute the transactions and check that the computed root
+matches. If they disagree about execution rules or trie construction,
+consensus can split.
+
+\subsection{State Proofs and Storage Proofs}
+
+A state proof proves that an account or storage value is included in a
+committed state root.
+
+EIP-1186 specifies the \passthrough{\lstinline!eth\_getProof!} RPC
+method for retrieving Merkle proofs for an account and storage
+slots.\footnote{Ethereum Improvement Proposals, ``EIP-1186: RPC-Method
+  to get Merkle Proofs - eth\_getProof'',
+  https://eips.ethereum.org/EIPS/eip-1186.} The method returns account
+fields and proof nodes that allow a verifier to check claims against
+Ethereum's state trie.
+
+A simplified storage-proof flow:
+
+\begin{lstlisting}
+Inputs:
+  trusted block header
+  stateRoot from header
+  account address
+  storage slot key
+  claimed storage value
+  account proof
+  storage proof
+
+Verify account proof:
+  account address -> account object under stateRoot
+
+Extract storageRoot from account object
+
+Verify storage proof:
+  storage slot key -> claimed value under storageRoot
+
+Accept if:
+  both trie proofs verify
+  block header is trusted/final enough
+  chain/domain is correct
+  claimed value has the expected meaning
+\end{lstlisting}
+
+The proof does not prove that the storage value is current forever. It
+proves the value at that state root.
+
+This distinction matters for:
+
+\begin{itemize}
+\tightlist
+\item
+  Bridges.
+\item
+  Cross-chain governance.
+\item
+  Historical queries.
+\item
+  On-chain light clients.
+\item
+  Rollup withdrawals.
+\item
+  Oracle attestations.
+\item
+  Proof-of-reserves systems.
+\end{itemize}
+
+State proofs are often the difference between trusting an RPC response
+and verifying a claim against a committed root.
+
+\subsection{Receipt Proofs and Event Proofs}
+
+Events live in transaction logs, and logs are represented in receipts.
+Ethereum block headers include a \passthrough{\lstinline!receiptsRoot!},
+committing to the receipts trie.\footnote{ethereum.org, ``Blocks'',
+  https://ethereum.org/developers/docs/blocks/.}
+
+An event proof usually needs to show:
+
+\begin{lstlisting}
+block header commits to receiptsRoot
+receiptsRoot commits to transaction receipt
+receipt contains log
+log was emitted by expected contract
+log topics and data match expected event
+block is canonical and final enough
+event has not already been consumed
+\end{lstlisting}
+
+Common mistakes:
+
+\begin{itemize}
+\tightlist
+\item
+  Verifying the event data but not the emitting contract.
+\item
+  Verifying the event but not the source chain.
+\item
+  Verifying inclusion but not finality.
+\item
+  Trusting a relayer's JSON instead of verifying the receipt proof.
+\item
+  Forgetting replay protection on the destination chain.
+\item
+  Treating event existence as proof that the corresponding application
+  invariant is true.
+\end{itemize}
+
+An event is a statement emitted by code. It is not automatically the
+state itself. Chapter 3's rule still holds:
+
+\begin{lstlisting}
+Events are evidence.
+State is authority.
+\end{lstlisting}
+
+\subsection{SSZ Merkleization and Consensus Objects}
+
+Ethereum's consensus layer uses Simple Serialize (SSZ), which defines
+serialization, merkleization, and generalized indices for consensus
+objects.\footnote{Ethereum Consensus Specs, ``SimpleSerialize (SSZ)'',
+  https://ethereum.github.io/consensus-specs/ssz/simple-serialize/.}
+
+This matters because proof systems are not interchangeable.
+
+An Ethereum execution-layer Merkle Patricia proof and an Ethereum
+consensus-layer SSZ proof have different:
+
+\begin{itemize}
+\tightlist
+\item
+  Serialization.
+\item
+  Tree structure.
+\item
+  Key/indexing model.
+\item
+  Hashing rules.
+\item
+  Object schemas.
+\item
+  Verification algorithms.
+\end{itemize}
+
+Security review question:
+
+\begin{lstlisting}
+Which commitment scheme is this proof for?
+\end{lstlisting}
+
+If the answer is vague, proof verification is already in trouble.
+
+\section{Proof Verification, Proof Forgery Risk, and Trust-Minimized Claims}
+
+\subsection{A Proof Is Only as Good as Its Root}
+
+Every proof is relative to a root.
+
+Bad verification:
+
+\begin{lstlisting}
+verify(proof, claim) == true
+\end{lstlisting}
+
+Better verification:
+
+\begin{lstlisting}
+verify(root, proof, claim, domain, rules) == true
+\end{lstlisting}
+
+Best verification also asks:
+
+\begin{lstlisting}
+Where did root come from?
+Is root canonical?
+Is root final enough?
+Is root from the expected chain, block, contract, epoch, version, and fork?
+Is the verifying code using the exact committed encoding?
+Has this claim already been consumed?
+\end{lstlisting}
+
+A valid proof against an untrusted root is meaningless. An invalid root
+can commit to any attacker's preferred universe.
+
+\subsection{Proof Verification Is a State Transition}
+
+When a smart contract, bridge, rollup, wallet, or backend verifies a
+proof and acts on it, proof verification becomes part of the state
+machine.
+
+Example:
+
+\begin{lstlisting}
+claimWithdrawal(proof, message):
+  require(verifyProof(trustedRoot, proof, message))
+  require(!consumed[message.id])
+  consumed[message.id] = true
+  transfer(message.amount, message.recipient)
+\end{lstlisting}
+
+The proof verifier is not passive. It gates value movement.
+
+Security review must inspect:
+
+\begin{itemize}
+\tightlist
+\item
+  The root registry.
+\item
+  The proof parser.
+\item
+  The encoding rules.
+\item
+  The hash function.
+\item
+  The domain separator.
+\item
+  The finality rule.
+\item
+  The consumed-message state.
+\item
+  The action triggered after verification.
+\item
+  The failure behavior if verification reverts or runs out of gas.
+\end{itemize}
+
+Proof verification bugs are often bridge bugs, withdrawal bugs,
+governance bugs, and oracle bugs.
+
+\subsection{Common Proof Verification Failures}
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Failure
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Description
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Result
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Wrong root & Proof verifies against attacker-supplied or stale root &
+False claims accepted \\
+Wrong domain & Proof from chain A accepted for chain B & Cross-domain
+replay \\
+Wrong contract & Event from fake contract accepted & Forged bridge or
+oracle event \\
+Wrong encoding & Verifier hashes bytes differently from producer & False
+rejection or false acceptance \\
+Missing position & Leaf value proved without index/key & Reordered or
+duplicate claim accepted \\
+Missing nonmembership semantics & Absence proof interpreted incorrectly
+& Claims allowed despite existing state \\
+Missing replay protection & Same proof consumed twice & Double mint or
+double withdrawal \\
+Insufficient finality & Proof from reorged block accepted & Unbacked
+release \\
+Malformed proof parser & Invalid nodes accepted or decoder confused &
+Proof forgery or denial of service \\
+Gas/resource failure & Valid proofs too costly to verify & Liveness
+failure \\
+Semantic mismatch & Proof is valid but proves the wrong thing & Unsafe
+state transition \\
+\end{longtable}
+}
+
+The last row is especially common. A proof can be mathematically valid
+and still not support the action the protocol takes.
+
+\subsection{Proof of Inclusion Is Not Proof of Validity}
+
+Suppose a bridge sees a source-chain event:
+
+\begin{lstlisting}
+Deposit(user, amount, nonce)
+\end{lstlisting}
+
+An inclusion proof can show that this event was in a receipt committed
+by a source-chain block.
+
+It does not automatically prove:
+
+\begin{itemize}
+\tightlist
+\item
+  The deposit contract was not upgradeable to malicious code.
+\item
+  The deposited token was genuine.
+\item
+  The deposit was not later reverted by a reorg.
+\item
+  The source chain had sufficient finality.
+\item
+  The event fields were interpreted correctly.
+\item
+  The message was intended for this destination.
+\item
+  The user has not already claimed on the destination chain.
+\end{itemize}
+
+The proof answers an inclusion question. The protocol's security
+requires additional validity, finality, and replay checks.
+
+This distinction is one of the most important in cross-chain security:
+
+\begin{lstlisting}
+Inclusion answers "was this committed?"
+Validity answers "should this committed thing be trusted for this action?"
+\end{lstlisting}
+
+\subsection{Trust-Minimized Does Not Mean Trust-Free}
+
+Trust-minimized systems reduce the number or strength of assumptions a
+user must accept. They do not eliminate assumptions.
+
+A storage proof can remove the need to trust an RPC provider's answer
+about a storage slot. But the verifier still trusts:
+
+\begin{itemize}
+\tightlist
+\item
+  The block header root.
+\item
+  The consensus/finality mechanism that accepted that block.
+\item
+  The hash and trie assumptions.
+\item
+  The proof verification implementation.
+\item
+  The meaning of the storage slot.
+\item
+  The freshness requirement for the relying action.
+\end{itemize}
+
+A light client can reduce reliance on a full node. It still trusts a
+sync committee, validator quorum, proof-of-work chain, or other
+consensus evidence depending on design.
+
+A ZK proof can reduce the need to re-execute computation. It still
+trusts the statement, circuit, verifier, public inputs, setup
+assumptions if any, and integration logic.
+
+Serious phrasing:
+
+\begin{lstlisting}
+This system verifies storage membership against finalized Ethereum headers,
+so it does not trust an RPC provider for the storage value.
+It still assumes Ethereum finality, correct header verification,
+correct MPT verification, and correct interpretation of the storage slot.
+\end{lstlisting}
+
+That is how to write trust-minimized claims without fantasy.
+
+\subsection{Proofs Need Freshness and Expiration}
+
+Proofs often age badly.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  A proof that an account had a balance at block N does not prove it has
+  that balance at block N + 100.
+\item
+  A proof that a message was unconsumed at block N does not prove it is
+  unconsumed now.
+\item
+  A proof that a validator set was active in epoch E may not apply in
+  epoch E + 1.
+\item
+  A proof that an oracle price was fresh at one block may be stale by
+  execution time.
+\item
+  A proof generated before an upgrade may not correspond to post-upgrade
+  semantics.
+\end{itemize}
+
+Defenses:
+
+\begin{itemize}
+\tightlist
+\item
+  Include block number, slot, epoch, or timestamp in the verified claim.
+\item
+  Enforce maximum age.
+\item
+  Enforce finality minimums.
+\item
+  Store consumed nullifiers or message IDs.
+\item
+  Bind proofs to destination chain, contract, and version.
+\item
+  Require expected state checks at execution time.
+\item
+  Make stale proof failure explicit and safe.
+\end{itemize}
+
+Freshness belongs in the verifier, not in off-chain hope.
+
+\subsection{Proof Verification Can Be a Denial-of-Service Surface}
+
+Proof verification may be expensive.
+
+Attackers may submit:
+
+\begin{itemize}
+\tightlist
+\item
+  Very large proofs.
+\item
+  Deep trie paths.
+\item
+  Malformed encodings.
+\item
+  Duplicate nodes.
+\item
+  Proofs that almost verify but fail late.
+\item
+  Proofs that trigger worst-case parser behavior.
+\item
+  Proofs for stale roots that waste computation.
+\end{itemize}
+
+On-chain proof verification must consider:
+
+\begin{itemize}
+\tightlist
+\item
+  Gas or compute limits.
+\item
+  Maximum proof size.
+\item
+  Maximum path length.
+\item
+  Canonical encoding checks.
+\item
+  Early rejection.
+\item
+  Memory allocation.
+\item
+  Hash cost.
+\item
+  Reentrancy or callbacks after proof acceptance.
+\item
+  Whether failed proofs cost the attacker enough.
+\end{itemize}
+
+A verifier that is cryptographically correct but economically unusable
+can still fail security goals through liveness.
+
+\subsection{The Verification Checklist}
+
+For any proof-based protocol, write the verification checklist
+explicitly:
+
+\begin{lstlisting}
+Claim:
+  What exact fact is being proved?
+
+Root:
+  Which commitment root is used?
+
+Root source:
+  Where does the root come from?
+
+Finality:
+  Why is the root canonical and final enough?
+
+Domain:
+  Which chain, contract, program, module, version, and operation is this proof for?
+
+Encoding:
+  Which canonical serialization and hashing rules apply?
+
+Proof type:
+  Inclusion, absence, consistency, state, receipt, storage, light-client, ZK, or other?
+
+Verifier:
+  Which algorithm and implementation checks it?
+
+Freshness:
+  How old can the root or proof be?
+
+Replay:
+  What state marks the claim consumed?
+
+Action:
+  What state transition happens after verification?
+
+Failure:
+  What happens if proof verification fails or is too expensive?
+\end{lstlisting}
+
+If a protocol cannot answer these, the proof system is not yet a
+security system. It is a cryptographic decoration.
+
+\section{Worked Example: Verifying a Cross-Chain Deposit Claim}
+
+Suppose a destination-chain bridge wants to mint wrapped tokens after a
+user deposits tokens into a source-chain bridge.
+
+Naive design:
+
+\begin{lstlisting}
+Relayer submits:
+  user
+  amount
+  source_tx_hash
+
+Destination bridge:
+  if relayer is trusted:
+    mint(user, amount)
+\end{lstlisting}
+
+This trusts the relayer for safety.
+
+More trust-minimized design:
+
+\begin{lstlisting}
+Relayer submits:
+  source block header
+  receipt proof
+  deposit event fields
+  transaction index / receipt index
+  log index
+
+Destination bridge verifies:
+  source block header is accepted and final enough
+  receiptsRoot is in the block header
+  receipt proof verifies against receiptsRoot
+  receipt contains Deposit event
+  event was emitted by expected source bridge
+  event includes destination chain and destination bridge
+  event includes token, recipient, amount, nonce
+  nonce has not been consumed
+\end{lstlisting}
+
+Then:
+
+\begin{lstlisting}
+consumed[source_chain_id][source_bridge][nonce] = true
+mint(recipient, amount)
+\end{lstlisting}
+
+Now compare the trust assumptions.
+
+Naive design:
+
+\begin{lstlisting}
+The relayer tells the truth.
+\end{lstlisting}
+
+Proof-based design:
+
+\begin{lstlisting}
+The relayer can provide data but cannot forge inclusion under a trusted finalized source block root.
+The destination bridge still trusts the source-chain finality rule, source bridge contract, proof verifier, token mapping, and replay protection.
+\end{lstlisting}
+
+This is better, but not magic.
+
+Possible bugs:
+
+\begin{itemize}
+\tightlist
+\item
+  The verifier accepts an unfinalized source block.
+\item
+  The proof checks receipt inclusion but not emitting contract.
+\item
+  The event omits destination chain ID.
+\item
+  The nonce is global instead of scoped by source chain and source
+  bridge.
+\item
+  The token mapping can be changed by an admin without delay.
+\item
+  The same event can be replayed to another destination bridge.
+\item
+  The source bridge is upgradeable and can emit fake deposits.
+\item
+  The proof parser accepts malformed trie nodes.
+\item
+  The verifier runs out of gas on valid proofs during congestion.
+\end{itemize}
+
+The cryptographic proof is only one part of the security model. The
+transition after verification is where value moves.
+
+\section{Practical Discipline: Root, Proof, Claim}
+
+When someone says ``we have a proof,'' write three lines:
+
+\begin{lstlisting}
+Root:
+  What compact commitment is trusted?
+
+Proof:
+  What evidence connects the claim to the root?
+
+Claim:
+  What exact statement follows if verification succeeds?
+\end{lstlisting}
+
+Then write three more:
+
+\begin{lstlisting}
+Root trust:
+  Why is the root accepted?
+
+Domain:
+  Where is the proof valid?
+
+Action:
+  What state transition occurs because of the proof?
+\end{lstlisting}
+
+This prevents the most common proof-system mistake: verifying a true
+fact and then doing an unjustified thing with it.
+
+\section{Review Questions}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  What does a cryptographic commitment bind, and what does it not prove by itself?
+\item
+  Why does a proof need a trusted root and a precise verification algorithm?
+\item
+  What does a Merkle inclusion proof prove relative to a root?
+\item
+  Why does an inclusion proof not prove finality, semantic correctness, or non-replay by itself?
+\item
+  What is domain separation, and why does it matter for commitments and proofs?
+\item
+  How can stale roots, wrong roots, or wrong verification rules create valid-looking but unsafe claims?
+\item
+  Why are proof verification functions also state-transition surfaces?
+\item
+  What must a verifier check before accepting a cross-domain proof?
+\end{enumerate}
+
+\section{Applied Exercises}
+
+\subsection{Exercise 1: Manual Merkle Verification}
+
+Given four leaves and a claimed proof for one leaf, draw the tree and recompute the root.
+
+Expected output:
+
+\begin{itemize}
+\tightlist
+\item
+  tree diagram;
+\item
+  proof path;
+\item
+  recomputation steps;
+\item
+  final accept/reject decision.
+\end{itemize}
+
+\subsection{Exercise 2: Root and Domain Review}
+
+A bridge contract accepts a proof that a deposit event appeared on a source chain. The proof verifies against a block root, but the contract does not check source chain ID, finality depth, message nonce, or whether the message was already consumed.
+
+Identify the failure modes.
+
+Expected output: one table with columns for missing check, false assumption, possible impact, and mitigation.
+
+\subsection{Exercise 3: Proof-Verification Pseudocode}
+
+Write pseudocode for a verifier with this shape:
+
+\begin{lstlisting}
+verify(root, claim, proof, domain, nonce) -> accept or reject
+\end{lstlisting}
+
+It must check:
+
+\begin{itemize}
+\tightlist
+\item
+  root source;
+\item
+  domain;
+\item
+  proof algorithm;
+\item
+  claim encoding;
+\item
+  replay or message consumption;
+\item
+  finality or settlement assumption.
+\end{itemize}
+
+Expected output: pseudocode and a short explanation of each rejection condition.
+
+\subsection{Exercise 4: Trust-Minimized Claim Statement}
+
+Rewrite this weak statement:
+
+\begin{lstlisting}
+The bridge is trustless because it verifies proofs.
+\end{lstlisting}
+
+Write a precise security claim that names the trusted root, proof algorithm, finality assumption, replay protection, and verifier authority.
+
+Expected output: one improved security claim and one residual-risk paragraph.
+
+\section{Key Takeaways}
+
+\begin{itemize}
+\tightlist
+\item
+  Hashes are compact fingerprints of bytes, not proofs of meaning,
+  authority, freshness, or finality.
+\item
+  Preimage, second-preimage, and collision resistance are different
+  properties used for different security goals.
+\item
+  Commitments bind data only if the primitive, encoding, domain
+  separation, and verification rules are correct.
+\item
+  Hash commitments do not hide low-entropy values unless they include
+  sufficient secret randomness.
+\item
+  Merkle proofs prove membership relative to a specific root and tree
+  construction.
+\item
+  State roots, transaction roots, and receipt roots are commitments to
+  different parts of blockchain data.
+\item
+  Ethereum Merkle Patricia proofs and SSZ proofs are different proof
+  systems with different verification rules.
+\item
+  A valid proof against an untrusted, stale, or wrong-domain root is
+  useless or dangerous.
+\item
+  Proof verification is itself a state transition when it gates minting,
+  withdrawal, governance, or settlement.
+\item
+  Trust-minimized does not mean trust-free. It means the remaining
+  assumptions are narrower and should be named precisely.
+\end{itemize}
+
+\section{Further Reading}
+
+\begin{itemize}
+\tightlist
+\item
+  NIST,
+  \href{https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.180-4.pdf}{``FIPS
+  180-4: Secure Hash Standard''}. Specification of SHA-family hash
+  algorithms and their message-digest role.
+\item
+  NIST,
+  \href{https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-107r1.pdf}{``SP
+  800-107 Revision 1: Recommendation for Applications Using Approved
+  Hash Algorithms''}. Useful legacy definitions of collision, preimage,
+  and second-preimage resistance and security-strength guidance; NIST
+  notes that supplementary material has moved to its hash-functions
+  webpage and that remaining requirements are to move into CMVP
+  implementation guidance before withdrawal.
+\item
+  Satoshi Nakamoto, \href{https://bitcoin.org/bitcoin.pdf}{``Bitcoin: A
+  Peer-to-Peer Electronic Cash System''}. See the simplified payment
+  verification discussion for Merkle branches and block headers.
+\item
+  IETF, \href{https://datatracker.ietf.org/doc/html/rfc6962}{``RFC 6962:
+  Certificate Transparency''}. A clear standard reference for Merkle
+  hash trees, inclusion proofs, and consistency proofs.
+\item
+  Gavin Wood,
+  \href{https://ethereum.github.io/yellowpaper/paper.pdf}{``Ethereum: A
+  Secure Decentralised Generalised Transaction Ledger''}. Formal
+  Ethereum reference for state, transactions, receipts, and trie roots.
+\item
+  ethereum.org,
+  \href{https://ethereum.org/developers/docs/data-structures-and-encoding/patricia-merkle-trie/}{``Merkle
+  Patricia Trie''}. Practical explanation of Ethereum's modified
+  Merkle-Patricia trie and state proofs.
+\item
+  ethereum.org,
+  \href{https://ethereum.org/developers/docs/blocks/}{``Blocks''}.
+  Useful overview of block fields including
+  \passthrough{\lstinline!state\_root!},
+  \passthrough{\lstinline!transactionsRoot!}, and
+  \passthrough{\lstinline!receiptsRoot!}.
+\item
+  Ethereum Improvement Proposals,
+  \href{https://eips.ethereum.org/EIPS/eip-1186}{``EIP-1186: RPC-Method
+  to get Merkle Proofs - eth\_getProof''}. Specification for retrieving
+  account and storage proofs.
+\item
+  Ethereum Consensus Specs,
+  \href{https://ethereum.github.io/consensus-specs/ssz/simple-serialize/}{``SimpleSerialize
+  (SSZ)''}. Consensus-layer serialization and merkleization reference.
+\end{itemize}

@@ -1,0 +1,406 @@
+\chapter*{Part I Integrated Lab: Security Model Review}
+\phantomsection
+\addcontentsline{toc}{chapter}{Part I Integrated Lab: Security Model Review}
+
+\begin{labbox}[Security Model Review]
+This lab closes Part I by asking the reader to replace a protocol story with a security model. The output is one professional review package, not a collection of short answers.
+\end{labbox}
+
+\section*{Scenario}
+
+You are reviewing a proposed yield vault called \texttt{EpochVault}. The protocol team has not yet given you code. They have given you the design summary below and asked whether the system is ready for implementation review.
+
+\texttt{EpochVault} accepts USDC deposits and issues transferable vault shares. The vault allocates some USDC into approved strategies. Users cannot withdraw immediately. They request withdrawal, enter a queue, and receive USDC at the next epoch boundary if liquidity and processing conditions allow it.
+
+The product description says:
+
+\begin{quote}
+Users own vault shares backed by idle USDC and approved strategies. Strategy value is reported once per epoch. Governance protects users through a 48-hour timelock. Guardians can pause during emergencies. The vault is upgradeable so bugs can be fixed.
+\end{quote}
+
+That description is not a security model. Your task is to build the security model the team should have written before implementation.
+
+\section*{Protocol Rules}
+
+Use the rules in this section as the input packet for the review. Where a rule is ambiguous, record the ambiguity instead of silently choosing the most convenient interpretation.
+
+\subsection*{Actors and Roles}
+
+\begin{itemize}
+\item A user can deposit USDC, receive shares, request withdrawal, and claim processed withdrawals.
+\item A strategist can move idle USDC into approved strategies and request funds back from those strategies.
+\item An oracle reporter posts each strategy's value once per epoch.
+\item A keeper calls withdrawal-processing functions at epoch boundaries.
+\item Governance executes through a 48-hour timelock.
+\item A guardian can pause deposits immediately.
+\item An emergency operator can pause withdrawals immediately.
+\item A proxy admin controlled by governance can upgrade the vault implementation.
+\end{itemize}
+
+\subsection*{Vault Accounting}
+
+The design defines:
+
+\begin{codeblock}
+totalAssets = idleUSDC + lastReportedStrategyValue - recognizedLosses
+
+sharePrice = totalAssets / totalShares
+\end{codeblock}
+
+Deposits mint shares using the vault's accounting immediately before the deposit. If no shares exist, the first deposit mints shares at a 1:1 accounting rate. Otherwise:
+
+\begin{codeblock}
+sharesOut = assetsReceived * totalShares / totalAssetsBefore
+\end{codeblock}
+
+The result rounds down. The design does not yet say whether deposits include a caller-supplied minimum share amount. It also does not say whether direct USDC transfers to the vault affect share pricing.
+
+\subsection*{Strategies}
+
+Governance can approve a strategy after the 48-hour timelock. Each approved strategy has an allocation cap. The strategist may allocate idle USDC only to approved strategies and only within the configured cap.
+
+Strategy value is not read directly from the strategy during every deposit or withdrawal. The vault uses the last accepted oracle report. A report contains:
+
+\begin{codeblock}
+strategy
+epochId
+reportedValue
+reporter
+timestamp
+\end{codeblock}
+
+The design says reports are submitted once per epoch. It does not yet define stale-report rejection, dispute handling, report replacement, or what happens if a strategy cannot return funds when withdrawals are due.
+
+\subsection*{Withdrawals}
+
+A user calls:
+
+\begin{codeblock}
+requestWithdraw(shares, receiver)
+\end{codeblock}
+
+The shares are locked in a withdrawal queue entry. At the next epoch boundary, after the oracle report for that epoch, a keeper may process queued withdrawals in FIFO order.
+
+Processing computes the USDC owed from the accepted epoch accounting, burns the locked shares, and transfers USDC to the receiver. A processing call handles at most 50 queue entries. The design does not yet say whether one failing receiver should block the batch, whether entries may be skipped, or how long an entry may remain unprocessed.
+
+\subsection*{Emergency and Upgrade Controls}
+
+The guardian can pause deposits immediately. The emergency operator can pause withdrawal requests and withdrawal processing immediately. Governance can unpause, replace role holders, approve strategies, set strategy caps, replace the oracle reporter, and upgrade the vault implementation after the timelock.
+
+The team claims the timelock gives users time to exit before dangerous governance actions execute. Your model must test whether that claim is actually true when withdrawals are queued, epoch-bound, and pauseable.
+
+\section*{Practical Evidence Packet}
+
+Use the following evidence packet as if it came from design notes, traces, and review artifacts collected before code exists. The point is not to prove the system safe from these snippets. The point is to practice extracting state, authority, trust boundaries, and invariants from concrete evidence.
+
+\subsection*{Accounting Trace}
+
+\begin{codeblock}
+T0
+    totalShares = 0
+    idleUSDC = 0
+    lastReportedStrategyValue = 0
+    recognizedLosses = 0
+
+T1
+    Alice deposits 1,000,000 USDC.
+    Vault mints 1,000,000 shares.
+
+T2
+    Mallory transfers 50,000 USDC directly to the vault address.
+    No deposit function is called.
+    The design does not say whether direct transfers affect totalAssets.
+
+T3
+    Mallory deposits 1 USDC.
+    The deposit transaction does not include minSharesOut.
+
+T4
+    Governance queues strategy approval for Strategy S1 with a 600,000 USDC cap.
+    Execution becomes possible after 48 hours.
+
+T5
+    Emergency operator pauses withdrawal requests.
+    Deposits remain unpaused.
+
+T6
+    Bob requests withdrawal of 200,000 shares.
+    The request reverts because withdrawal requests are paused.
+\end{codeblock}
+
+\subsection*{Signed Oracle Report}
+
+\begin{codeblock}
+messageType: StrategyValueReport
+domainName: EpochVault Oracle
+chainId: 1
+vault: 0xVault
+strategy: 0xS1
+epochId: 12
+reportedValue: 640,000 USDC
+reporter: 0xReporterOld
+nonce: 12
+deadline: none
+acceptedBy: reportStrategyValue(...)
+
+governance action:
+    replace oracle reporter 0xReporterOld -> 0xReporterNew
+    queued at epoch 11
+    executable at epoch 13
+\end{codeblock}
+
+\subsection*{Commitment and Proof Evidence}
+
+\begin{codeblock}
+acceptedReportRoot for epoch 12:
+    0xroot-epoch-12
+
+claim:
+    strategy = 0xS1
+    epochId = 12
+    reportedValue = 640,000 USDC
+
+provided proof metadata:
+    proofRoot = 0xroot-epoch-11
+    leafDomain = StrategyReportV1
+    verifierDomain = EpochVaultWithdrawals
+    action = process withdrawals for epoch 12
+\end{codeblock}
+
+\subsection*{Governance Payload}
+
+\begin{codeblock}
+proposal:
+    target = ProxyAdmin
+    action = upgradeTo(0xImplV2)
+    queuedAt = T4
+    earliestExecution = T4 + 48 hours
+
+related changes in implementation note:
+    new withdrawal processing allows entries to be skipped
+    new strategy adapter can pull idleUSDC up to each strategy cap
+    direct USDC transfers are counted in totalAssets
+\end{codeblock}
+
+\section*{Required Deliverable}
+
+\begin{artifactbox}[Security Model Review Package: EpochVault]
+Produce a single review document that a protocol team could use before implementation, audit preparation, or remediation planning.
+\end{artifactbox}
+
+The package must include:
+
+\begin{artifactchecklist}
+\item Scope and assumptions.
+\item State-machine model.
+\item Transition table.
+\item Evidence inspection worksheet.
+\item Asset and control-surface map.
+\item Authority map.
+\item Trust-boundary and evidence register.
+\item Transaction and authorization-flow analysis.
+\item Threat model.
+\item Invariant catalogue.
+\item Exploitability memo.
+\item Residual-risk summary.
+\end{artifactchecklist}
+
+\section*{Required Sections}
+
+\subsection*{1. Scope and Assumptions}
+
+Define what your review covers and what it excludes. At minimum, cover the vault, share accounting, deposit path, withdrawal queue, strategy allocation, oracle reporting, governance timelock, pause controls, and upgrade path.
+
+Record assumptions in falsifiable form. Do not write ``USDC is safe,'' ``governance is trusted,'' or ``the oracle is reliable.'' Write the precise property being assumed and what fails if it is false.
+
+\subsection*{2. State-Machine Model}
+
+Model the vault as a state machine. Name the relevant state variables, accepted inputs, rejection conditions, state updates, and forbidden states.
+
+At minimum, model:
+
+\begin{itemize}
+\item deposit;
+\item share minting;
+\item strategy allocation;
+\item strategy value reporting;
+\item withdrawal request;
+\item withdrawal processing;
+\item deposit pause;
+\item withdrawal pause;
+\item strategy approval;
+\item oracle reporter replacement; and
+\item implementation upgrade.
+\end{itemize}
+
+Your transition table should include authority, preconditions, state changes, failure behavior, and the security property each transition can break.
+
+\subsection*{3. Evidence Inspection Worksheet}
+
+Analyze the practical evidence packet before writing final findings. Your worksheet must include:
+
+\begin{itemize}
+\item the state variables touched by each trace event;
+\item whether the direct USDC transfer should affect share pricing under the stated design;
+\item the shares Mallory might receive at T3 under each plausible interpretation of \texttt{totalAssets};
+\item whether Bob's failed withdrawal request weakens the team's timelock exit claim;
+\item whether the oracle report has adequate domain, nonce, deadline, signer, and stale-authority protection;
+\item whether the proof metadata matches the accepted root, epoch, domain, and action;
+\item which governance payload effects alter future transition rules; and
+\item which observations are evidence, which are authority, and which are merely claims requiring verification.
+\end{itemize}
+
+This worksheet is allowed to contain calculations, small tables, or short traces. It should not be written as a narrative essay.
+
+\subsection*{4. Asset and Control-Surface Map}
+
+List the assets and control surfaces that matter. Include more than USDC and shares.
+
+Your map should include idle USDC, strategy positions, vault shares, locked withdrawal shares, queued withdrawal claims, oracle-reported value, strategy approval authority, strategist authority, keeper liveness, pause authority, governance execution authority, and upgrade authority.
+
+For each item, record:
+
+\begin{codeblock}
+representation in state
+transition that can change it
+authority required
+trust boundary, if any
+worst-case failure
+\end{codeblock}
+
+\subsection*{5. Authority Map}
+
+Replace role names with verbs. For each actor or mechanism, state what it can actually do.
+
+The authority map must answer:
+
+\begin{itemize}
+\item Who can move USDC?
+\item Who can mint, lock, burn, or dilute shares?
+\item Who can change strategy exposure?
+\item Who can change reported value?
+\item Who can stop deposits?
+\item Who can stop withdrawals?
+\item Who can change future rules through configuration or upgrade?
+\item Which authority can users observe before harm occurs?
+\item Which authority can be revoked, delayed, or bypassed?
+\end{itemize}
+
+Treat upgrade authority as authority over future transition rules, not as an operational footnote.
+
+\subsection*{6. Trust-Boundary and Evidence Register}
+
+Draw or describe the boundary between facts the vault verifies locally and facts it relies on from elsewhere.
+
+At minimum, classify:
+
+\begin{itemize}
+\item USDC transfer behavior and issuer controls;
+\item strategy solvency and liquidity;
+\item oracle-reported strategy value;
+\item keeper processing;
+\item governance proposal and execution records;
+\item timelock delay and cancellation behavior;
+\item proxy admin control; and
+\item frontend, RPC, or indexer evidence if users depend on it to react.
+\end{itemize}
+
+For each boundary, state the claim, source, freshness requirement, verifier, dependent transition, failure impact, and evidence a reviewer would inspect.
+
+\subsection*{7. Transaction and Authorization-Flow Analysis}
+
+Trace at least four flows:
+
+\begin{itemize}
+\item user deposit;
+\item withdrawal request and processing;
+\item oracle report acceptance;
+\item strategy allocation; and
+\item governance upgrade or strategy approval.
+\end{itemize}
+
+For each flow, identify the signer or caller, verifier, domain, replay or uniqueness boundary, state touched, lifecycle stage where the result becomes reliable, and evidence of success. If the flow is not signature-based, say what authorization rule replaces the signature.
+
+\subsection*{8. Threat Model}
+
+Write a compact threat model. It must include:
+
+\begin{itemize}
+\item protocol goal;
+\item scope and exclusions;
+\item critical assets;
+\item critical transitions;
+\item actors and capabilities;
+\item safety assumptions;
+\item liveness assumptions;
+\item at least five threat scenarios;
+\item top review priorities; and
+\item residual risks requiring an owner decision.
+\end{itemize}
+
+At least three scenarios must be concrete attack paths, not category names. For example, ``oracle manipulation'' is not enough. Name the actor, capability, vulnerable assumption, sequence, impact, and first evidence you would inspect.
+
+\subsection*{9. Invariant Catalogue}
+
+Write at least eight invariants. Include:
+
+\begin{itemize}
+\item at least two state invariants;
+\item at least two transition invariants;
+\item at least one temporal or liveness property;
+\item at least one authorization property;
+\item at least one economic or solvency property; and
+\item at least one invariant involving an external assumption.
+\end{itemize}
+
+Each invariant must include scope, assumptions, allowed exceptions, impact if violated, likely attack paths, and tests or monitoring that would give evidence for the property.
+
+\subsection*{10. Exploitability Memo}
+
+Choose two material invariant violations and analyze exploitability. Each memo must include:
+
+\begin{codeblock}
+broken invariant
+smallest counterexample trace
+required initial state
+required attacker capability
+capital or liquidity required
+timing or ordering requirement
+external dependency behavior
+profit or non-profit impact
+reliability and repeatability
+detection and response window
+mitigation invariant
+residual risk
+\end{codeblock}
+
+One memo should involve ordinary user or attacker behavior. The other should involve privileged authority, oracle reporting, strategy liquidity, pause behavior, or upgrade timing.
+
+\section*{Review Standard}
+
+A strong submission is precise enough that another reviewer can disagree with a specific assumption, transition, or invariant. It should expose where security depends on state rules, signatures, role checks, oracle reports, strategy liquidity, governance delay, operator behavior, and user exit timing.
+
+Unacceptable submissions include:
+
+\begin{itemize}
+\item generic bug lists without state transitions;
+\item claims that a role is trusted without naming its powers;
+\item trust-boundary statements that do not name the dependent transition;
+\item invariants that restate implementation variables without protocol meaning;
+\item exploitability claims without capital, timing, authority, and dependency assumptions;
+\item severity labels with no counterexample trace; and
+\item treating the 48-hour timelock as protective without checking whether users can actually exit within that window.
+\end{itemize}
+
+\section*{Optional Extension}
+
+For a harder version, add one of the following changes and update the whole package:
+
+\begin{itemize}
+\item The oracle report is signed off-chain and submitted by any relayer.
+\item Governance can execute an emergency upgrade without the 48-hour delay if three emergency signers approve.
+\item Strategy shares are represented by a nonstandard token that can pause transfers.
+\item Withdrawals may be fulfilled with a different stablecoin chosen by governance.
+\end{itemize}
+
+Each extension should change the security model. If your artifact changes only by adding one sentence, you have not modeled the new risk.

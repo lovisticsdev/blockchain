@@ -1,0 +1,2427 @@
+\chapter{Transactions and State Transitions}
+
+\section{Purpose}
+
+Chapter 1 gave us the state-machine model. Chapter 2 taught us to
+identify assets and authority. Chapter 3 studies the object that usually
+carries authority into the state machine:
+
+\begin{quote}
+A transaction is a signed, metered, ordered request to execute one or
+more state transitions.
+\end{quote}
+
+That definition is intentionally more careful than ``a transaction sends
+money.'' Some transactions transfer native assets. Some call contracts.
+Some deploy code. Some carry multiple instructions. Some vote. Some
+update validator sets. Some submit proofs. Some relay cross-chain
+messages. Some fail but still consume fees. Some leave no application
+state change but still affect liveness, ordering, fees, or user
+expectations.
+
+Transactions are where user intent, cryptographic authorization,
+resource pricing, chain ordering, execution semantics, and application
+logic meet. That makes them one of the richest security surfaces in
+blockchain systems.
+
+The central discipline of this chapter is:
+
+\begin{lstlisting}
+Do not ask only what a transaction says.
+Ask what state it can change, under whose authority, at what cost,
+in which order, with what failure behavior, and with which observable result.
+\end{lstlisting}
+
+\section{Learning Objectives}
+
+By the end of this chapter, you should be able to:
+
+\begin{itemize}
+\tightlist
+\item
+  Describe transaction anatomy across UTXO, account, instruction-based,
+  object-based, and Cosmos-style systems.
+\item
+  Explain how signatures, nonces, sequence numbers, recent blockhashes,
+  object versions, and chain IDs limit replay.
+\item
+  Explain fees, gas, compute budgets, fee markets, and resource
+  exhaustion as security mechanisms, not just UX concerns.
+\item
+  Interpret transaction results, receipts, logs, events, return data,
+  status codes, and reverts without confusing them for application
+  truth.
+\item
+  Distinguish syntactic validity, mempool acceptance, block inclusion,
+  execution success, finality, and protocol safety.
+\item
+  Identify valid transactions that can still produce unsafe states.
+\end{itemize}
+
+\section{The Core Model}
+
+A transaction has three layers:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Layer
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Review question
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Typical fields or evidence
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Authorization & Who is asking for this transition, and how is authority
+proven? & Signatures, signers, account keys, witnesses, approvals,
+roles \\
+Execution request & What operation, message, instruction, script, or
+call should run? & Calldata, script, instruction data, message type,
+target program/contract \\
+Resource and ordering envelope & What determines whether, when, and how
+the request can be included? & Fees, gas, compute budget, nonce,
+sequence, blockhash, expiration, chain ID \\
+\end{longtable}
+}
+
+Different chains package these layers differently.
+
+Ethereum documentation describes transactions as cryptographically
+signed instructions from accounts that update network state.\footnote{ethereum.org,
+  ``Transactions'', https://ethereum.org/developers/docs/transactions/.}
+Bitcoin's developer guide describes transactions as composed of inputs
+and outputs, where each input spends a previous output and each output
+waits as a UTXO until later spent.\footnote{Bitcoin Developer Guide,
+  ``Transactions'',
+  https://developer.bitcoin.org/devguide/transactions.html.} Solana
+documentation describes transactions as containing one or more
+instructions, account signatures, and a recent blockhash; all
+instructions in a transaction are processed together and failure of one
+instruction fails the entire transaction.\footnote{Solana Foundation,
+  ``Transactions'', https://solana.com/docs/core/transactions.} Cosmos
+SDK documentation describes a lifecycle that moves from creation and
+signing, to mempool checks, to block inclusion, to deterministic
+execution and committed state changes.\footnote{Cosmos SDK v0.47,
+  ``Transaction Lifecycle'',
+  https://docs.cosmos.network/sdk/v0.47/learn/beginner/tx-lifecycle.}
+
+Those systems look different, but they all answer the same questions:
+
+\begin{lstlisting}
+Who authorized the input?
+What state does it read?
+What state does it write?
+What resources does it consume?
+How is replay prevented?
+What happens if it fails?
+When is the result accepted?
+\end{lstlisting}
+
+This chapter is about those questions.
+
+The lifecycle also matters. A transaction can be safe at one point and
+unsafe at another:
+
+\begin{lstlisting}
+flowchart LR
+    A[Constructed] --> B[Signed]
+    B --> C[Submitted]
+    C --> D[Propagated]
+    D --> E[Pending]
+    E --> F[Included]
+    F --> G[Executed]
+    G --> H[Confirmed]
+    H --> I[Finalized / settled]
+\end{lstlisting}
+
+\section{Transaction Anatomy Across Chain Models}
+
+\subsection{Transaction Anatomy Is a Security Interface}
+
+A transaction is not only a data structure. It is the boundary between
+intent and state transition.
+
+The fields inside a transaction determine:
+
+\begin{itemize}
+\tightlist
+\item
+  Who authorizes it.
+\item
+  Which state objects or accounts it can touch.
+\item
+  Which code path runs.
+\item
+  How much value moves.
+\item
+  How much resource the sender is willing to pay for.
+\item
+  Whether the transaction can be replayed.
+\item
+  Whether it expires.
+\item
+  Whether it can be replaced.
+\item
+  Whether it is valid only on a particular chain or domain.
+\item
+  What data validators, wallets, relayers, builders, and applications
+  can inspect.
+\end{itemize}
+
+This means transaction anatomy is security-critical. A missing field,
+ambiguous field, incorrectly signed field, or misunderstood field can
+become an exploit primitive.
+
+\subsection{UTXO Transactions: Consume Outputs, Create Outputs}
+
+Bitcoin-style transactions are built from inputs and outputs.
+
+Each input references a previous output by transaction ID and output
+index. Each output assigns value to a spending condition. A wallet
+balance is a derived view over spendable unspent outputs, not a single
+mutable account balance.\footnote{Bitcoin Developer Guide,
+  ``Transactions'',
+  https://developer.bitcoin.org/devguide/transactions.html.}
+
+Abstractly:
+
+\begin{lstlisting}
+Transaction:
+  version
+  inputs:
+    previous_txid
+    previous_output_index
+    unlocking_data / witness
+    sequence
+  outputs:
+    amount
+    locking_script
+  locktime
+\end{lstlisting}
+
+The state transition is:
+
+\begin{lstlisting}
+remove consumed UTXOs
+add newly created UTXOs
+\end{lstlisting}
+
+Validity depends on conditions such as:
+
+\begin{itemize}
+\tightlist
+\item
+  Referenced outputs exist and are unspent.
+\item
+  Unlocking data satisfies each referenced output's spending condition.
+\item
+  Input value is sufficient to cover output value.
+\item
+  No output is spent twice.
+\item
+  Locktime and sequence constraints are satisfied.
+\item
+  Consensus and standardness rules are met.
+\end{itemize}
+
+Security consequences:
+
+\begin{itemize}
+\tightlist
+\item
+  There is no account nonce in the Ethereum sense.
+\item
+  Replay is constrained because spending consumes specific outputs.
+\item
+  Change outputs are normal outputs and can leak privacy or be
+  mishandled.
+\item
+  Fee is typically implicit: input value minus output value.
+\item
+  Transaction malleability historically mattered because downstream
+  transactions may reference transaction IDs.
+\item
+  Script conditions define spending authority.
+\end{itemize}
+
+UTXO analysis starts with:
+
+\begin{lstlisting}
+Which outputs are consumed?
+Which new outputs are created?
+Which spending conditions were satisfied?
+Which value disappeared as fee?
+Which future spending paths now exist?
+\end{lstlisting}
+
+\subsection{Account Transactions: Mutate Account and Contract State}
+
+Account-based systems represent state differently. Ethereum transactions
+are initiated by externally owned accounts and can transfer ETH, deploy
+contracts, or call contract code.\footnote{ethereum.org,
+  ``Transactions'', https://ethereum.org/developers/docs/transactions/.}
+
+A modern Ethereum transaction may include:
+
+\begin{lstlisting}
+from
+to
+nonce
+value
+input data / calldata
+gas limit
+max fee per gas
+max priority fee per gas
+chain-specific signature data
+access list or transaction type fields
+signature
+\end{lstlisting}
+
+Ethereum.org lists these core fields, including sender, recipient,
+signature, nonce, value, input data, gas limit, max priority fee, and
+max fee.\footnote{ethereum.org, ``Transactions'',
+  https://ethereum.org/developers/docs/transactions/.}
+
+The state transition may update:
+
+\begin{itemize}
+\tightlist
+\item
+  Sender nonce.
+\item
+  Native ETH balances.
+\item
+  Contract storage.
+\item
+  Account code if a contract is created.
+\item
+  Logs emitted during execution.
+\item
+  Gas accounting and fee distribution.
+\end{itemize}
+
+In the simplest ETH transfer:
+
+\begin{lstlisting}
+balances[sender] -= value + fee
+balances[recipient] += value
+nonce[sender] += 1
+base_fee portion is burned
+priority fee goes to block proposer
+\end{lstlisting}
+
+In a contract call:
+
+\begin{lstlisting}
+nonce[sender] += 1
+call target with calldata and value
+execute EVM code
+update storage, balances, logs, and gas accounting according to execution
+\end{lstlisting}
+
+Security consequences:
+
+\begin{itemize}
+\tightlist
+\item
+  A single \passthrough{\lstinline!to!} address can hide complex logic
+  if it is a contract.
+\item
+  Calldata may be opaque to users and wallets.
+\item
+  A transaction that sends zero native value may still move tokens
+  through contract logic.
+\item
+  Nonces serialize transactions from an account.
+\item
+  Failed execution can still consume fees.
+\item
+  Logs may tell applications what happened, but logs are not the same as
+  state.
+\end{itemize}
+
+Account-model analysis starts with:
+
+\begin{lstlisting}
+Who signed?
+Which nonce is consumed?
+Which target is called?
+What calldata is supplied?
+What value is attached?
+Which storage, balances, logs, and subcalls can change?
+What happens on revert?
+\end{lstlisting}
+
+\subsection{Instruction-Based Transactions: Multiple Operations, Shared
+Atomicity}
+
+Solana uses transactions containing one or more instructions. The
+transaction includes signatures from accounts that authorize changes and
+a recent blockhash. Solana's docs emphasize that instructions in a
+transaction are processed together: if any instruction fails, the entire
+transaction fails and state changes are reverted; fees are still charged
+on failure.\footnote{Solana Foundation, ``Transactions'',
+  https://solana.com/docs/core/transactions.}
+
+A Solana transaction contains, at a high level:
+
+\begin{lstlisting}
+signatures
+message:
+  header
+  account addresses
+  recent blockhash
+  compiled instructions:
+    program id
+    account indexes
+    instruction data
+\end{lstlisting}
+
+Security consequences:
+
+\begin{itemize}
+\tightlist
+\item
+  Atomicity spans multiple instructions.
+\item
+  The caller supplies the account list.
+\item
+  Programs must verify that supplied accounts are the expected accounts.
+\item
+  Signer and writable flags are part of the authority boundary.
+\item
+  A recent blockhash limits transaction lifetime.
+\item
+  Transaction size and compute limits are first-class constraints.
+\item
+  Cross-program invocations can propagate privileges in ways reviewers
+  must understand.
+\end{itemize}
+
+Solana analysis starts with:
+
+\begin{lstlisting}
+Which instructions execute?
+Which accounts are passed to each instruction?
+Which accounts signed?
+Which accounts are writable?
+Which program owns each account?
+Which account constraints are enforced by the program?
+Which instruction fails if assumptions are false?
+\end{lstlisting}
+
+\subsection{Object-Based Transactions: Inputs, Versions, and Effects}
+
+Object-centric systems such as Sui represent many assets and state
+components as objects. Sui documentation describes every update on Sui
+as happening through a transaction and distinguishes user-submitted
+programmable transaction blocks from system transactions submitted by
+validators.\footnote{Sui Foundation, ``Transaction Overview'',
+  https://docs.sui.io/develop/transactions/txn-overview.}
+
+Sui transaction metadata includes fields such as sender address, gas
+input object, gas price, gas budget, epoch, transaction type,
+authenticator, and optional expiration.\footnote{Sui Foundation,
+  ``Transaction Overview'',
+  https://docs.sui.io/develop/transactions/txn-overview.}
+
+The object model changes security analysis:
+
+\begin{itemize}
+\tightlist
+\item
+  Objects are explicit inputs and outputs.
+\item
+  Ownership and object versions matter.
+\item
+  Parallel execution can be possible when transactions touch disjoint
+  objects.
+\item
+  Shared objects introduce contention and ordering concerns.
+\item
+  Gas is paid through a gas object.
+\item
+  Expiration can bound when a transaction may execute.
+\end{itemize}
+
+Sui-style analysis starts with:
+
+\begin{lstlisting}
+Which objects are inputs?
+Which objects are mutated, created, transferred, wrapped, or destroyed?
+Which object versions are assumed?
+Which objects are owned, shared, or immutable?
+What is the gas object?
+What are the effects?
+\end{lstlisting}
+
+\subsection{Cosmos-Style Transactions: Messages Through an Application
+Pipeline}
+
+Cosmos SDK transactions usually contain one or more messages. The
+transaction passes through creation, signing, mempool checks, block
+proposal, execution, and commit.
+
+The Cosmos SDK transaction lifecycle distinguishes:
+
+\begin{itemize}
+\tightlist
+\item
+  Transaction creation and signing.
+\item
+  Gas and fee settings.
+\item
+  \passthrough{\lstinline!CheckTx!} before mempool acceptance.
+\item
+  Stateless and stateful checks.
+\item
+  An ante handler for signatures, sequence numbers, fee deduction, and
+  related operations.
+\item
+  \passthrough{\lstinline!DeliverTx!} during block execution.
+\item
+  Commit of state changes after consensus.\footnote{Cosmos SDK v0.47,
+    ``Transaction Lifecycle'',
+    https://docs.cosmos.network/sdk/v0.47/learn/beginner/tx-lifecycle.}
+\end{itemize}
+
+Security consequences:
+
+\begin{itemize}
+\tightlist
+\item
+  A transaction can pass initial checks and still fail later.
+\item
+  Local mempool fee policies can differ from deterministic block
+  execution rules.
+\item
+  Sequence numbers and fees help prevent replay and spam.
+\item
+  Multiple messages may execute under one transaction.
+\item
+  Application modules define message handlers that cause state
+  transitions.
+\end{itemize}
+
+Cosmos-style analysis starts with:
+
+\begin{lstlisting}
+Which messages are inside the transaction?
+Which module handles each message?
+Which ante-handler checks occur?
+Which account sequence is consumed?
+Which fees are deducted?
+Which checks happen in mempool only, and which happen during block execution?
+\end{lstlisting}
+
+\subsection{Cross-Model Comparison}
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Model
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Primary input shape
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Replay boundary
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Resource boundary
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Common security focus
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+UTXO & Inputs consume outputs; outputs create new claims & Spent outputs
+& Fee from input-output difference, size/weight & Double spend, script
+conditions, change, pinning \\
+Ethereum account & Signed account transaction with nonce, gas, calldata
+& Account nonce and chain/domain separation & Gas limit and fee fields &
+Calldata intent, nonce ordering, reverts, gas griefing \\
+Solana & Signed transaction with account list, instructions, recent
+blockhash & Recent blockhash, durable nonce, account/signature checks &
+Compute units, size limits, fees & Account substitution, signer/writable
+flags, CPI \\
+Sui/object & Transaction block over objects and gas object & Object
+versions, sender/authenticator, epoch/expiration & Gas budget, object
+limits & Object ownership, shared objects, effects \\
+Cosmos SDK & Signed transaction with messages, fees, sequence & Account
+sequence, mempool cache, timeout height & Gas wanted, fees, min gas
+price & Ante handler, module message routing, deterministic deliver \\
+\end{longtable}
+}
+
+No single anatomy is ``the blockchain transaction model.'' The right
+security model comes from the state representation and execution rules
+of the chain being reviewed.
+
+For chapter-level review, keep the anatomy table compact:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Model
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Fields the reviewer must locate
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+What proves authority?
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+What shows success?
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Bitcoin/UTXO & Inputs, previous outputs, witnesses/scripts, output
+amounts, locktime, sequence & Satisfaction of each consumed output's
+spending condition & Transaction remains in canonical history; intended
+outputs exist and inputs are spent \\
+Ethereum/account & \passthrough{\lstinline!from!},
+\passthrough{\lstinline!to!}, nonce, value, calldata, gas/fee fields,
+chain ID, signature & Sender signature, contract authorization checks,
+approvals or permits & Receipt status, state changes, logs as evidence,
+sufficient settlement \\
+Solana/instruction & Signatures, account list, writable/signer flags,
+recent blockhash, instructions & Required signatures and
+program-enforced account constraints & Transaction confirmation, account
+state changes, emitted logs if relevant \\
+Object/resource-based & Sender/authenticator, input objects/resources,
+versions, gas object, effects, expiration & Ownership, capabilities,
+authenticators, module rules & Object effects, version changes, event
+evidence, settlement status \\
+\end{longtable}
+}
+
+This table is deliberately shallow. Part III will handle each execution
+model in depth. Here the purpose is to learn what must be inspected
+before trusting a transaction outcome.
+
+\section{Signatures, Nonces, Sequence Numbers, and Replay Prevention}
+
+\subsection{Signatures Authorize a Specific Message, Not a Vague
+Intention}
+
+A signature does not prove that a user understood what they were doing.
+It proves that some signing authority produced a valid cryptographic
+signature over a particular message under a particular scheme.
+
+This distinction matters.
+
+A user may think they are signing:
+
+\begin{lstlisting}
+Swap 100 USDC for at least 0.04 ETH.
+\end{lstlisting}
+
+The wallet may actually present or submit:
+
+\begin{lstlisting}
+approve(spender = attacker, amount = unlimited)
+\end{lstlisting}
+
+The cryptographic signature can be valid while the human intention was
+violated. Blockchain security must therefore separate:
+
+\begin{lstlisting}
+cryptographic authorization
+from
+informed consent
+from
+application safety
+\end{lstlisting}
+
+Chapter 4 will go deeper into keys and signatures. For this chapter,
+remember:
+
+\begin{lstlisting}
+A transaction signature authorizes exactly the bytes and domain that the signature scheme verifies.
+Everything not bound into the signed message is a potential ambiguity.
+\end{lstlisting}
+
+\subsection{Replay Is Reuse of Authority in the Wrong Context}
+
+A replay attack occurs when a valid authorization is reused where it
+should not be valid.
+
+Replay can happen across:
+
+\begin{itemize}
+\tightlist
+\item
+  Time: the same transaction or message is accepted twice.
+\item
+  Chain: a transaction valid on one chain is valid on another.
+\item
+  Contract: a signature intended for one contract is accepted by
+  another.
+\item
+  Function: a signature intended for one operation authorizes another.
+\item
+  User/account: a message is valid for an unintended signer or account.
+\item
+  Bridge domain: a cross-chain message is executed on the wrong
+  destination or more than once.
+\item
+  Fork or clone: old signatures work after migration or redeployment.
+\end{itemize}
+
+Replay prevention is not one mechanism. It is a family of mechanisms
+that bind authority to a specific context and consume it when used.
+
+\subsection{Ethereum Nonces Serialize Account Transactions}
+
+Ethereum transactions include a nonce: a sequential counter for
+transactions from the sender account.\footnote{ethereum.org,
+  ``Transactions'', https://ethereum.org/developers/docs/transactions/.}
+
+The nonce serves several purposes:
+
+\begin{itemize}
+\tightlist
+\item
+  It makes two otherwise identical transactions distinct if their nonces
+  differ.
+\item
+  It prevents the same signed transaction from being included twice on
+  the same chain.
+\item
+  It orders transactions from one account.
+\item
+  It allows replacement behavior in pending transaction pools.
+\end{itemize}
+
+But nonces also introduce operational risks:
+
+\begin{itemize}
+\tightlist
+\item
+  A low-fee transaction can block later higher-nonce transactions from
+  the same account.
+\item
+  A replacement transaction must satisfy node replacement rules.
+\item
+  A signing system that mismanages nonces can create stuck or
+  conflicting transactions.
+\item
+  Parallel signing from the same account can produce nonce races.
+\item
+  Transaction cancellation is usually replacement with a same-nonce
+  transaction, not erasure of history.
+\end{itemize}
+
+Security questions:
+
+\begin{lstlisting}
+Who assigns nonces?
+Can two systems sign with the same nonce?
+What happens if a transaction is stuck?
+Can a malicious or compromised signer block future transactions?
+Can an attacker force a protocol bot into nonce contention?
+\end{lstlisting}
+
+\subsection{Chain IDs and Domain Separation Prevent Cross-Chain Replay}
+
+Ethereum's EIP-155 introduced simple replay protection by including the
+chain ID in the transaction signing scheme after the Spurious Dragon
+fork.\footnote{Vitalik Buterin, ``EIP-155: Simple Replay Attack
+  Protection'', https://eips.ethereum.org/EIPS/eip-155.} This prevents a
+transaction signed for one EIP-155-protected chain from being valid on
+another chain with a different chain ID.
+
+The security principle is broader than Ethereum:
+
+\begin{lstlisting}
+Every authorization should be bound to the domain where it is intended to be valid.
+\end{lstlisting}
+
+Domains may include:
+
+\begin{itemize}
+\tightlist
+\item
+  Chain ID.
+\item
+  Contract address.
+\item
+  Program ID.
+\item
+  Verifying contract.
+\item
+  Application name.
+\item
+  Version.
+\item
+  Source and destination chain.
+\item
+  Message nonce.
+\item
+  User account.
+\item
+  Expiration.
+\end{itemize}
+
+If a signature says only ``approve 100 tokens'' but not which chain,
+which contract, which token, which spender, which deadline, and which
+nonce, it may authorize more than intended.
+
+Domain separation turns vague authority into scoped authority.
+
+\subsection{UTXO Replay Prevention Comes From Consumption}
+
+In a UTXO system, replay prevention is tied to spending specific
+outputs.
+
+Once an output is spent in the canonical chain, another transaction
+trying to spend the same output conflicts. A transaction cannot be
+accepted twice because its inputs would no longer be unspent.
+
+But UTXO systems still have replay concerns:
+
+\begin{itemize}
+\tightlist
+\item
+  Transactions can be replayed across chains after forks if rules and
+  UTXOs remain compatible.
+\item
+  Signatures may authorize different transaction variants depending on
+  sighash modes.
+\item
+  Unconfirmed transaction replacement and pinning can affect propagation
+  and settlement.
+\item
+  Child transactions may depend on parent transaction IDs or witness
+  behavior.
+\item
+  Time locks and sequence values affect when spending is valid.
+\end{itemize}
+
+The main lesson is:
+
+\begin{lstlisting}
+UTXO replay prevention is based on consuming unique state, not incrementing an account counter.
+\end{lstlisting}
+
+\subsection{Solana Recent Blockhashes and Durable Nonces}
+
+Solana transactions include a recent blockhash. Solana documentation
+states that a transaction's recent blockhash is valid for 150
+slots.\footnote{Solana Foundation, ``Transactions'',
+  https://solana.com/docs/core/transactions.} This creates a
+time-bounded replay window.
+
+Security consequences:
+
+\begin{itemize}
+\tightlist
+\item
+  Old transactions expire and cannot be included forever.
+\item
+  Offline signing needs special handling.
+\item
+  Users and bots must manage expiration and resubmission.
+\item
+  A transaction can fail because it is too old, even if signatures and
+  instruction data are otherwise correct.
+\end{itemize}
+
+Solana also supports durable nonces for offline signing workflows.
+Durable nonces solve a real operational problem but introduce their own
+lifecycle: nonce account creation, nonce advancement, authority, and
+failure behavior.
+
+Ask:
+
+\begin{lstlisting}
+Is replay bounded by blockhash expiry, durable nonce state, or both?
+Who controls the nonce authority?
+Can old signed transactions remain valid longer than expected?
+Can a nonce account be advanced or consumed by an unexpected party?
+\end{lstlisting}
+
+\subsection{Cosmos Sequence Numbers and Timeout Heights}
+
+Cosmos SDK documentation describes account sequence numbers as part of
+replay prevention and notes that fees and sequence counters help
+distinguish replayed transactions from identical but valid
+transactions.\footnote{Cosmos SDK v0.47, ``Transaction Lifecycle'',
+  https://docs.cosmos.network/sdk/v0.47/learn/beginner/tx-lifecycle.}
+
+Cosmos transactions can also use timeout heights, limiting commitment
+after a certain block height.\footnote{Cosmos SDK v0.47, ``Transaction
+  Lifecycle'',
+  https://docs.cosmos.network/sdk/v0.47/learn/beginner/tx-lifecycle.}
+
+Security consequences:
+
+\begin{itemize}
+\tightlist
+\item
+  Sequence numbers prevent repeated acceptance of the same account
+  authorization.
+\item
+  Timeout height limits stale transaction execution.
+\item
+  Fee checks affect spam resistance and mempool admission.
+\item
+  A transaction may pass local checks but later fail during delivery.
+\end{itemize}
+
+Sequence numbers are not merely bookkeeping. They are authority
+consumption.
+
+\subsection{Object Versions and Expiration}
+
+Object-based systems can use object versions, owned object references,
+epochs, and expiration rules to prevent stale or conflicting
+transitions.
+
+Sui documentation describes a transaction flow where objects are inputs
+and outputs, and transaction metadata includes epoch and optional
+expiration.\footnote{Sui Foundation, ``Transaction Overview'',
+  https://docs.sui.io/develop/transactions/txn-overview.}
+
+Security consequences:
+
+\begin{itemize}
+\tightlist
+\item
+  A transaction that uses an old object version may no longer be valid.
+\item
+  Shared objects require consensus and ordering.
+\item
+  Owned objects may allow parallel execution when independent.
+\item
+  Expiration prevents delayed execution after context changes.
+\end{itemize}
+
+Object models make some conflicts explicit:
+
+\begin{lstlisting}
+This transaction is not just from Alice.
+It consumes or mutates these specific object versions.
+\end{lstlisting}
+
+\subsection{Replay Protection Must Match the Asset}
+
+Replay protection is only correct if it protects the asset or authority
+being consumed.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  A transaction nonce protects Ethereum account-level transaction
+  replay.
+\item
+  A permit nonce protects token approval signature replay.
+\item
+  A bridge message nonce protects cross-chain message replay.
+\item
+  A withdrawal nullifier protects double-claiming.
+\item
+  A UTXO input protects double-spending a specific output.
+\item
+  A governance proposal ID prevents accidental duplicate execution only
+  if execution status is tracked.
+\item
+  A rollup output root claim needs finality, proof, and claim-status
+  tracking.
+\end{itemize}
+
+Do not say ``we have a nonce'' as if that settles the matter.
+
+Ask:
+
+\begin{lstlisting}
+What authority is the nonce consuming?
+Is the nonce scoped to the correct signer, chain, contract, and operation?
+Can the nonce be skipped, reused, reset, or shared across domains?
+Is there an expiration?
+Can the same effect occur through another path?
+\end{lstlisting}
+
+\section{Fees, Gas, Compute Budgets, and Resource Limits}
+
+\subsection{Resource Pricing Is Part of Consensus Security}
+
+Blockchains cannot allow unbounded computation, storage growth,
+signature verification, or network bandwidth consumption. Public systems
+need resource limits because any participant can submit inputs.
+
+Fees and metering serve several purposes:
+
+\begin{itemize}
+\tightlist
+\item
+  Prevent unlimited computation.
+\item
+  Allocate scarce block space.
+\item
+  Compensate or reward block producers.
+\item
+  Discourage spam.
+\item
+  Price storage, execution, and signature verification.
+\item
+  Create ordering incentives.
+\item
+  Bound denial-of-service impact.
+\end{itemize}
+
+Fees are not only economics. They are a security control.
+
+If execution were free and unbounded, attackers could force every node
+to do arbitrary work. A blockchain cannot rely on ``users will not
+submit expensive nonsense.'' Permissionless execution means attackers
+will submit whatever the rules allow if it benefits them or harms
+others.
+
+\subsection{Ethereum Gas}
+
+Ethereum gas measures the computational and storage work required to
+execute transactions. Ethereum.org describes gas as the fee required to
+conduct transactions or execute contracts, with each transaction
+consuming gas units and fees depending on gas used and price per
+gas.\footnote{ethereum.org, ``Gas and Fees'',
+  https://ethereum.org/developers/docs/gas/.}
+
+The EIP-1559 transaction fee market introduced a base fee that is burned
+and a priority fee paid to validators, with transactions specifying max
+fee and max priority fee.\footnote{Vitalik Buterin et al., ``EIP-1559:
+  Fee Market Change for ETH 1.0 Chain'',
+  https://eips.ethereum.org/EIPS/eip-1559.} Ethereum.org's transaction
+page describes the \passthrough{\lstinline!gasLimit!},
+\passthrough{\lstinline!maxPriorityFeePerGas!}, and
+\passthrough{\lstinline!maxFeePerGas!} fields.\footnote{ethereum.org,
+  ``Transactions'', https://ethereum.org/developers/docs/transactions/.}
+
+Security consequences:
+
+\begin{itemize}
+\tightlist
+\item
+  If the gas limit is too low, execution can fail.
+\item
+  If execution runs out of gas, state changes revert but gas is consumed
+  according to protocol rules.
+\item
+  If fees are too low, the transaction may remain pending or be ignored.
+\item
+  Complex loops over user-controlled state can become denial-of-service
+  vulnerabilities.
+\item
+  Attackers can grief systems by forcing expensive paths, even when they
+  cannot steal funds.
+\item
+  Protocols that assume an operation will always fit within block gas
+  limits can fail as state grows.
+\item
+  Gas costs can change across forks or differ across chains, affecting
+  brittle assumptions.
+\end{itemize}
+
+Gas analysis asks:
+
+\begin{lstlisting}
+Can this transition become too expensive to execute?
+Can an attacker increase the cost for other users?
+Can a required recovery or withdrawal path run out of gas?
+Does failure consume fees without producing the intended state?
+Can a low-level call fail because of gas forwarding assumptions?
+\end{lstlisting}
+
+\subsection{Solana Compute Budgets and Fees}
+
+Solana charges a base fee per signature and optional prioritization
+fees. Solana's fee documentation describes a base fee and an optional
+prioritization fee, with the prioritization fee increasing the
+likelihood that the current leader schedules the transaction ahead of
+competitors.\footnote{Solana Foundation, ``Fees'',
+  https://solana.com/docs/core/fees.}
+
+Solana also has compute unit limits. Its documentation lists default and
+maximum compute-unit limits and transaction size limits.\footnote{Solana
+  Foundation, ``Fees'', https://solana.com/docs/core/fees.} The
+transaction page lists a 1,232-byte size limit, 64-byte Ed25519
+signatures, and blockhash expiry.\footnote{Solana Foundation,
+  ``Transactions'', https://solana.com/docs/core/transactions.}
+
+Security consequences:
+
+\begin{itemize}
+\tightlist
+\item
+  Transaction size limits constrain how many accounts and instructions
+  can be included.
+\item
+  Compute limits constrain program complexity.
+\item
+  Account locking and writable accounts affect parallelism and
+  contention.
+\item
+  Prioritization fees affect scheduling.
+\item
+  Failed transactions can still pay fees.
+\item
+  Bots can create congestion through failed or competing transactions.
+\end{itemize}
+
+Solana resource analysis asks:
+
+\begin{lstlisting}
+Can the transaction fit within size and account limits?
+Can the program fit within compute limits under worst-case state?
+Can attackers lock accounts or create contention?
+Can they force expensive CPIs?
+Can a required transaction fail because too many accounts are needed?
+\end{lstlisting}
+
+\subsection{Cosmos Gas and Local Mempool Fee Policy}
+
+Cosmos SDK documentation distinguishes user-specified gas, gas prices,
+fees, local minimum gas prices, mempool checks, and deterministic
+delivery.\footnote{Cosmos SDK v0.47, ``Transaction Lifecycle'',
+  https://docs.cosmos.network/sdk/v0.47/learn/beginner/tx-lifecycle.}
+
+Important nuance: local mempool admission can depend on each node's
+local \passthrough{\lstinline!min-gas-prices!}, but deterministic block
+execution cannot depend on local settings. Cosmos documentation notes
+that \passthrough{\lstinline!DeliverTx!} does not compare gas prices to
+local \passthrough{\lstinline!min-gas-prices!} because differing local
+values would yield nondeterministic results.\footnote{Cosmos SDK v0.47,
+  ``Transaction Lifecycle'',
+  https://docs.cosmos.network/sdk/v0.47/learn/beginner/tx-lifecycle.}
+
+Security consequences:
+
+\begin{itemize}
+\tightlist
+\item
+  A transaction may be rejected by one node's mempool and accepted by
+  another.
+\item
+  Fee policy affects propagation and inclusion.
+\item
+  Gas estimation can undercount worst-case execution.
+\item
+  Ante-handler logic affects signatures, sequences, and fee deduction.
+\item
+  Block gas limits can prevent large batches or emergency operations.
+\end{itemize}
+
+The security lesson is general:
+
+\begin{lstlisting}
+Mempool policy may be local.
+Consensus execution must be deterministic.
+Do not confuse the two.
+\end{lstlisting}
+
+\subsection{UTXO Fees and Transaction Pinning}
+
+In Bitcoin-style systems, fees are commonly implicit: the difference
+between total input value and total output value.
+
+\begin{lstlisting}
+fee = sum(inputs) - sum(outputs)
+\end{lstlisting}
+
+Fee policy affects:
+
+\begin{itemize}
+\tightlist
+\item
+  Whether a transaction propagates.
+\item
+  Whether miners include it.
+\item
+  Whether it can be replaced.
+\item
+  Whether child-pays-for-parent can rescue it.
+\item
+  Whether an attacker can pin a transaction and prevent timely
+  confirmation.
+\end{itemize}
+
+UTXO fee analysis asks:
+
+\begin{lstlisting}
+What fee does this transaction pay?
+Can it be replaced?
+Can a child transaction increase its effective fee?
+Can an attacker create a low-fee dependency?
+Can time-sensitive protocols fail if confirmation is delayed?
+\end{lstlisting}
+
+This will matter later for payment channels, bridges, vault exits, and
+liquidation systems that depend on timely confirmation.
+
+\subsection{Resource Limits Create Liveness Risks}
+
+Resource limits do not only stop attackers. They can stop honest users.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  A withdrawal loop over all users becomes impossible after the user set
+  grows.
+\item
+  A liquidation path needs too much gas during market stress.
+\item
+  A bridge proof exceeds transaction size limits.
+\item
+  A governance proposal includes too many actions to execute atomically.
+\item
+  A Solana instruction needs more accounts than the transaction can
+  carry.
+\item
+  A Cosmos module message consumes more gas than expected under extreme
+  state.
+\item
+  A rollup escape hatch is too expensive during L1 congestion.
+\end{itemize}
+
+The invariant may still be true:
+
+\begin{lstlisting}
+Every user has a claim.
+\end{lstlisting}
+
+But liveness may fail:
+
+\begin{lstlisting}
+No user can practically execute the transition that realizes the claim.
+\end{lstlisting}
+
+Security reviews must test not only ``does the code work on an example''
+but:
+
+\begin{lstlisting}
+Does the required transition remain executable under worst-case state,
+market stress, fee spikes, and adversarial input?
+\end{lstlisting}
+
+\subsection{Fees Shape Adversarial Strategy}
+
+Attackers are cost-sensitive. Fees determine which attacks are
+profitable or feasible.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  A spam attack may be uneconomic if fees are high enough.
+\item
+  A sandwich attack may be profitable only if expected extraction
+  exceeds gas and priority fees.
+\item
+  A governance griefing attack may depend on cheap proposal creation.
+\item
+  A liquidation race may be won by paying higher priority fees.
+\item
+  A bridge relayer may stop relaying if fees exceed compensation.
+\item
+  A keeper network may fail if executing maintenance tasks is
+  unprofitable.
+\end{itemize}
+
+Security analysis should include:
+
+\begin{lstlisting}
+What does the attacker pay?
+What can the attacker gain?
+Who bears failed transaction costs?
+Who is reimbursed?
+Who has incentives to include, relay, execute, or ignore the transaction?
+\end{lstlisting}
+
+Fees are part of the threat model.
+
+\section{Execution Results: Receipts, Logs, Events, and Reverts}
+
+\subsection{Inclusion Is Not Execution Success}
+
+A transaction can exist in several states:
+
+\begin{itemize}
+\tightlist
+\item
+  Constructed but unsigned.
+\item
+  Signed but not broadcast.
+\item
+  Broadcast but not seen by most nodes.
+\item
+  Accepted into some mempools.
+\item
+  Included in a block.
+\item
+  Executed successfully.
+\item
+  Executed and reverted or failed.
+\item
+  Reorged out.
+\item
+  Finalized or settled.
+\item
+  Reflected correctly by an RPC, indexer, or UI.
+\end{itemize}
+
+These are different facts.
+
+Do not say ``the transaction went through'' unless you specify which
+fact you mean.
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Claim
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+What it means
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+What it does not prove
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Broadcast & Some endpoint accepted the transaction for propagation &
+Inclusion, execution, or finality \\
+Included & A block contains the transaction & Successful execution or
+durable settlement \\
+Receipt success & Top-level execution did not revert & Economic safety
+or user intent \\
+Event emitted & Code emitted a log & State changed as the event name
+suggests \\
+State updated & Canonical state reflects the change & The change was
+safe or final enough for downstream use \\
+Finalized/settled & Reversion is outside the accepted risk model &
+Off-chain interpretation, indexer correctness, or user intent \\
+\end{longtable}
+}
+
+For example:
+
+\begin{lstlisting}
+The transaction was broadcast.
+The transaction was included.
+The transaction succeeded with status 1.
+The transaction emitted event X.
+The transaction updated storage slot Y.
+The transaction is finalized.
+The transaction was observed by this indexer.
+\end{lstlisting}
+
+Precision matters because attackers exploit ambiguity.
+
+\subsection{Receipts Summarize Execution Outcomes}
+
+Ethereum transaction receipts include information such as block hash,
+block number, gas used, logs, contract address for contract creation,
+transaction index, type, and either a status or a pre-Byzantium state
+root. Ethereum JSON-RPC documentation specifies that
+\passthrough{\lstinline!status!} is \passthrough{\lstinline!1!} for
+success or \passthrough{\lstinline!0!} for failure, and receipts include
+logs and gas used fields.\footnote{ethereum.org, ``JSON-RPC API'',
+  https://ethereum.org/developers/docs/apis/json-rpc/.}
+
+Receipts are useful because they summarize execution without requiring
+every observer to replay the transaction immediately.
+
+But receipts are not a substitute for understanding state:
+
+\begin{itemize}
+\tightlist
+\item
+  A successful status means execution did not revert at the top level.
+\item
+  It does not mean the business operation was economically safe.
+\item
+  Logs may be emitted by contracts, but they do not prove that an
+  off-chain interpretation is correct.
+\item
+  A receipt can disappear from canonical history if its block is reorged
+  out before finality.
+\item
+  Indexers can misinterpret receipts or miss reorgs.
+\end{itemize}
+
+Receipt analysis asks:
+
+\begin{lstlisting}
+Was the transaction included?
+Did it succeed or fail?
+How much gas was used?
+Which logs were emitted?
+Which contract emitted each log?
+Which state change do the logs claim to represent?
+Is the block final enough for this application?
+\end{lstlisting}
+
+\subsection{Logs and Events Are Communication, Not Authority}
+
+Solidity documentation describes events as an abstraction over the EVM
+logging functionality. Event arguments are stored in transaction logs
+associated with the emitting contract address; applications can
+subscribe through client RPC interfaces.\footnote{Solidity
+  Documentation, ``Events'',
+  https://docs.soliditylang.org/en/latest/contracts.html\#events.}
+
+Events are extremely useful for:
+
+\begin{itemize}
+\tightlist
+\item
+  Indexers.
+\item
+  UIs.
+\item
+  Analytics.
+\item
+  Off-chain automation.
+\item
+  Bridges and message watchers.
+\item
+  Monitoring.
+\item
+  Human debugging.
+\end{itemize}
+
+But events are not state accessible to contracts that emitted them, and
+contracts cannot generally use their own past logs as authoritative
+state. Solidity documentation also notes that event data must be
+interpreted with knowledge of the event type, and anonymous events can
+complicate interpretation.\footnote{Solidity Documentation, ``Events'',
+  https://docs.soliditylang.org/en/latest/contracts.html\#events.}
+
+Security consequences:
+
+\begin{itemize}
+\tightlist
+\item
+  An event can be emitted without the expected state change if the code
+  is wrong.
+\item
+  A state change can occur without an expected event if the code omits
+  it.
+\item
+  An indexer can treat an event as truth and become inconsistent with
+  state.
+\item
+  A bridge that watches events must account for finality and reorgs.
+\item
+  Anonymous or misleading events can confuse tooling.
+\item
+  Off-chain systems must verify the emitting contract and event
+  semantics.
+\end{itemize}
+
+Rule:
+
+\begin{lstlisting}
+Events are evidence.
+State is authority.
+\end{lstlisting}
+
+Sometimes a protocol intentionally uses logs as part of a cross-domain
+commitment path. Then the security model must say exactly which log,
+from which contract, in which finalized block, under which proof or
+watcher assumption, is accepted.
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Evidence type
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Produced by
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Useful for
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Security warning
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+State & Protocol/client execution & Authority for future validity & Must
+be read from the correct canonical state \\
+Receipt & Client execution result & Execution status, gas, logs, block
+context & Can be reorged out or misread \\
+Event/log & Contract or program execution & Off-chain discovery and
+monitoring & Communicates; does not define authority by itself \\
+Indexer view & Off-chain derived database & Search, UI, analytics,
+automation & Can lag, omit reorgs, or interpret incorrectly \\
+Simulation & Local execution against assumed state & Preflight and UX
+warning & Not a promise about eventual inclusion or ordering \\
+\end{longtable}
+}
+
+\subsection{Return Data and Revert Data Matter}
+
+Execution can produce return data or revert data.
+
+In EVM systems:
+
+\begin{itemize}
+\tightlist
+\item
+  A call may return bytes.
+\item
+  A call may revert with error data.
+\item
+  A low-level call may report success/failure without automatically
+  bubbling the revert.
+\item
+  A token may return \passthrough{\lstinline!false!}, return no value,
+  revert, or behave nonstandardly.
+\item
+  A wrapper library may interpret return behavior differently.
+\end{itemize}
+
+Solidity documentation states that \passthrough{\lstinline!revert!} and
+failed \passthrough{\lstinline!require!} calls revert changes in the
+current call and provide error data.\footnote{Solidity Documentation,
+  ``Error handling: Assert, Require, Revert and Exceptions'',
+  https://docs.soliditylang.org/en/latest/control-structures.html\#error-handling-assert-require-revert-and-exceptions.}
+
+Security consequences:
+
+\begin{itemize}
+\tightlist
+\item
+  Ignoring return values can make a failed operation appear successful.
+\item
+  Assuming all tokens return booleans can break integrations.
+\item
+  Catching reverts can create partial-success semantics.
+\item
+  Low-level calls can hide failure if the result is not checked.
+\item
+  A transaction can succeed while an internal operation failed and was
+  ignored.
+\end{itemize}
+
+Ask:
+
+\begin{lstlisting}
+Which call's success matters?
+Is the return value checked?
+Are errors bubbled, swallowed, or transformed?
+Can partial progress remain after a failure?
+Does the chain's atomicity rule cover this whole operation or only part of it?
+\end{lstlisting}
+
+\subsection{Atomicity Is Model-Specific}
+
+People often say blockchain transactions are atomic. That is sometimes
+true, but only at the correct boundary.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  In Ethereum, if a top-level transaction reverts, state changes from
+  that execution are reverted, but gas is still consumed. Internal calls
+  can fail and be handled without reverting the top-level transaction.
+\item
+  In Solana, if any instruction in a transaction fails, the entire
+  transaction fails and state changes are reverted, while fees are still
+  charged.\footnote{Solana Foundation, ``Transactions'',
+    https://solana.com/docs/core/transactions.}
+\item
+  In Cosmos SDK, failed state changes during delivery are reverted, but
+  fee and ante-handler behavior must be understood in
+  context.\footnote{Cosmos SDK v0.47, ``Transaction Lifecycle'',
+    https://docs.cosmos.network/sdk/v0.47/learn/beginner/tx-lifecycle.}
+\item
+  In Bitcoin, a transaction either becomes part of canonical history or
+  does not, but protocols built from multiple transactions do not get
+  automatic atomicity across those transactions.
+\item
+  Cross-chain operations are almost never atomic in the same sense as a
+  single-chain transaction.
+\end{itemize}
+
+Atomicity analysis asks:
+
+\begin{lstlisting}
+What exactly reverts?
+What does not revert?
+Are fees charged?
+Are logs preserved?
+Are nonce or sequence effects preserved?
+Can internal failures be caught?
+Does a multi-step protocol assume atomicity across multiple transactions or chains?
+\end{lstlisting}
+
+\subsection{Simulation Is Not Execution}
+
+Wallets, bots, keepers, searchers, and protocols often simulate
+transactions before submitting them.
+
+Simulation is useful, but it is not the same as execution because:
+
+\begin{itemize}
+\tightlist
+\item
+  The state may change before inclusion.
+\item
+  The transaction may be ordered differently.
+\item
+  The block context may differ.
+\item
+  The account nonce may change.
+\item
+  Gas prices may change.
+\item
+  Oracle prices may update.
+\item
+  Another transaction may consume the same opportunity.
+\item
+  A different node or RPC may simulate against a different state view.
+\item
+  The transaction may land on another fork or not land at all.
+\end{itemize}
+
+Simulation answers:
+
+\begin{lstlisting}
+What would happen if this transaction ran now under this assumed state and context?
+\end{lstlisting}
+
+It does not answer:
+
+\begin{lstlisting}
+What will happen when this transaction is actually included?
+\end{lstlisting}
+
+This gap is central to MEV, liquidations, wallet UX, and transaction
+risk.
+
+\section{When a Valid Transaction Still Produces an Unsafe State}
+
+\subsection{Validity Is Layered}
+
+A transaction can pass many validity layers:
+
+\begin{lstlisting}
+well-encoded
+properly signed
+nonce or sequence correct
+fees sufficient
+accepted by a node
+included in a block
+executed without revert
+receipt status success
+finalized
+\end{lstlisting}
+
+And still be unsafe.
+
+Why? Because these layers prove that the transaction satisfied explicit
+machine rules. They do not prove that the protocol encoded the right
+economic, authorization, or liveness properties.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  A lending market accepts a borrow against a manipulated oracle price.
+\item
+  A vault accepts a deposit that mints zero shares because of rounding.
+\item
+  A bridge accepts a message before the source event is final.
+\item
+  A governance proposal executes malicious calls after satisfying
+  quorum.
+\item
+  A user signs an unlimited approval through a malicious frontend.
+\item
+  A liquidation succeeds because the transaction was ordered after a
+  temporary price update.
+\item
+  A keeper transaction succeeds but pays an attacker-controlled address
+  because configuration was stale.
+\end{itemize}
+
+The transaction is not invalid. The protocol design is insufficient.
+
+\subsection{Successful Execution Can Encode a Failed Assumption}
+
+A successful transaction may mean:
+
+\begin{lstlisting}
+The code path completed.
+\end{lstlisting}
+
+It does not necessarily mean:
+
+\begin{lstlisting}
+The oracle price was fair.
+The user understood the signature.
+The admin action was legitimate.
+The bridge source state was final.
+The governance outcome was socially acceptable.
+The vault shares were fairly priced.
+The recipient can use the received asset.
+The protocol remains solvent.
+\end{lstlisting}
+
+A receipt status can tell you whether the execution reverted. It cannot
+tell you whether the transition preserved intent.
+
+Security review must therefore recover the implied assumptions behind a
+transaction:
+
+\begin{lstlisting}
+This transition is safe if:
+  price is fresh and manipulation-resistant
+  signer intended this operation
+  nonce is unique and domain-scoped
+  output is final enough
+  role holder is trusted or constrained
+  resource limits leave the exit path live
+\end{lstlisting}
+
+If the ``if'' clause is false, successful execution can be the exploit
+path.
+
+\subsection{Unsafe State From Correct Ordering Rules}
+
+Ordering is part of transaction semantics.
+
+Two valid transactions can produce different outcomes depending on
+order:
+
+\begin{lstlisting}
+tx_A: update oracle price
+tx_B: borrow against collateral
+\end{lstlisting}
+
+If \passthrough{\lstinline!tx\_B!} executes before
+\passthrough{\lstinline!tx\_A!}, the borrower sees the old price. If
+\passthrough{\lstinline!tx\_B!} executes after
+\passthrough{\lstinline!tx\_A!}, the borrower sees the new price. Both
+orderings may be valid under chain rules. Only one may be safe under the
+application's assumptions.
+
+Ordering risk appears in:
+
+\begin{itemize}
+\tightlist
+\item
+  Front-running.
+\item
+  Back-running.
+\item
+  Sandwiching.
+\item
+  Liquidations.
+\item
+  Oracle updates.
+\item
+  NFT mints.
+\item
+  Governance proposal execution.
+\item
+  Bridge message delivery.
+\item
+  Withdrawals from queues.
+\item
+  Auctions.
+\end{itemize}
+
+Do not ask only:
+
+\begin{lstlisting}
+Can this transaction execute?
+\end{lstlisting}
+
+Ask:
+
+\begin{lstlisting}
+What can execute before it?
+What can execute after it?
+Who can observe it while pending?
+Who can choose or influence ordering?
+What state assumptions become false if ordering changes?
+\end{lstlisting}
+
+\subsection{Unsafe State From Partial Mental Models}
+
+Many transaction bugs come from developers assuming the transaction has
+only one effect.
+
+Example:
+
+\begin{lstlisting}
+transfer token from user to vault
+mint shares to user
+\end{lstlisting}
+
+The developer thinks there are two effects. A real transaction might
+include:
+
+\begin{itemize}
+\tightlist
+\item
+  Token hook calls.
+\item
+  Fee-on-transfer behavior.
+\item
+  ERC-777-style callbacks.
+\item
+  Reentrant calls.
+\item
+  Oracle updates.
+\item
+  Share price rounding.
+\item
+  Event emission.
+\item
+  Internal accounting.
+\item
+  External strategy deposit.
+\item
+  Gas griefing.
+\item
+  Failure behavior from a nonstandard token.
+\end{itemize}
+
+Security review expands the mental model until every relevant effect is
+visible.
+
+\subsection{Unsafe State From Stale Context}
+
+A transaction is constructed at one time and executed later.
+
+Between construction and execution:
+
+\begin{itemize}
+\tightlist
+\item
+  Prices can move.
+\item
+  Nonces can change.
+\item
+  Allowances can change.
+\item
+  Blocks can advance.
+\item
+  Governance proposals can queue.
+\item
+  Liquidation status can change.
+\item
+  A pool can be manipulated.
+\item
+  A target contract can be upgraded.
+\item
+  A bridge source event can be reorged.
+\item
+  A Solana recent blockhash can expire.
+\item
+  A Sui epoch can advance beyond expiration.
+\end{itemize}
+
+A transaction that was safe when signed may be unsafe when executed.
+
+Defenses include:
+
+\begin{itemize}
+\tightlist
+\item
+  Slippage bounds.
+\item
+  Deadlines.
+\item
+  Nonces.
+\item
+  Domain separation.
+\item
+  Expected state checks.
+\item
+  Minimum output amounts.
+\item
+  Freshness checks.
+\item
+  Finality delays.
+\item
+  Commit-reveal mechanisms.
+\item
+  Explicit target and version binding.
+\end{itemize}
+
+Every transaction that depends on mutable context should say:
+
+\begin{lstlisting}
+Execute only if these assumptions are still true.
+\end{lstlisting}
+
+\subsection{Unsafe State From Successful Failure}
+
+Sometimes attackers want a transaction to fail.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  Griefing by causing another user's transaction to revert.
+\item
+  Filling blocks or queues with failing transactions.
+\item
+  Forcing a keeper to pay fees repeatedly.
+\item
+  Causing a liquidation to fail so bad debt grows.
+\item
+  Making a withdrawal batch fail because one recipient reverts.
+\item
+  Locking accounts or objects so competitors cannot execute.
+\item
+  Triggering expensive failure paths.
+\end{itemize}
+
+Failure is an outcome. It can be profitable.
+
+Security review should ask:
+
+\begin{lstlisting}
+Who pays when this fails?
+Who benefits when it fails?
+Can one failing operation block a batch?
+Can failure leave state partially updated?
+Can repeated failure exhaust resources?
+\end{lstlisting}
+
+\subsection{Transaction Safety Checklist}
+
+For any important transaction path, review:
+
+\begin{lstlisting}
+Authorization:
+  Who signed or authorized?
+  Is the signature scoped to the correct chain, contract, function, account, nonce, and deadline?
+
+State:
+  Which state is read?
+  Which state is written?
+  Which assumed state can change before inclusion?
+
+Ordering:
+  Can the transaction be observed, copied, frontrun, backrun, delayed, or censored?
+
+Resources:
+  What gas, fees, compute units, size limits, or account limits apply?
+  Can the transition remain executable under worst-case state?
+
+Failure:
+  What happens if execution reverts or partially fails?
+  Who pays?
+  Are nonce, fee, log, or queue effects preserved?
+
+Results:
+  Which receipt, event, log, or state update proves success?
+  Is the application relying on logs instead of state?
+
+Finality:
+  When is the result safe to depend on?
+  What happens if the block or source event is reorged?
+
+Intent:
+  What did the user or protocol intend?
+  Which invariant should the transaction preserve?
+\end{lstlisting}
+
+If this checklist feels long, that is because transactions are where
+many separate assumptions collide.
+
+\section{Worked Example: A Swap Transaction}
+
+Consider a user signing a transaction through a decentralized exchange
+frontend:
+
+\begin{lstlisting}
+swapExactTokensForTokens(
+  tokenIn = USDC,
+  tokenOut = WETH,
+  amountIn = 10,000 USDC,
+  minAmountOut = 3.8 WETH,
+  path = [USDC, WETH],
+  recipient = user,
+  deadline = now + 10 minutes
+)
+\end{lstlisting}
+
+The frontend says:
+
+\begin{lstlisting}
+Swap 10,000 USDC for at least 3.8 WETH.
+\end{lstlisting}
+
+A transaction review asks:
+
+\begin{lstlisting}
+Authorization:
+  Did the user sign the swap transaction?
+  Did the router already have allowance?
+  Was there a separate approval transaction?
+
+State:
+  Which pool reserves determine the price?
+  Is the token standard or nonstandard?
+  Does either token take fees on transfer?
+
+Ordering:
+  Can the transaction be sandwiched?
+  Can a searcher move the pool price before and after the swap?
+
+Resources:
+  Is gas limit sufficient?
+  Can the transaction be stuck because fee settings are too low?
+
+Failure:
+  If output is below minAmountOut, does it revert?
+  If it reverts, what fees are consumed?
+  Is the approval still outstanding?
+
+Results:
+  Did the transaction status succeed?
+  Did balances change as expected?
+  Are events consistent with state?
+
+Finality:
+  Is the block final enough for the UI or downstream protocol to rely on?
+
+Intent:
+  Did the user intend this exact router, path, recipient, amount, and deadline?
+\end{lstlisting}
+
+The most important security control in this transaction is not that the
+user signed it. The signature only proves authorization. The safety
+controls are the bound on \passthrough{\lstinline!minAmountOut!}, the
+deadline, the target contract, the token assumptions, and the user's
+ability to understand what they are signing.
+
+The same transaction as a trace:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Step
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Evidence
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Security question
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+User signs & Signature over router call & Did the signed payload bind
+the intended router, path, recipient, amount, deadline, and chain? \\
+Transaction waits & Mempool/private route observation & Who can see it,
+copy it, delay it, or order around it? \\
+Router executes & Pool reserves and token behavior & Are price,
+slippage, transfer fees, and callbacks within assumptions? \\
+Receipt appears & Status, gas used, emitted logs & Did execution
+succeed, and do logs match actual state changes? \\
+Balances change & Token balances and pool reserves & Was the user paid
+at least \passthrough{\lstinline!minAmountOut!}, and did allowances
+remain risky? \\
+Block settles & Confirmation/finality signal & Is the result durable
+enough for the UI or downstream protocol? \\
+\end{longtable}
+}
+
+Now consider a malicious variant:
+
+\begin{lstlisting}
+approve(attacker, type(uint256).max)
+\end{lstlisting}
+
+This transaction may:
+
+\begin{itemize}
+\tightlist
+\item
+  Be well-encoded.
+\item
+  Be signed by the user.
+\item
+  Pay enough gas.
+\item
+  Be included in a valid block.
+\item
+  Execute successfully.
+\item
+  Emit an \passthrough{\lstinline!Approval!} event.
+\end{itemize}
+
+It is still unsafe for the user. The failure is not signature
+validation. The failure is that the user-side authority was tricked into
+authorizing a harmful state transition.
+
+\section{Practical Discipline: Transaction Review Notes}
+
+When reviewing a transaction path, write notes in this format:
+
+\begin{lstlisting}
+Transaction:
+  Name or entry point.
+
+Intent:
+  What the user/protocol thinks this does.
+
+Signed authority:
+  Who signs, or which account/role authorizes.
+
+Replay scope:
+  Nonce, sequence, object version, blockhash, chain ID, domain, deadline.
+
+State touched:
+  Reads and writes.
+
+External assumptions:
+  Oracles, token behavior, bridge finality, keeper behavior, frontend correctness.
+
+Resource assumptions:
+  Gas, compute, fees, size, account count, block limits.
+
+Ordering assumptions:
+  What must not happen before/after.
+
+Failure behavior:
+  What reverts, what persists, who pays.
+
+Observable result:
+  Receipt status, logs, state changes, confirmations/finality.
+
+Invariant:
+  What must remain true afterward.
+\end{lstlisting}
+
+This format forces transaction analysis to connect mechanics to security
+properties.
+
+\section{Review Questions}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  What is the difference between a transaction, an instruction, a
+  message, and a state transition?
+\item
+  In a UTXO model, what state is consumed and what state is created?
+\item
+  Why can a zero-ETH Ethereum transaction still move valuable assets?
+\item
+  Why do Solana account lists and signer/writable flags matter for
+  security?
+\item
+  What does a transaction signature prove, and what does it not prove?
+\item
+  How do nonces, sequence numbers, blockhashes, chain IDs, and deadlines
+  constrain replay?
+\item
+  What is the difference between inclusion, execution success, and
+  settlement?
+\item
+  Why can events, receipts, and simulations mislead off-chain systems if
+  treated as authority?
+\end{enumerate}
+
+\section{Applied Exercises}
+
+\subsection{Exercise 1: Transaction Anatomy and Evidence}
+
+Compare three transaction models:
+
+\begin{itemize}
+\tightlist
+\item
+  Bitcoin transaction spending a UTXO.
+\item
+  Ethereum transaction calling an ERC-20
+  \passthrough{\lstinline!transfer!}.
+\item
+  Solana transaction with two instructions.
+\end{itemize}
+
+For each, identify:
+
+\begin{itemize}
+\tightlist
+\item
+  Authorization.
+\item
+  Replay-prevention mechanism.
+\item
+  State consumed or written.
+\item
+  Resource limits or fees.
+\item
+  Failure behavior.
+\item
+  Evidence an observer should check to confirm success.
+\end{itemize}
+
+Then choose one real or hypothetical transaction receipt/result and
+identify:
+
+\begin{itemize}
+\tightlist
+\item
+  Signer or authority.
+\item
+  Replay-prevention mechanism.
+\item
+  State touched.
+\item
+  Logs or events.
+\item
+  Revert or failure behavior.
+\item
+  Settlement assumption.
+\item
+  One way the transaction could be valid but unsafe.
+\end{itemize}
+
+\subsection{Exercise 2: Replay Scope}
+
+A protocol accepts off-chain signatures authorizing withdrawals:
+
+\begin{lstlisting}
+withdraw(user, amount, signature)
+\end{lstlisting}
+
+The signed message includes only:
+
+\begin{lstlisting}
+user
+amount
+\end{lstlisting}
+
+Answer:
+
+\begin{itemize}
+\tightlist
+\item
+  Which replay attacks are possible?
+\item
+  Which fields should be added to the signed message?
+\item
+  Which state should be updated when the signature is consumed?
+\item
+  Should the signature expire?
+\item
+  Should the signature be valid across contract upgrades?
+\end{itemize}
+
+\subsection{Exercise 3: Event vs State}
+
+A bridge watcher sees this event:
+
+\begin{lstlisting}
+Deposit(address indexed user, uint256 amount, uint256 nonce)
+\end{lstlisting}
+
+The watcher mints wrapped tokens on another chain.
+
+Answer:
+
+\begin{itemize}
+\tightlist
+\item
+  What must the watcher verify besides the event data?
+\item
+  Why is the emitting contract address important?
+\item
+  What finality assumption is required?
+\item
+  What replay-protection state should exist on the destination chain?
+\item
+  What happens if the source block is reorged?
+\end{itemize}
+
+\subsection{Exercise 4: Resource Limits and Valid-But-Unsafe Outcomes}
+
+A protocol has a function:
+
+\begin{lstlisting}
+processAllWithdrawals()
+\end{lstlisting}
+
+It loops over every pending withdrawal and pays each recipient.
+
+Answer:
+
+\begin{itemize}
+\tightlist
+\item
+  What resource limit can break this function?
+\item
+  How can an attacker make the problem worse?
+\item
+  Is this a safety failure, liveness failure, or both?
+\item
+  What design patterns would reduce the risk?
+\end{itemize}
+
+Then explain why each transaction may be valid and still unsafe:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  A user signs an unlimited token approval to a malicious spender.
+\item
+  A lending market accepts a borrow after a one-block oracle
+  manipulation.
+\item
+  A governance proposal executes after satisfying quorum, but transfers
+  the treasury to the proposer.
+\item
+  A bridge releases funds after seeing a source-chain event with too few
+  confirmations.
+\item
+  A liquidation transaction succeeds because it was ordered immediately
+  after a temporary price update.
+\end{enumerate}
+
+\section{Key Takeaways}
+
+\begin{itemize}
+\tightlist
+\item
+  Transactions are signed, metered, ordered requests to execute state
+  transitions.
+\item
+  Transaction anatomy is a security interface: every field determines
+  authority, replay scope, resource use, or execution context.
+\item
+  UTXO, account, instruction-based, object-based, and Cosmos-style
+  systems package transactions differently.
+\item
+  Signatures prove authorization over specific bytes and domains. They
+  do not prove user understanding or protocol safety.
+\item
+  Replay prevention must be scoped to the authority and asset being
+  consumed.
+\item
+  Fees, gas, compute budgets, size limits, and block limits are security
+  mechanisms.
+\item
+  Inclusion, execution success, receipt status, event emission, and
+  finality are different facts.
+\item
+  Logs and events are evidence for observers, not a substitute for
+  state.
+\item
+  Simulation is useful but not execution.
+\item
+  A transaction can be valid, successful, finalized, and still unsafe if
+  the protocol encoded the wrong assumptions.
+\end{itemize}
+
+\section{Further Reading}
+
+\begin{itemize}
+\tightlist
+\item
+  ethereum.org,
+  \href{https://ethereum.org/developers/docs/transactions/}{``Transactions''}.
+  Practical overview of Ethereum transaction fields, signing, calldata,
+  gas fields, and lifecycle.
+\item
+  ethereum.org, \href{https://ethereum.org/developers/docs/gas/}{``Gas
+  and Fees''}. Technical overview of Ethereum gas, gas limits, base fee,
+  priority fee, and transaction costs.
+\item
+  Vitalik Buterin,
+  \href{https://eips.ethereum.org/EIPS/eip-155}{``EIP-155: Simple Replay
+  Attack Protection''}. The Ethereum replay-protection change that binds
+  transaction signing to chain ID.
+\item
+  Vitalik Buterin et al.,
+  \href{https://eips.ethereum.org/EIPS/eip-1559}{``EIP-1559: Fee Market
+  Change for ETH 1.0 Chain''}. The fee-market change introducing base
+  fee mechanics and dynamic fee transactions.
+\item
+  Bitcoin Developer Guide,
+  \href{https://developer.bitcoin.org/devguide/transactions.html}{``Transactions''}.
+  Detailed explanation of Bitcoin transaction inputs, outputs, scripts,
+  and validation.
+\item
+  Solana Foundation,
+  \href{https://solana.com/docs/core/transactions}{``Transactions''}.
+  Reference for Solana transaction structure, signatures, atomicity,
+  blockhash expiry, and limits.
+\item
+  Solana Foundation, \href{https://solana.com/docs/core/fees}{``Fees''}.
+  Reference for base fees, prioritization fees, and
+  compute-budget-related limits.
+\item
+  Cosmos SDK v0.47,
+  \href{https://docs.cosmos.network/sdk/v0.47/learn/beginner/tx-lifecycle}{``Transaction
+  Lifecycle''}. Versioned reference for transaction creation, mempool
+  checks, ante handling, delivery, and commit.
+\item
+  Sui Foundation,
+  \href{https://docs.sui.io/develop/transactions/txn-overview}{``Transaction
+  Overview''}. Overview of transaction metadata, object inputs and
+  outputs, gas input, expiration, and effects.
+\item
+  ethereum.org,
+  \href{https://ethereum.org/developers/docs/apis/json-rpc/}{``JSON-RPC
+  API''}. Useful for transaction receipts, logs, status, and execution
+  client interaction.
+\item
+  Solidity Documentation,
+  \href{https://docs.soliditylang.org/en/latest/contracts.html\#events}{``Events''}.
+  Reference for events, logs, topics, and event interpretation.
+\item
+  Solidity Documentation,
+  \href{https://docs.soliditylang.org/en/latest/control-structures.html\#error-handling-assert-require-revert-and-exceptions}{``Error
+  handling: Assert, Require, Revert and Exceptions''}. Reference for
+  \passthrough{\lstinline!require!}, \passthrough{\lstinline!revert!},
+  exceptions, and state rollback.
+\end{itemize}

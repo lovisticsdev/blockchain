@@ -1,0 +1,2318 @@
+\chapter{Assets, Authority, and Trust Boundaries}
+
+\section{Purpose}
+
+Chapter 1 framed blockchain systems as adversarial state machines.
+Chapter 2 asks the next question:
+
+\begin{quote}
+Which parts of the state are valuable, and who has the authority to
+change them?
+\end{quote}
+
+Most blockchain security failures involve confusion about assets,
+authority, or trust boundaries. A protocol team says ``users own their
+funds,'' but an upgrade key can replace the withdrawal logic. A token
+claims to be backed by off-chain reserves, but the reserve proof is only
+an attestation. A bridge mints a wrapped asset, but the wrapped asset is
+only as strong as the source-chain finality, validator set, relayers,
+and message verification path. A governance system looks decentralized,
+but a small quorum, delegated voting, emergency guardian, or timelock
+admin can still decide outcomes.
+
+Security analysis becomes unserious when it treats ``ownership'' as a
+word rather than a state-machine fact.
+
+For this book, ownership means nothing until you can answer:
+
+\begin{lstlisting}
+Which state variable, object, output, role, or claim records the asset?
+Which transition moves or modifies it?
+Which authority can cause that transition?
+Which assumptions make that authority trustworthy enough?
+\end{lstlisting}
+
+This chapter builds the vocabulary for those answers.
+
+\section{Learning Objectives}
+
+By the end of this chapter, you should be able to:
+
+\begin{itemize}
+\tightlist
+\item
+  Define on-chain assets as enforceable claims over state, not just
+  tokens.
+\item
+  Distinguish ownership, possession, authority, custody, control, and
+  economic exposure.
+\item
+  Compare ownership models across UTXOs, accounts, contracts, Solana
+  accounts, and Move resources.
+\item
+  Identify privileged authorities such as admins, governors, validators,
+  sequencers, custodians, oracles, relayers, and upgrade controllers.
+\item
+  Draw trust boundaries across on-chain code, off-chain infrastructure,
+  human processes, legal claims, and cross-chain systems.
+\item
+  Build an authority map showing who can move, freeze, mint, burn,
+  upgrade, censor, or otherwise affect assets.
+\end{itemize}
+
+\section{The Core Distinction}
+
+An asset is something valuable represented by, controlled by, or
+dependent on system state.
+
+Authority is the ability to cause state transitions that affect that
+asset.
+
+These are related, but not the same.
+
+An address may hold tokens but have granted a spender allowance. A user
+may own vault shares but depend on a strategist, oracle, withdrawal
+queue, and admin pause key. A DAO may own a treasury but a timelock
+executor may be able to trigger the transfer. A stablecoin holder may
+own an on-chain balance but depend on off-chain reserve custody and
+redemption policy. A rollup user may own an L2 balance but depend on the
+L1 bridge contract, proof system, data availability, and exit path.
+
+The basic security questions are:
+
+\begin{lstlisting}
+Asset:
+  What has value?
+
+State:
+  Where is that value represented?
+
+Authority:
+  Who or what can change that representation?
+
+Boundary:
+  Which facts must be trusted rather than verified locally?
+\end{lstlisting}
+
+If you cannot answer those questions, you do not understand the system's
+security model yet.
+
+\section{What Counts as an Asset On-Chain}
+
+\subsection{Assets Are Enforced Claims Over State}
+
+An on-chain asset is not a tiny object sitting inside an address. It is
+a claim recognized by a state-transition system.
+
+For example:
+
+\begin{itemize}
+\tightlist
+\item
+  A Bitcoin coin is spendable because an unspent transaction output
+  exists and a future transaction can satisfy its spending condition.
+\item
+  ETH is spendable because an Ethereum account balance exists and a
+  valid transaction can debit it.
+\item
+  An ERC-20 token balance is spendable because a contract's state maps
+  an address to a number and the contract's transfer rules allow that
+  number to decrease and another to increase.
+\item
+  An ERC-721 NFT is transferable because a contract maps a token ID to
+  an owner and its transfer rules recognize the caller as owner or
+  authorized operator.
+\item
+  A Solana token account records token state inside an account whose
+  data is governed by a program.
+\item
+  A Move resource represents value partly because the language and
+  module system restrict copying, dropping, storing, and unpacking.
+\item
+  A bridged asset is a claim in one domain that depends on locked,
+  burned, proven, or otherwise accounted value in another domain.
+\item
+  A governance token is both an economic asset and a control surface.
+\end{itemize}
+
+The asset exists because the system's rules say certain future
+transitions are allowed and others are not.
+
+That is why security review cannot stop at ``who owns the token.'' The
+real question is:
+
+\begin{lstlisting}
+Which transitions can affect the claim?
+\end{lstlisting}
+
+\subsection{Asset Categories}
+
+A useful asset inventory should include more than obvious balances.
+
+Common blockchain asset categories:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Category
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Examples
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Security question
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Native assets & BTC, ETH, SOL, staking rewards & Who can spend, slash,
+censor, or reorder transactions affecting them? \\
+Fungible tokens & ERC-20, SPL tokens, stablecoins & Who can transfer,
+approve, mint, burn, freeze, or blacklist? \\
+Non-fungible assets & ERC-721 tokens, game items, account-bound records
+& Who controls transfer, metadata, approvals, and operator authority? \\
+Semi-fungible assets & ERC-1155-style assets, batch-minted items & Are
+balances, IDs, and batch operations checked consistently? \\
+Shares and claims & LP tokens, vault shares, receipt tokens, restaking
+positions & What do shares claim, and can the exchange rate be
+manipulated? \\
+Debt and liabilities & Borrow positions, margin accounts,
+undercollateralized debt & Who can create, liquidate, forgive, or
+socialize debt? \\
+Capabilities and roles & Admin roles, minter roles, pause guardians,
+upgrade keys & What privileged transitions do they unlock? \\
+Governance power & Voting tokens, delegation, proposal rights & Can
+governance change the rules or seize assets? \\
+Cross-domain claims & Wrapped assets, bridge receipts, rollup
+withdrawals & Which external state and finality assumptions are
+trusted? \\
+Off-chain claims & Fiat-backed stablecoins, RWAs, redemption rights &
+Which legal, custody, and reporting systems are outside the chain? \\
+Information assets & Oracle prices, validator keys, private order flow,
+signer policies & Who can distort or leak information that controls
+value? \\
+\end{longtable}
+}
+
+The point of this table is not classification for its own sake. It is to
+force a reviewer to notice assets that are not called ``tokens.''
+
+A governance role is an asset. An oracle key is an asset. A bridge
+validator key is an asset. An unexecuted withdrawal claim is an asset. A
+pending governance proposal may become an asset or a liability depending
+on who can execute it.
+
+\subsection{Native Assets and Contract Assets Differ}
+
+Native assets are accounted for by the base protocol. Contract assets
+are accounted for by contract or program logic.
+
+On Ethereum, ETH balances are part of account state, while ERC-20
+balances are state inside a token contract. Ethereum's documentation
+describes accounts as entities with ETH balances that can send messages,
+and distinguishes externally owned accounts controlled by private keys
+from contract accounts controlled by code.\footnote{ethereum.org,
+  ``Ethereum Accounts'', https://ethereum.org/developers/docs/accounts/.}
+
+That distinction matters.
+
+If a user sends ETH, the base protocol updates account balances
+according to transaction rules. If a user transfers an ERC-20 token, the
+token contract updates its internal balance mapping according to its own
+implementation. The ERC-20 standard specifies functions such as
+\passthrough{\lstinline!balanceOf!}, \passthrough{\lstinline!transfer!},
+\passthrough{\lstinline!transferFrom!},
+\passthrough{\lstinline!approve!}, and
+\passthrough{\lstinline!allowance!}, but different implementations can
+still behave differently within or around that interface.\footnote{Fabian
+  Vogelsteller and Vitalik Buterin, ``ERC-20: Token Standard'',
+  https://eips.ethereum.org/EIPS/eip-20.}
+
+Security consequences:
+
+\begin{itemize}
+\tightlist
+\item
+  A wallet may display both ETH and ERC-20 balances, but those balances
+  are enforced by different rule systems.
+\item
+  A transfer of ETH and a transfer of a token can have different failure
+  behavior.
+\item
+  A token can have minting, burning, pausing, blacklisting, rebasing,
+  transfer fees, hooks, or nonstandard return values.
+\item
+  A protocol that treats all tokens as if they were identical ERC-20s
+  will eventually be wrong.
+\end{itemize}
+
+Do not say ``the user has funds'' until you know which accounting system
+recognizes the claim.
+
+\subsection{An Asset Can Be a Right, Not a Balance}
+
+Many important assets are rights to do something later.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  A withdrawal ticket.
+\item
+  A bridge message that has been proven but not executed.
+\item
+  A governance proposal that can be queued.
+\item
+  A validator withdrawal credential.
+\item
+  A liquidation right.
+\item
+  A claim on future rewards.
+\item
+  A timelocked allocation.
+\item
+  A vesting stream.
+\item
+  A pending unstake.
+\item
+  A signature that authorizes a permit or order.
+\end{itemize}
+
+These rights may not look like balances, but they are still valuable.
+Their security depends on whether they can be created, transferred,
+consumed, canceled, replayed, or blocked.
+
+For every such right, ask:
+
+\begin{lstlisting}
+How is the right represented?
+Who can create it?
+Who can consume it?
+Can it be consumed more than once?
+Can it expire?
+Can it be canceled?
+Can it be transferred?
+Can it be made unusable?
+\end{lstlisting}
+
+Rights are especially important in cross-chain, lending, governance, and
+staking systems, where value often exists in an intermediate state.
+
+\subsection{Off-Chain Claims Are Not Made On-Chain by Naming Them}
+
+Some assets are on-chain records of off-chain claims.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  Fiat-backed stablecoins.
+\item
+  Tokenized treasury bills.
+\item
+  Real-world asset tokens.
+\item
+  Custodial wrapped BTC.
+\item
+  Claims on carbon credits, invoices, real estate, or commodities.
+\end{itemize}
+
+The on-chain token may be transferred by code, but the underlying claim
+depends on legal agreements, custody, redemption policies, banking
+access, auditors, administrators, and sometimes court systems.
+
+The chain can enforce:
+
+\begin{lstlisting}
+address A has 100 tokens
+address A can transfer 100 tokens if not blocked
+\end{lstlisting}
+
+The chain usually cannot enforce:
+
+\begin{lstlisting}
+the issuer has matching reserves
+the custodian did not rehypothecate assets
+the bank account remains accessible
+the token holder has legally enforceable redemption rights
+the reserve report is complete and current
+\end{lstlisting}
+
+This does not make off-chain claims worthless. It means they cross a
+trust boundary. A serious security analysis states that boundary
+directly.
+
+Bad:
+
+\begin{lstlisting}
+The token is backed 1:1.
+\end{lstlisting}
+
+Better:
+
+\begin{lstlisting}
+The token contract records transferable claims. Redemption depends on issuer solvency, reserve custody, banking access, legal enforceability, and the issuer's honoring of redemptions.
+\end{lstlisting}
+
+The second statement is less marketable. It is also more honest.
+
+\subsection{Control Surfaces Are Assets}
+
+Attackers often target control before they target balances.
+
+Control surfaces include:
+
+\begin{itemize}
+\tightlist
+\item
+  Upgrade authority.
+\item
+  Mint authority.
+\item
+  Burn authority.
+\item
+  Pause authority.
+\item
+  Blacklist or freeze authority.
+\item
+  Oracle update authority.
+\item
+  Governance proposal rights.
+\item
+  Timelock proposer, executor, and canceller roles.
+\item
+  Bridge validator or relayer keys.
+\item
+  Sequencer control.
+\item
+  Validator keys.
+\item
+  Backend signer keys.
+\item
+  Deployment keys and CI/CD secrets.
+\item
+  Frontend domains and package-publishing accounts.
+\end{itemize}
+
+These are assets because controlling them can lead to asset movement,
+denial of service, governance capture, or reputation damage.
+
+If a protocol has \$10 million in a vault and a single key can upgrade
+the vault to drain funds, the key is economically equivalent to control
+over the vault. Treat it accordingly.
+
+\section{Ownership: Keys, Accounts, UTXOs, Objects, and Claims}
+
+\subsection{Ownership Is a State-Machine Relationship}
+
+In ordinary language, ownership sounds legal or moral. In blockchain
+security, ownership is operational:
+
+\begin{lstlisting}
+An actor owns an asset to the extent that the system recognizes that actor,
+or an authority controlled by that actor,
+as able to exercise the relevant transitions over the asset.
+\end{lstlisting}
+
+This definition is intentionally dry. It prevents category errors.
+
+A private key may control an account. The account may hold a token. The
+token may represent a claim on reserves. The reserves may be held by a
+custodian. The custodian may be subject to law. The user may have legal
+rights against the issuer. These are different layers of ownership and
+authority.
+
+Do not collapse them.
+
+\subsection{UTXO Ownership: Spend Conditions, Not Account Balances}
+
+In a UTXO system, the state contains unspent outputs. Each output has a
+value and a spending condition. To ``own'' the output is to be able to
+satisfy that condition in a valid transaction.
+
+Bitcoin's whitepaper describes coins as transferred through digital
+signatures and then immediately identifies the hard problem: the
+recipient needs assurance that an earlier owner did not
+double-spend.\footnote{Satoshi Nakamoto, ``Bitcoin: A Peer-to-Peer
+  Electronic Cash System'', https://bitcoin.org/bitcoin.pdf.} That is
+why ownership in Bitcoin is not just ``this public key appears in a
+chain of signatures.'' It also depends on the network agreeing which
+spend came first.
+
+Security consequences:
+
+\begin{itemize}
+\tightlist
+\item
+  The same key may control many outputs.
+\item
+  A wallet balance is a derived view over a set of spendable outputs.
+\item
+  Spending one output usually consumes it and creates new outputs.
+\item
+  Coin selection affects privacy, fees, and sometimes security.
+\item
+  Script conditions can express multisig, timelocks, hashlocks, and
+  other constraints.
+\item
+  A UTXO can be unspendable if its script is impossible to satisfy or if
+  required keys are lost.
+\end{itemize}
+
+The security question is not:
+
+\begin{lstlisting}
+Which account owns the money?
+\end{lstlisting}
+
+It is:
+
+\begin{lstlisting}
+Which unspent outputs exist, and what conditions allow each to be spent?
+\end{lstlisting}
+
+\subsection{Account Ownership: Keys, Code, and Nonces}
+
+Account-based systems present a different interface. On Ethereum,
+externally owned accounts are controlled by private keys; contract
+accounts are controlled by code.\footnote{ethereum.org, ``Ethereum
+  Accounts'', https://ethereum.org/developers/docs/accounts/.}
+
+This distinction is foundational.
+
+An EOA can initiate transactions because someone can produce signatures
+for it. A contract account cannot initiate transactions on its own in
+the same way; it executes when called, and its authority is defined by
+code and state.
+
+Security consequences:
+
+\begin{itemize}
+\tightlist
+\item
+  Losing an EOA private key usually means losing practical control over
+  the account's assets.
+\item
+  A compromised EOA can sign valid transactions that are disastrous.
+\item
+  A contract can hold assets but expose only specific methods for moving
+  them.
+\item
+  A contract can be the owner of another contract.
+\item
+  Nonces prevent simple replay of transactions from the same account.
+\item
+  Smart accounts and account abstraction blur the interface, but not the
+  underlying question: which validation logic authorizes the transition?
+\end{itemize}
+
+Ethereum.org also notes that an account is not a wallet; a wallet is an
+interface for interacting with an account.\footnote{ethereum.org,
+  ``Ethereum Accounts'', https://ethereum.org/developers/docs/accounts/.}
+That distinction becomes important in user-side security. A wallet can
+mislead a user, fail to simulate consequences, connect to a malicious
+site, or sign the wrong message. The account is the state object; the
+wallet is a tool that controls or mediates authority.
+
+\subsection{Contract Ownership Is Just State}
+
+When a Solidity contract has an \passthrough{\lstinline!owner!}, that
+owner is usually a state variable checked by privileged functions.
+
+Example:
+
+\begin{lstlisting}
+address public owner;
+
+modifier onlyOwner() {
+    require(msg.sender == owner, "not owner");
+    _;
+}
+
+function setFee(uint256 newFee) external onlyOwner {
+    fee = newFee;
+}
+\end{lstlisting}
+
+This is not mystical. It means:
+
+\begin{lstlisting}
+State:
+  owner
+  fee
+
+Transition:
+  setFee(newFee)
+
+Validity:
+  caller == owner
+
+Effect:
+  fee = newFee
+\end{lstlisting}
+
+OpenZeppelin's access-control documentation emphasizes that access
+control governs who can perform actions such as minting, voting,
+freezing transfers, or administrative tasks.\footnote{OpenZeppelin,
+  ``Access Control'',
+  https://docs.openzeppelin.com/contracts/5.x/access-control.} It also
+distinguishes simple ownership from role-based access control, where
+separate roles can authorize different actions.
+
+The security reviewer should ask:
+
+\begin{itemize}
+\tightlist
+\item
+  Who is the owner?
+\item
+  Can ownership be transferred?
+\item
+  Is transfer one-step or two-step?
+\item
+  Can ownership be renounced?
+\item
+  If ownership is renounced, does the system lose necessary recovery
+  powers?
+\item
+  If ownership is transferred to a contract, what controls that
+  contract?
+\item
+  If ownership is transferred to a multisig, who controls the signer
+  keys?
+\item
+  If ownership is transferred to governance, can governance be captured?
+\item
+  If ownership is transferred to a timelock, who can propose, cancel,
+  and execute?
+\end{itemize}
+
+An \passthrough{\lstinline!owner!} variable is rarely the end of the
+authority chain. It is usually the beginning.
+
+\subsection{Token Ownership Is Defined by the Token's Rules}
+
+Token standards define interfaces, not complete security models.
+
+ERC-20 defines basic functions for balances, transfers, approvals, and
+allowances. It explicitly includes delegated spending through
+\passthrough{\lstinline!approve!},
+\passthrough{\lstinline!transferFrom!}, and
+\passthrough{\lstinline!allowance!}.\footnote{Fabian Vogelsteller and
+  Vitalik Buterin, ``ERC-20: Token Standard'',
+  https://eips.ethereum.org/EIPS/eip-20.} That means a user's token
+balance is not the only state relevant to movement. Allowances are
+authority too.
+
+For an ERC-20-like token, asset movement may be authorized by:
+
+\begin{itemize}
+\tightlist
+\item
+  The holder calling \passthrough{\lstinline!transfer!}.
+\item
+  A spender calling \passthrough{\lstinline!transferFrom!} using
+  allowance.
+\item
+  A minter increasing supply.
+\item
+  A burner reducing supply or destroying a user's balance.
+\item
+  An admin pausing transfers.
+\item
+  A blacklist authority blocking addresses.
+\item
+  A rebasing mechanism changing balances.
+\item
+  A bridge contract minting or burning representations.
+\end{itemize}
+
+ERC-721 adds different authority semantics. The standard tracks
+ownership by token ID, includes approvals, and includes operators that
+can manage all NFTs of an owner.\footnote{William Entriken et al.,
+  ``ERC-721: Non-Fungible Token Standard'',
+  https://eips.ethereum.org/EIPS/eip-721.} A security review of NFTs
+therefore must inspect not only
+\passthrough{\lstinline!ownerOf(tokenId)!} but also per-token approvals,
+operator approvals, transfer hooks, metadata authority, and marketplace
+integration.
+
+The general rule:
+
+\begin{lstlisting}
+Do not infer token authority from the word "owner."
+Read the token's transition rules.
+\end{lstlisting}
+
+\subsection{Solana Ownership: Account Owner Program and Signers}
+
+Solana uses ``owner'' in a way that can confuse EVM-trained reviewers.
+
+Solana documentation describes accounts as the fundamental data units
+storing state, with each account identified by a 32-byte address. It
+also states that only the account's owner program can modify its data or
+debit lamports, while any program can credit lamports to a writable
+account.\footnote{Solana Foundation, ``Accounts'',
+  https://solana.com/docs/core/accounts.}
+
+This is not the same as ``the user owns this account'' in ordinary
+language.
+
+For this chapter, keep only the ownership lesson: separate the program
+that can modify account data, the signer that authorized the
+instruction, and the account constraints that prove the passed accounts
+are the intended accounts. Part III will study the detailed Solana
+execution model.
+
+For Solana, ask:
+
+\begin{lstlisting}
+Which program owns this account's data?
+Which signer authorized this instruction?
+Which accounts are writable?
+Which account constraints prove that these are the intended accounts?
+Which PDA seeds establish program authority?
+\end{lstlisting}
+
+\subsection{Move Ownership: Resources and Module Boundaries}
+
+Move was designed around resource-like values whose abilities control
+whether they can be copied, dropped, stored, or used as storage keys.
+The current Move Book describes abilities as the typing feature that
+controls what actions are permissible for values of a given type,
+including linear behavior and storage use.\footnote{The Move Book,
+  ``Abilities'', https://move-book.com/reference/abilities/.}
+
+Move changes the shape of some asset bugs. It can make accidental
+duplication or dropping of resources harder than in less restrictive
+models. It does not remove the need to map creation, destruction,
+transfer, privileged capabilities, and module boundaries. Part III will
+handle the execution-model details.
+
+You still need to ask:
+
+\begin{itemize}
+\tightlist
+\item
+  Which module defines the resource?
+\item
+  Which functions can create it?
+\item
+  Which functions can destroy it?
+\item
+  Which functions can transfer or store it?
+\item
+  Which capabilities authorize privileged actions?
+\item
+  Which invariants are enforced by the type system, and which remain
+  protocol-level assumptions?
+\end{itemize}
+
+Move's resource model is a strong tool for representing assets. It is
+not a substitute for designing correct authority.
+
+\subsection{Legal Ownership and Protocol Control Can Diverge}
+
+Sometimes the person legally entitled to an asset is not the actor who
+can move it on-chain.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  A user deposits into a centralized exchange. The exchange controls the
+  withdrawal wallet.
+\item
+  A stablecoin holder may have an on-chain balance but redemption
+  depends on issuer terms.
+\item
+  A custodian signs transactions for an institution.
+\item
+  A DAO treasury may be legally associated with a foundation while
+  on-chain control sits with a multisig or governance contract.
+\item
+  A court order may require freezing assets, but the chain only enforces
+  that if some authority can freeze them.
+\item
+  A compromised key can move assets even though the attacker is not the
+  rightful owner.
+\end{itemize}
+
+For security work, distinguish:
+
+\begin{lstlisting}
+Legal title:
+  Who has an off-chain claim?
+
+Protocol authority:
+  Who can cause the state transition?
+
+Custody:
+  Who controls the signing material or operational process?
+
+Economic exposure:
+  Who gains or loses value if the state changes?
+\end{lstlisting}
+
+These categories often overlap. When they do not, risk appears.
+
+\section{Authority: Users, Admins, Validators, Governance, and Custodians}
+
+\subsection{Authority Is the Ability to Cause a Transition}
+
+Authority is not status. It is not reputation. It is not what the docs
+say someone should do. Authority is the ability to cause a state
+transition that the system will accept.
+
+An authority may be:
+
+\begin{itemize}
+\tightlist
+\item
+  A private key.
+\item
+  A signature threshold.
+\item
+  A smart contract condition.
+\item
+  A role assignment.
+\item
+  A governance vote.
+\item
+  A validator majority.
+\item
+  A sequencer.
+\item
+  A relayer.
+\item
+  An oracle committee.
+\item
+  A backend signing service.
+\item
+  A custodian's internal approval process.
+\item
+  A legal administrator with control over off-chain reserves.
+\end{itemize}
+
+Authority can be explicit or implicit.
+
+Explicit authority is easy to see:
+
+\begin{lstlisting}
+onlyOwner
+onlyRole(MINTER_ROLE)
+signer == user
+threshold signatures >= 3 of 5
+\end{lstlisting}
+
+Implicit authority is more dangerous:
+
+\begin{lstlisting}
+the frontend constructs the transaction
+the indexer decides which position exists
+the oracle publishes the price
+the backend signs withdrawals
+the relayer decides whether to submit messages
+the sequencer decides ordering
+the deployer can upgrade implementation
+the package maintainer can ship malicious code
+\end{lstlisting}
+
+Both kinds matter.
+
+\subsection{User Authority}
+
+User authority usually comes from keys, signatures, account-validation
+logic, or possession of a capability.
+
+Common user authorities:
+
+\begin{itemize}
+\tightlist
+\item
+  Transfer owned assets.
+\item
+  Approve a spender.
+\item
+  Delegate votes.
+\item
+  Sign a permit.
+\item
+  Create an order or intent.
+\item
+  Deposit or withdraw.
+\item
+  Borrow, repay, liquidate, stake, or claim.
+\item
+  Configure account recovery or session keys.
+\end{itemize}
+
+User authority is often assumed to be benign. That is a mistake. A
+malicious user is still a user. A compromised user key is still able to
+sign. A tricked user may authorize a harmful transition. A bot may call
+public functions in sequences no ordinary user would consider.
+
+The security question is:
+
+\begin{lstlisting}
+What can any valid user do, not what should an honest user do?
+\end{lstlisting}
+
+\subsection{Admin Authority}
+
+Admin authority is the ability to change protocol behavior, parameters,
+or emergency state.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  Upgrade implementation.
+\item
+  Change fees.
+\item
+  Add collateral types.
+\item
+  Set risk parameters.
+\item
+  Pause or unpause.
+\item
+  Freeze accounts.
+\item
+  Set oracle addresses.
+\item
+  Assign minter or burner roles.
+\item
+  Change bridge validator sets.
+\item
+  Recover stuck funds.
+\item
+  Sweep tokens.
+\end{itemize}
+
+Admin authority is not automatically bad. Many systems need controlled
+administration for upgrades, parameter tuning, emergency response, and
+operational recovery. The problem is pretending admin authority is not
+trust.
+
+OpenZeppelin's docs make the core point bluntly: access control may
+determine who can mint tokens, vote, freeze transfers, or perform other
+critical actions.\footnote{OpenZeppelin, ``Access Control'',
+  https://docs.openzeppelin.com/contracts/5.x/access-control.} Timelocks
+add delay to privileged operations so users can inspect and react before
+maintenance actions execute.\footnote{OpenZeppelin, ``Access Control'',
+  https://docs.openzeppelin.com/contracts/5.x/access-control.}
+
+Security review must answer:
+
+\begin{itemize}
+\tightlist
+\item
+  What can admins do?
+\item
+  Can admins directly take user funds?
+\item
+  Can admins indirectly take user funds by upgrading, changing
+  parameters, or replacing dependencies?
+\item
+  Is there a timelock?
+\item
+  Who can bypass the timelock?
+\item
+  Can emergency powers be abused?
+\item
+  Is there a path to recover if admin keys are lost?
+\item
+  Are admin actions observable before they take effect?
+\end{itemize}
+
+Admin authority should be treated as an attack surface and a trust
+assumption, not a footnote.
+
+\subsection{Validator, Miner, Builder, and Sequencer Authority}
+
+Block production authorities do not usually own user assets directly,
+but they can affect the history in which asset transitions occur.
+
+Depending on the system, these actors may influence:
+
+\begin{itemize}
+\tightlist
+\item
+  Transaction inclusion.
+\item
+  Transaction ordering.
+\item
+  Censorship.
+\item
+  Reorg risk.
+\item
+  Finality.
+\item
+  MEV extraction.
+\item
+  L2 batch publication.
+\item
+  Data availability.
+\item
+  Cross-domain timing.
+\end{itemize}
+
+Bitcoin's whitepaper frames the need for a system where participants
+agree on a single history of transaction order to address double
+spending without a trusted mint.\footnote{Satoshi Nakamoto, ``Bitcoin: A
+  Peer-to-Peer Electronic Cash System'',
+  https://bitcoin.org/bitcoin.pdf.} That is an authority problem: who
+decides which spend came first?
+
+In modern systems, the authority may be distributed across validators,
+builders, relays, sequencers, or committees. Even when these actors
+cannot forge signatures, they may still decide whether and when valid
+transitions become canonical.
+
+Security review must ask:
+
+\begin{lstlisting}
+Can block producers reorder this operation profitably?
+Can they censor exits or liquidations?
+Can they delay oracle updates?
+Can they observe intent before inclusion?
+Can they create a reorg that invalidates an assumed state?
+Can a sequencer include a transaction on L2 before the data or output is secure on L1?
+\end{lstlisting}
+
+Authority over ordering is authority over outcomes.
+
+\subsection{Governance Authority}
+
+Governance is privileged execution with a voting interface.
+
+It may control:
+
+\begin{itemize}
+\tightlist
+\item
+  Treasury movement.
+\item
+  Protocol upgrades.
+\item
+  Parameter changes.
+\item
+  Role assignments.
+\item
+  Emergency powers.
+\item
+  Validator-set changes.
+\item
+  Oracle sets.
+\item
+  Bridge configuration.
+\item
+  Fee switches.
+\end{itemize}
+
+Governance should not be romanticized as ``the community.'' A governance
+system is a concrete mechanism with specific state:
+
+\begin{lstlisting}
+token balances
+delegations
+quorum
+proposal threshold
+voting delay
+voting period
+timelock delay
+execution targets
+cancel paths
+emergency vetoes
+\end{lstlisting}
+
+The real authorities are the actors who can cause proposals to pass and
+execute. That may include token whales, delegates, bribery markets,
+exchanges, multisigs, guardians, foundations, or attackers using flash
+liquidity.
+
+Governance is safer only if its authority is well scoped, observable,
+delayed where needed, and resistant to realistic capture.
+
+\subsection{Custodial and Operational Authority}
+
+Some systems depend on people and organizations holding keys or running
+processes.
+
+Examples:
+
+\begin{itemize}
+\tightlist
+\item
+  Exchange hot wallets.
+\item
+  Treasury multisigs.
+\item
+  MPC signing clusters.
+\item
+  HSM-backed custodians.
+\item
+  Backend withdrawal signers.
+\item
+  Bridge validator operators.
+\item
+  Oracle publishers.
+\item
+  Relayers and keepers.
+\item
+  Deployment engineers.
+\item
+  CI/CD systems.
+\item
+  Domain registrars and DNS providers.
+\end{itemize}
+
+This authority often lives outside the smart contract but controls
+contract-relevant transitions.
+
+For example, a contract may require
+\passthrough{\lstinline!onlyWithdrawalSigner!}, but the real question
+is:
+
+\begin{lstlisting}
+Who can make the signing service sign?
+Who can change the signing policy?
+Who can deploy signer code?
+Who can access production secrets?
+Who approves emergency withdrawals?
+What happens if one operator is compromised?
+What happens if the signer is unavailable?
+\end{lstlisting}
+
+Human and organizational authority belongs in the security model.
+
+\subsection{Authority Can Be Delegated, Composed, or Hidden}
+
+Authority is rarely a single direct edge.
+
+Consider:
+
+\begin{lstlisting}
+Vault.owner = Timelock
+Timelock.proposer = Governor
+Governor voting power = token balances + delegation
+Token balances include tokens held by an exchange
+Timelock.executor = anyone
+Guardian can cancel proposals
+Proxy admin can upgrade Governor
+Frontend helps users delegate
+\end{lstlisting}
+
+Who controls the vault?
+
+There is no one-line answer. Control is a graph.
+
+Reviewers should draw that graph:
+
+\begin{lstlisting}
+Exchange custody
+  -> token voting power
+  -> governance outcome
+  -> timelock proposal
+  -> vault upgrade
+  -> user asset movement
+\end{lstlisting}
+
+Hidden authority often appears in:
+
+\begin{itemize}
+\tightlist
+\item
+  Upgradeable proxy admins.
+\item
+  Role admin roles.
+\item
+  Token allowances.
+\item
+  Operator approvals.
+\item
+  Meta-transaction forwarders.
+\item
+  Signature validators.
+\item
+  Trusted relayers.
+\item
+  Oracle owners.
+\item
+  Mutable registries.
+\item
+  Off-chain signers.
+\item
+  Emergency pause modules.
+\item
+  Dependency contracts that can be replaced.
+\end{itemize}
+
+If authority is hidden, the system may appear safer than it is.
+
+\section{Trust Boundaries Across On-Chain, Off-Chain, and Human Systems}
+
+\subsection{A Trust Boundary Marks a Change in Verification}
+
+A trust boundary is where one part of the system must rely on claims,
+behavior, or data from another part that it cannot fully verify for
+itself.
+
+OWASP describes threat modeling as identifying and understanding threats
+and mitigations in the context of protecting something
+valuable.\footnote{OWASP, ``Threat Modeling'',
+  https://owasp.org/www-community/Threat\_Modeling.} NIST's zero trust
+architecture guidance makes a related general security point: trust
+should not be implicit merely because of network location or asset
+ownership.\footnote{NIST SP 800-207, ``Zero Trust Architecture'',
+  https://csrc.nist.gov/pubs/sp/800/207/final.}
+
+For blockchain security, translate that into this rule:
+
+\begin{lstlisting}
+Do not trust a component just because it is nearby, official, on-chain,
+off-chain, decentralized-looking, or operated by the protocol team.
+Name what it can do and what verifies it.
+\end{lstlisting}
+
+A trust boundary is crossed when:
+
+\begin{itemize}
+\tightlist
+\item
+  A contract accepts an oracle price.
+\item
+  A bridge accepts a source-chain proof.
+\item
+  A rollup accepts a sequencer batch.
+\item
+  A frontend constructs a transaction for a wallet.
+\item
+  A backend signs a withdrawal.
+\item
+  A governance proposal calls an arbitrary target.
+\item
+  A token contract trusts another token's behavior.
+\item
+  An indexer supplies state to a UI.
+\item
+  A user trusts a wallet simulation.
+\item
+  A protocol trusts a multisig not to abuse an upgrade key.
+\end{itemize}
+
+At each boundary, ask:
+
+\begin{lstlisting}
+What is being trusted?
+Who can lie?
+Who verifies?
+What happens if the claim is false?
+Can the system fail closed?
+Can users observe or exit before damage?
+\end{lstlisting}
+
+\subsection{On-Chain Does Not Mean Trustless}
+
+On-chain code is transparent and independently executable, but it can
+still contain trust assumptions.
+
+On-chain trust assumptions include:
+
+\begin{itemize}
+\tightlist
+\item
+  A privileged role will not abuse power.
+\item
+  An upgrade admin will not deploy malicious code.
+\item
+  A governance process will not be captured.
+\item
+  A token contract will behave like expected.
+\item
+  A library or dependency address is correct.
+\item
+  A proxy points to the intended implementation.
+\item
+  A registry returns correct addresses.
+\item
+  A timelock delay is long enough for users to react.
+\item
+  A contract's code is verified and corresponds to the deployed
+  bytecode.
+\end{itemize}
+
+Even if every line is on-chain, the system may still trust people, keys,
+roles, and external state.
+
+On-chain verification reduces some forms of trust. It does not erase
+trust.
+
+\subsection{Off-Chain Does Not Mean Insecure}
+
+Off-chain components are not automatically bad. They often provide
+necessary services:
+
+\begin{itemize}
+\tightlist
+\item
+  Wallets.
+\item
+  Frontends.
+\item
+  Indexers.
+\item
+  Oracles.
+\item
+  Keepers.
+\item
+  Relayers.
+\item
+  Sequencers.
+\item
+  Provers.
+\item
+  Monitoring systems.
+\item
+  Signing infrastructure.
+\item
+  Governance discussion forums.
+\end{itemize}
+
+The issue is whether their failure modes are explicit and controlled.
+
+For each off-chain component, ask:
+
+\begin{itemize}
+\tightlist
+\item
+  Is it trusted for safety, liveness, or only convenience?
+\item
+  Can users bypass it?
+\item
+  Can it forge state transitions, or only suggest them?
+\item
+  Can it censor or delay?
+\item
+  Can it lie without being detected?
+\item
+  Can multiple independent providers reduce risk?
+\item
+  Is there an on-chain verification step?
+\item
+  What happens if it disappears?
+\end{itemize}
+
+An off-chain indexer that only improves UI performance is one thing. An
+off-chain signer that can authorize withdrawals is another. A sequencer
+that can delay users but not steal funds is different from a bridge
+multisig that can mint wrapped assets.
+
+Do not classify components by location. Classify them by authority and
+failure impact.
+
+\subsection{Cross-Chain Systems Create Stacked Trust Boundaries}
+
+Bridges, rollups, appchains, and cross-chain applications combine
+multiple state machines. That creates stacked trust boundaries.
+
+A simple lock-and-mint bridge may depend on:
+
+\begin{itemize}
+\tightlist
+\item
+  Source-chain finality.
+\item
+  Source bridge contract correctness.
+\item
+  Event or message commitment.
+\item
+  Relayers.
+\item
+  Validator or multisig signatures.
+\item
+  Destination bridge contract correctness.
+\item
+  Domain separation.
+\item
+  Replay protection.
+\item
+  Mint authority for the wrapped asset.
+\item
+  Governance over bridge configuration.
+\end{itemize}
+
+The wrapped token on the destination chain may look like a normal token,
+but its backing depends on the entire path.
+
+Security review should avoid statements like:
+
+\begin{lstlisting}
+This is backed by locked assets on chain A.
+\end{lstlisting}
+
+Instead say:
+
+\begin{lstlisting}
+This claim is valid if the source-chain lock event is final,
+the bridge verification path is sound,
+the relayer or validator assumptions hold,
+the destination contract enforces replay protection,
+and the bridge authority cannot mint outside the intended rules.
+\end{lstlisting}
+
+That is the trust boundary made visible.
+
+\subsection{Human Systems Are Part of the Boundary}
+
+Human systems include:
+
+\begin{itemize}
+\tightlist
+\item
+  Multisig signer coordination.
+\item
+  Incident response.
+\item
+  Governance participation.
+\item
+  Key backup and recovery.
+\item
+  Deployment review.
+\item
+  Release management.
+\item
+  Legal compliance.
+\item
+  Custody operations.
+\item
+  Oracle operations.
+\item
+  Community monitoring.
+\end{itemize}
+
+These systems can be strong or weak. They can have redundancy,
+separation of duties, checklists, audits, delays, and rehearsed response
+plans. Or they can be one engineer with a hot wallet and a production
+\passthrough{\lstinline!.env!} file.
+
+Blockchain security often fails because the code was treated as the
+whole system.
+
+Ask:
+
+\begin{lstlisting}
+Which human process can authorize or block asset movement?
+Which process can change code or configuration?
+Which process notices malicious changes?
+Which process can recover from mistakes?
+Which process is assumed to be honest, available, and competent?
+\end{lstlisting}
+
+If the answer is ``the team will handle it,'' you have found an
+unanalyzed trust boundary.
+
+\subsection{Trust Boundaries Should Be Written as Assumptions}
+
+A good trust-boundary statement is concrete enough to be challenged.
+
+Weak:
+
+\begin{lstlisting}
+The oracle is trusted.
+\end{lstlisting}
+
+Better:
+
+\begin{lstlisting}
+The lending market assumes the oracle reports a price within 1 percent of the executable market price and updates at least every 30 minutes. If the oracle is stale or manipulable, accounts may borrow against inflated collateral and leave bad debt.
+\end{lstlisting}
+
+Weak:
+
+\begin{lstlisting}
+The multisig is secure.
+\end{lstlisting}
+
+Better:
+
+\begin{lstlisting}
+The protocol assumes at least 3 of 5 multisig signers remain uncompromised and available. The multisig can upgrade the vault implementation after a 48-hour timelock, which gives users a chance to exit only if withdrawals remain available during the delay.
+\end{lstlisting}
+
+Weak:
+
+\begin{lstlisting}
+The bridge verifies messages.
+\end{lstlisting}
+
+Better:
+
+\begin{lstlisting}
+The destination contract accepts messages signed by 13 of 19 bridge validators. If 13 validators collude or are compromised, they can mint unbacked wrapped assets unless a separate rate limit or pause mechanism intervenes.
+\end{lstlisting}
+
+This is the style the rest of the book will use.
+
+\section{Mapping Who Can Move, Freeze, Mint, Burn, Upgrade, or Censor Assets}
+
+\subsection{Authority Mapping Is the Practical Output}
+
+An authority map is a structured answer to:
+
+\begin{lstlisting}
+Who can do what to which asset, through which transition, under which assumptions?
+\end{lstlisting}
+
+This is not a diagramming exercise for its own sake. It is how reviewers
+avoid missing the key that can drain the protocol.
+
+A useful authority map includes:
+
+\begin{itemize}
+\tightlist
+\item
+  Asset or state affected.
+\item
+  Transition or function.
+\item
+  Required authority.
+\item
+  Authority holder.
+\item
+  Delegation path.
+\item
+  Delay or timelock.
+\item
+  Revocation path.
+\item
+  Observability.
+\item
+  Failure impact.
+\item
+  Recovery path.
+\end{itemize}
+
+\subsection{The Core Authority Verbs}
+
+For each asset, ask who can perform these actions.
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Verb
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Meaning
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Example risk
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Move & Transfer or redirect the asset & Unauthorized transfer, malicious
+withdrawal \\
+Approve & Delegate spending or operation rights & Infinite allowance,
+operator abuse \\
+Mint & Create new claims & Inflation, unbacked wrapped assets \\
+Burn & Destroy claims & User balance destruction, forced redemption \\
+Freeze & Prevent movement or use & Censorship, trapped funds \\
+Pause & Stop protocol transitions & Emergency control abuse, liveness
+failure \\
+Upgrade & Change future rules & Malicious implementation, storage
+collision \\
+Configure & Change parameters or dependencies & Unsafe collateral
+factor, bad oracle \\
+Liquidate & Seize or sell collateral & Manipulated liquidation,
+griefing \\
+Settle & Finalize claims or messages & Premature bridge release, wrong
+finality \\
+Censor & Exclude or delay transitions & Broken exits, liquidation
+failure \\
+Observe & Learn private or pending intent & MEV, order-flow leakage \\
+Recover & Override normal flow after failure & Admin theft disguised as
+recovery \\
+\end{longtable}
+}
+
+This list should feel a little uncomfortable. Good. It reveals how many
+ways ``owning'' an asset can be affected by actors other than the
+nominal owner.
+
+\subsection{Authority Matrix}
+
+An authority matrix turns the verb list into a review artifact. For a
+tokenized vault, a first pass might look like this:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Actor or component
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Move
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Mint/burn
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Freeze/pause
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Upgrade/configure
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Censor/delay
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Observe
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Recover
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+User & Deposit, withdraw, transfer shares & Burn shares on withdrawal &
+No & No & No & Own transaction intent & Recover only through wallet/key
+process \\
+Approved spender & Move approved tokens & No & No & No & No & May infer
+user intent from approvals & No \\
+Vault contract & Move assets according to rules & Mint/burn shares &
+Enforce pause state & No unless upgradeable path exists & Can reject
+invalid exits & Emits events and exposes state & May include recovery
+hooks \\
+Strategist & Move strategy allocation & No & No & Sometimes configure
+strategy parameters & Can delay yield movement or withdrawal liquidity &
+Sees strategy state & May unwind positions \\
+Oracle/reporter & No direct movement & No & No & No & Can delay or
+distort valuation-dependent transitions & Observes/report prices & May
+trigger fallback modes \\
+Guardian & Usually no movement & No & Pause selected transitions &
+Sometimes change emergency parameters & Can delay user exits if pause is
+broad & Observes incident signals & May trigger recovery mode \\
+Governance/timelock & May authorize treasury or strategy movement & May
+change mint/burn logic by upgrade & Can assign pausers & Upgrade,
+configure, grant roles & Can delay or execute proposals & Observes and
+publishes proposals & Can replace roles or implementations \\
+Token issuer/custodian & May freeze or redeem underlying token & May
+mint/burn underlying token & Can blacklist or freeze & Can change
+issuer-side policies & Can block movement of underlying token & Observes
+compliance data & May recover or seize under issuer rules \\
+\end{longtable}
+}
+
+The matrix does not prove the system is safe. It prevents hidden
+authority from staying hidden.
+
+\subsection{Example: ERC-20 Token Authority Map}
+
+Consider an ERC-20-like token with minting, burning, pause, and
+blacklist features.
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Asset/state
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Transition
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Authority
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Failure mode
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+User balance & \passthrough{\lstinline!transfer!} & Token holder &
+Holder key compromise, unsafe recipient assumptions \\
+User balance & \passthrough{\lstinline!transferFrom!} & Approved spender
+& Infinite allowance, phishing, stale approval \\
+Total supply & \passthrough{\lstinline!mint!} & Minter role & Inflation,
+unbacked issuance \\
+User balance & \passthrough{\lstinline!burnFrom!} & Burner role or
+allowance & Unauthorized destruction \\
+All transfers & \passthrough{\lstinline!pause!} & Pauser role & Frozen
+market, griefing, centralized control \\
+Address usability & \passthrough{\lstinline!blacklist!} &
+Compliance/admin role & Censorship, mistaken freeze \\
+Implementation & \passthrough{\lstinline!upgradeTo!} & Proxy
+admin/timelock & Malicious logic, storage corruption \\
+Roles &
+\passthrough{\lstinline!grantRole!}/\passthrough{\lstinline!revokeRole!}
+& Role admin & Privilege escalation \\
+\end{longtable}
+}
+
+Now ask:
+
+\begin{itemize}
+\tightlist
+\item
+  Who holds each role?
+\item
+  Can roles be changed?
+\item
+  Are role changes delayed?
+\item
+  Are role holders multisigs, EOAs, contracts, or governance?
+\item
+  Can users detect changes before they are harmed?
+\item
+  Can the token be safely integrated by protocols that assume standard
+  ERC-20 behavior?
+\end{itemize}
+
+The ERC-20 standard defines a basic interface, including delegated
+spending through approvals and allowances.\footnote{Fabian Vogelsteller
+  and Vitalik Buterin, ``ERC-20: Token Standard'',
+  https://eips.ethereum.org/EIPS/eip-20.} It does not guarantee that
+every token has the same security properties.
+
+\subsection{Example: Vault Authority Map}
+
+Consider a yield vault.
+
+Assets and claims:
+
+\begin{itemize}
+\tightlist
+\item
+  Underlying asset.
+\item
+  Vault shares.
+\item
+  Strategy positions.
+\item
+  Pending withdrawals.
+\item
+  Reward tokens.
+\item
+  Admin roles.
+\end{itemize}
+
+Authorities:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Action
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Possible authority
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Security question
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Deposit & Any user & Can deposits manipulate share price? \\
+Withdraw & Share holder & Can withdrawals be blocked or underpaid? \\
+Allocate funds & Strategist or vault logic & Can funds be sent to
+malicious strategy? \\
+Report profit/loss & Strategy, keeper, or accountant & Can reports
+inflate share price? \\
+Change strategy & Governance/admin & Is there a timelock and exit
+window? \\
+Pause deposits & Guardian/admin & Can pause trap users or only reduce
+risk? \\
+Pause withdrawals & Guardian/admin & Is user exit dependent on trusted
+discretion? \\
+Upgrade vault & Proxy admin/governance & Can implementation steal
+assets? \\
+Sweep tokens & Admin/recovery role & Can underlying assets be swept? \\
+\end{longtable}
+}
+
+The user may ``own'' shares. But the value of those shares depends on
+accounting, strategy authority, withdrawal liveness, admin controls,
+oracle assumptions, and upgrade authority.
+
+\subsection{Example: Bridge Authority Map}
+
+Consider a bridge that locks tokens on chain A and mints wrapped tokens
+on chain B.
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Asset/state
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Authority
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Boundary
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Locked source tokens & Source bridge contract & Source-chain execution
+and finality \\
+Wrapped destination supply & Destination bridge contract & Correct
+mint/burn accounting \\
+Message validity & Validator set or light client & Signature threshold
+or proof verification \\
+Message delivery & Relayer network & Liveness and censorship \\
+Replay protection & Destination contract state & Nonce/message status
+correctness \\
+Validator set updates & Governance/admin & Capture or key compromise \\
+Emergency pause & Guardian/admin & Abuse vs incident response \\
+Upgrade path & Proxy admin/governance & Future rule changes \\
+\end{longtable}
+}
+
+A wrapped token holder does not merely depend on the token contract.
+They depend on every authority in the bridge path.
+
+\subsection{Example: Governance Authority Map}
+
+Governance should be mapped like any other privileged system.
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+State/action
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Authority
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Questions
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Proposal creation & Token threshold, proposer role & Can attackers
+cheaply create proposals? \\
+Voting power & Token balances, delegation & Can votes be borrowed,
+bribed, or custodied? \\
+Quorum & Governance parameters & Can low participation pass major
+changes? \\
+Proposal outcome & Voting mechanism & Is voting private, delayed,
+snapshot-based, or flash-loan-resistant? \\
+Execution & Timelock/executor & Who can execute after passing? \\
+Cancellation & Guardian, proposer, admin & Can malicious proposals be
+stopped? Can legitimate proposals be censored? \\
+Target calls & Governor/timelock & Can arbitrary calls seize assets or
+grant roles? \\
+Governance upgrades & Governance/admin & Can the process change
+itself? \\
+\end{longtable}
+}
+
+Governance is not separate from security. Governance is often the root
+authority over the security model.
+
+\subsection{Minimal Authority Mapping Template}
+
+Use this template when starting any review:
+
+\begin{lstlisting}
+Asset or state:
+
+Representation:
+  Where is it stored or recorded?
+
+Normal holder:
+  Who appears to own or control it?
+
+Transitions:
+  Which functions, instructions, messages, or processes affect it?
+
+Authorities:
+  Who can call or authorize those transitions?
+
+Delegation:
+  Can authority be delegated through allowances, operators, roles, signatures, or governance?
+
+Administration:
+  Who can change the rules, roles, parameters, or implementation?
+
+Ordering/finality:
+  Does the asset depend on inclusion, ordering, confirmations, settlement, or cross-domain finality?
+
+Off-chain dependencies:
+  Which oracles, custodians, signers, frontends, relayers, indexers, legal agreements, or human processes matter?
+
+Failure impact:
+  What can go wrong if each authority is malicious, compromised, unavailable, or mistaken?
+
+User exit:
+  Can users observe danger and leave before damage occurs?
+\end{lstlisting}
+
+If the template feels tedious, use it anyway. Most severe bugs hide in
+the row someone skipped.
+
+\section{Worked Example: Mapping a Tokenized Vault}
+
+Suppose a protocol offers a vault:
+
+\begin{lstlisting}
+Users deposit USDC.
+The vault mints shares.
+A strategist allocates USDC into yield strategies.
+An oracle reports strategy value.
+Users can withdraw USDC by burning shares.
+Governance can upgrade the vault after a 48-hour timelock.
+A guardian can pause deposits and withdrawals immediately.
+\end{lstlisting}
+
+The marketing version is:
+
+\begin{lstlisting}
+Users own vault shares backed by USDC and strategies.
+\end{lstlisting}
+
+The security version begins with assets:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}ll@{}}
+\toprule\noalign{}
+Asset & Representation \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+USDC deposits & Vault token balance \\
+Vault shares & Share token balances \\
+Strategy assets & External strategy accounting \\
+Pending withdrawals & Vault queue state \\
+Strategy value & Oracle-reported value \\
+Governance power & Governance token/delegation state \\
+Emergency authority & Guardian role \\
+Upgrade authority & Timelock/governance/proxy admin \\
+\end{longtable}
+}
+
+Then authority:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Action
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Authority
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Risk
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Deposit & Any user & Share inflation, nonstandard token transfer \\
+Withdraw & Share holder & Queue griefing, underpayment, stuck funds \\
+Allocate to strategy & Strategist & Loss of funds, malicious strategy \\
+Report value & Oracle/reporter & Inflated share price, bad
+redemptions \\
+Pause deposits & Guardian & Blocks new exposure \\
+Pause withdrawals & Guardian & Traps users \\
+Upgrade vault & Governance/timelock & Rule replacement \\
+Change oracle & Governance/admin & False valuation \\
+Change strategist & Governance/admin & Malicious allocation \\
+\end{longtable}
+}
+
+Now trust boundaries:
+
+\begin{lstlisting}
+flowchart LR
+    User[User] --> Wallet[Wallet / frontend]
+    Wallet --> Vault[Vault contract]
+    Vault --> Token[USDC token]
+    Vault --> Strategy[Yield strategy]
+    Strategy --> Oracle[Oracle / reporter]
+    Governance[Governance / timelock] --> Vault
+    Guardian[Guardian] --> Vault
+    TokenIssuer[USDC issuer] --> Token
+\end{lstlisting}
+
+\begin{itemize}
+\tightlist
+\item
+  USDC itself has issuer and blacklist assumptions.
+\item
+  Strategy value depends on external strategy contracts and
+  oracle/reporting.
+\item
+  Governance depends on voting distribution and timelock execution.
+\item
+  The guardian is trusted not to freeze withdrawals maliciously.
+\item
+  Users depend on frontend/wallet correctness to understand approvals.
+\item
+  The proxy admin path can change the vault's future transition rules.
+\end{itemize}
+
+The combined asset/control map is:
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Asset or control surface
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Representation
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Transition
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Authority
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Failure impact
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+User deposit & USDC balance held by vault &
+\passthrough{\lstinline!deposit!}, \passthrough{\lstinline!withdraw!} &
+User, vault logic, USDC token rules & User funds stuck, frozen, or
+misaccounted \\
+Vault shares & Share token balances & Mint on deposit, burn on
+withdrawal & Vault accounting logic & Dilution, unfair redemption, share
+inflation \\
+Strategy allocation & External strategy position & Allocate, withdraw,
+report & Strategist/governance/vault logic & Loss of funds or illiquid
+withdrawals \\
+Strategy value & Oracle or report state & Report/update valuation &
+Oracle/reporter & Overstated assets, unfair share price \\
+Withdrawal queue & Vault queue state & Enqueue, process, cancel & User,
+vault, keeper/processor & Stuck withdrawals, ordering grief \\
+Emergency pause & Pause flag & Pause/unpause & Guardian/governance &
+Trapped users or uncontrolled incident \\
+Upgrade path & Proxy implementation/admin & Queue/execute upgrade &
+Governance/timelock/proxy admin & Complete rule replacement \\
+\end{longtable}
+}
+
+Now invariants:
+
+\begin{lstlisting}
+Shares should represent a proportional claim on vault assets.
+Withdrawals should not pay more than the user's fair share.
+Deposits should not dilute existing users unfairly.
+Strategy accounting should not overstate withdrawable assets.
+No privileged role should be able to seize assets without an explicit, documented trust assumption.
+Users should be able to exit before delayed malicious upgrades execute, unless the system clearly discloses that they cannot.
+\end{lstlisting}
+
+This is the difference between describing a product and reviewing a
+system.
+
+\section{Practical Discipline: Replace Nouns With Verbs}
+
+When you see a noun, ask for the verb.
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Noun
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Better question
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Owner & What can this owner do? \\
+Admin & Which state transitions can this admin authorize? \\
+Guardian & Can the guardian only pause, or can it seize/reconfigure? \\
+Governance & Can it call arbitrary targets? Can it upgrade itself? \\
+Oracle & Which transitions rely on its data? \\
+Relayer & Is it needed for liveness, safety, or both? \\
+Sequencer & Can it censor exits or reorder liquidations? \\
+Custodian & Which assets or keys does it control? \\
+Wallet & What can it cause the user to sign? \\
+Bridge & Which domain's state is being trusted by which other domain? \\
+\end{longtable}
+}
+
+Nouns make systems sound stable. Verbs reveal power.
+
+\section{Review Questions}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  Why is an on-chain asset better understood as an enforceable claim
+  over state than as an object inside an address?
+\item
+  Give three examples of assets that are not simple token balances.
+\item
+  What is the difference between legal ownership, protocol authority,
+  custody, and economic exposure?
+\item
+  Why are allowances, operator approvals, upgrade keys, oracle keys, and
+  governance roles forms of authority?
+\item
+  Why can the words ``owner'' and ``account owner'' mislead reviewers
+  across Ethereum, Solana, and Move-style systems?
+\item
+  What is a trust boundary, and why do bridges create stacked trust
+  boundaries?
+\item
+  What information belongs in an authority map?
+\item
+  Give an example where a user owns an asset economically but cannot
+  move it without relying on another actor.
+\end{enumerate}
+
+\section{Applied Exercises}
+
+\subsection{Exercise 1: Authority Map a Token}
+
+Choose any token design with:
+
+\begin{itemize}
+\tightlist
+\item
+  Transfers.
+\item
+  Allowances.
+\item
+  Minting.
+\item
+  Burning.
+\item
+  Pausing.
+\item
+  Upgradeability.
+\end{itemize}
+
+Create an authority map with:
+
+\begin{itemize}
+\tightlist
+\item
+  Asset/state affected.
+\item
+  Transition.
+\item
+  Required authority.
+\item
+  Current authority holder.
+\item
+  Whether authority is delayed, revocable, or observable.
+\item
+  Worst-case failure if that authority is compromised.
+\end{itemize}
+
+Then answer: which authority is economically equivalent to control over
+the whole token?
+
+\subsection{Exercise 2: Trust Boundary and Custody Review}
+
+Analyze both scenarios:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  A protocol uses an oracle price to decide whether accounts can borrow.
+\item
+  A user has 100 tokens on a centralized exchange; the exchange displays
+  the balance but controls the on-chain wallet keys.
+\end{enumerate}
+
+For each scenario, write:
+
+\begin{itemize}
+\tightlist
+\item
+  The asset or claim.
+\item
+  The actor with protocol authority.
+\item
+  The custody or reporting dependency.
+\item
+  The trust-boundary statement.
+\item
+  The failure impact if the trusted actor is wrong, compromised,
+  unavailable, or dishonest.
+\end{itemize}
+
+\subsection{Exercise 3: Bridge Claim Analysis}
+
+A wrapped token on chain B claims to represent locked tokens on chain A.
+The bridge uses a 7-of-10 validator signature threshold and can be
+upgraded by a 3-of-5 multisig.
+
+Answer:
+
+\begin{itemize}
+\tightlist
+\item
+  What is the asset on chain B?
+\item
+  What is the claimed backing on chain A?
+\item
+  Who can mint on chain B?
+\item
+  What trust boundary connects chain A to chain B?
+\item
+  Which authority is stronger: the validator set or the upgrade
+  multisig?
+\item
+  What happens if 7 bridge validators collude?
+\item
+  What happens if 3 upgrade multisig signers collude?
+\end{itemize}
+
+\subsection{Exercise 4: Replace Nouns With Verbs}
+
+For each phrase, rewrite it as authority over transitions:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  ``The DAO controls the treasury.''
+\item
+  ``The guardian protects users.''
+\item
+  ``The protocol uses a trusted oracle.''
+\item
+  ``The token is backed by reserves.''
+\item
+  ``The sequencer runs the rollup.''
+\item
+  ``The admin can configure markets.''
+\end{enumerate}
+
+Example answer style:
+
+\begin{lstlisting}
+"The DAO controls the treasury" becomes:
+Token holders with enough voting power can pass a proposal that, after the timelock delay, causes the treasury contract to transfer assets or call target contracts.
+\end{lstlisting}
+
+\section{Key Takeaways}
+
+\begin{itemize}
+\tightlist
+\item
+  Assets are enforceable claims over state, not physical objects inside
+  addresses.
+\item
+  Authority is the ability to cause accepted state transitions that
+  affect assets.
+\item
+  Ownership, custody, control, legal title, and economic exposure are
+  different categories.
+\item
+  UTXOs, accounts, contract storage, Solana accounts, and Move resources
+  encode ownership differently.
+\item
+  Token balances are incomplete without allowances, operators, roles,
+  upgrade paths, and external dependencies.
+\item
+  Privileged roles, upgrade keys, oracle keys, validator keys, sequencer
+  power, and governance votes are assets because they can affect value.
+\item
+  Trust boundaries appear wherever a system relies on a claim, actor, or
+  component it cannot fully verify locally.
+\item
+  On-chain systems can still contain trust assumptions. Off-chain
+  components can be safe if their authority and failure modes are
+  constrained.
+\item
+  Authority maps turn vague security claims into reviewable facts.
+\item
+  When in doubt, replace nouns with verbs: what can this actor actually
+  do?
+\end{itemize}
+
+\section{Further Reading}
+
+\begin{itemize}
+\tightlist
+\item
+  ethereum.org,
+  \href{https://ethereum.org/developers/docs/accounts/}{``Ethereum
+  Accounts''}. Useful for distinguishing externally owned accounts,
+  contract accounts, account fields, and wallets.
+\item
+  Satoshi Nakamoto, \href{https://bitcoin.org/bitcoin.pdf}{``Bitcoin: A
+  Peer-to-Peer Electronic Cash System''}. See the transaction and
+  double-spend discussion for ownership as signature chain plus agreed
+  history.
+\item
+  Fabian Vogelsteller and Vitalik Buterin,
+  \href{https://eips.ethereum.org/EIPS/eip-20}{``ERC-20: Token
+  Standard''}. The canonical fungible token interface, including
+  transfers, approvals, and allowances.
+\item
+  William Entriken et al.,
+  \href{https://eips.ethereum.org/EIPS/eip-721}{``ERC-721: Non-Fungible
+  Token Standard''}. The NFT standard, including token ownership,
+  approvals, and operator authority.
+\item
+  Solana Foundation,
+  \href{https://solana.com/docs/core/accounts}{``Accounts''}. The core
+  reference for Solana account structure, account ownership, and runtime
+  modification rules.
+\item
+  The Move Book,
+  \href{https://move-book.com/reference/abilities/}{``Abilities''}.
+  Current reference for Move abilities, linear behavior, storage
+  constraints, and resource-like asset modeling.
+\item
+  OpenZeppelin,
+  \href{https://docs.openzeppelin.com/contracts/5.x/access-control}{``Access
+  Control''}. Practical reference for ownership, roles, timelocks, and
+  privileged smart contract actions.
+\item
+  OWASP, \href{https://owasp.org/www-community/Threat_Modeling}{``Threat
+  Modeling''}. General security framing for identifying threats,
+  assumptions, mitigations, and validation.
+\item
+  NIST SP 800-207,
+  \href{https://csrc.nist.gov/pubs/sp/800/207/final}{``Zero Trust
+  Architecture''}. Useful general framing for avoiding implicit trust
+  and focusing on users, assets, and resources.
+\end{itemize}
